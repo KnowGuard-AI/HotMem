@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+*.sqlite
+swap.jsonl
+.pytest_cache/
+.ruff_cache/
