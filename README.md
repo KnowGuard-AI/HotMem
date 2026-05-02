@@ -7,9 +7,15 @@ HotMem provides fast, queryable working memory with hybrid vector + keyword sear
 ## Install
 
 ```bash
-uv add hotmem
+pip install hotmem@git+https://github.com/KnowGuard-AI/HotMem.git
 # or
-pip install hotmem
+uv add hotmem@git+https://github.com/KnowGuard-AI/HotMem.git
+```
+
+Or add to `requirements.txt`:
+
+```
+hotmem @ git+https://github.com/KnowGuard-AI/HotMem.git
 ```
 
 ## Quick Start
