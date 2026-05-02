@@ -1,8 +1,8 @@
 # Coding Agent Session: Building HotMem
 **A local-first memory sidecar for agent applications**
-Submitted for YC Spring 2026 — Optional coding agent session evidence
-
+Submitted for YC Summer 2026 — Optional coding agent session evidence
 ---
+Built April 28 - May 1, 2026 (4 days)
 
 ## Context
 
