@@ -5,6 +5,7 @@ __pycache__/
 dist/
 build/
 .venv/
+venv/
 *.sqlite
 swap.jsonl
 .pytest_cache/
