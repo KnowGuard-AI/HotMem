@@ -49,14 +49,16 @@ def serve(port: int, mount: str | None, db_path: str | None, host: str):
     elif not db_path:
         db_path = tempfile.mktemp(suffix=".sqlite", prefix="hotmem_")
         _trace.warn(
-            "serve", "no mount or db path specified, using temp db",
+            "serve",
+            "no mount or db path specified, using temp db",
             detail={"path": db_path},
         )
 
     app = create_app(db_path=db_path, swap_path=swap_path, port=port)
 
     _trace.info(
-        "serve", f"starting server on {host}:{port}",
+        "serve",
+        f"starting server on {host}:{port}",
         detail={"db": db_path, "mount": mount},
     )
     uvicorn.run(app, host=host, port=port, log_level="warning")
@@ -64,8 +66,11 @@ def serve(port: int, mount: str | None, db_path: str | None, host: str):
 
 @main.command()
 @click.option(
-    "--file", "swap_file", default="swap.jsonl",
-    type=click.Path(), help="Swap file path.",
+    "--file",
+    "swap_file",
+    default="swap.jsonl",
+    type=click.Path(),
+    help="Swap file path.",
 )
 @click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
 def hydrate(swap_file: str, db_path: str):
@@ -82,8 +87,11 @@ def hydrate(swap_file: str, db_path: str):
 
 @main.command()
 @click.option(
-    "--file", "swap_file", default="swap.jsonl",
-    type=click.Path(), help="Output swap file path.",
+    "--file",
+    "swap_file",
+    default="swap.jsonl",
+    type=click.Path(),
+    help="Output swap file path.",
 )
 @click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
 def snapshot(swap_file: str, db_path: str):

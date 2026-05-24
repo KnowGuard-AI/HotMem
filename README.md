@@ -121,24 +121,32 @@ uv run ruff format src/ tests/   # format
 uv build                         # build wheel
 ```
 
-## Architecture (for agents)
+## Architecture
 
-Each source module is independently extensible with self-documenting headers:
+Each source module is self-contained with a docstring header describing its purpose and interface:
 
-| Module | Purpose | Extension Point |
-|--------|---------|------------------|
-| `trace.py` | Structured JSON logging | Add sinks, formatters |
-| `embed.py` | Hash-based embedder (dim=64) | Swap for real model |
-| `db.py` | SQLite + cosine UDF | Add FTS5, indexes |
-| `search.py` | Hybrid ranking | Add reranking, MMR |
-| `swap.py` | JSONL hydrate/snapshot | Add compression |
-| `mount.py` | Directory bootstrap | Add remote sync |
-| `server.py` | FastAPI endpoints | Add CORS, new routes |
-| `cli.py` | Click CLI | Add subcommands |
-| `client.py` | httpx SDK | Add async client |
+| Module | Purpose |
+|--------|---------|
+| `trace.py` | Structured JSON logging |
+| `embed.py` | Hash-based embedder (dim=64) |
+| `db.py` | SQLite storage + cosine similarity UDF |
+| `search.py` | Hybrid ranking (cosine + keyword + importance) |
+| `swap.py` | JSONL hydrate/snapshot |
+| `mount.py` | Portable directory management |
+| `server.py` | FastAPI endpoints |
+| `cli.py` | Click CLI |
+| `client.py` | Python SDK (httpx) |
 
 Every operation emits structured JSON traces to stderr with component tags:
 
 ```bash
 hotmem serve --mount ./data 2>&1 | grep '"component": "search"'
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -24,9 +24,7 @@ def test_insert_replace(tmp_db: MemoryDB):
 def test_exists(tmp_db: MemoryDB):
     vec = embed_text("fact")
     blob = pack_embedding(vec)
-    tmp_db.insert(
-        id="a", identifier="x", fact_text="fact", embedding=blob, content_hash="hash1"
-    )
+    tmp_db.insert(id="a", identifier="x", fact_text="fact", embedding=blob, content_hash="hash1")
     assert tmp_db.exists("hash1")
     assert not tmp_db.exists("hash2")
 

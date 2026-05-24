@@ -88,7 +88,8 @@ async def lifespan(app: FastAPI):
         )
 
     _trace.info(
-        "startup", "server ready",
+        "startup",
+        "server ready",
         detail={"db_path": str(db_path), "port": _state.get("port", 8711)},
     )
     yield
