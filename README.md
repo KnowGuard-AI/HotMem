@@ -1,5 +1,12 @@
 # HotMem
 
+[![CI](https://github.com/KnowGuard-AI/HotMem/actions/workflows/ci.yml/badge.svg)](https://github.com/KnowGuard-AI/HotMem/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/hotmem)](https://pypi.org/project/hotmem/)
+[![Python](https://img.shields.io/pypi/pyversions/hotmem)](https://pypi.org/project/hotmem/)
+[![codecov](https://codecov.io/gh/KnowGuard-AI/HotMem/branch/main/graph/badge.svg)](https://codecov.io/gh/KnowGuard-AI/HotMem)
+[![License: MIT](https://img.shields.io/github/license/KnowGuard-AI/HotMem)](LICENSE)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+
 A local-first memory sidecar for agent applications. One SQLite DB. One port: 8711.
 
 HotMem provides fast, queryable working memory with hybrid vector + keyword search. Store facts, retrieve them ranked, and get back LLM-ready message objects you can stitch directly into prompts.

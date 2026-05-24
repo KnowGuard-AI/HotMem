@@ -34,6 +34,7 @@ Repository = "https://github.com/KnowGuard-AI/HotMem"
 [project.optional-dependencies]
 dev = [
     "pytest>=9,<10",
+    "pytest-cov>=6,<7",
     "ruff>=0.15,<1",
 ]
 
