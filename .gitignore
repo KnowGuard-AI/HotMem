@@ -10,3 +10,5 @@ venv/
 swap.jsonl
 .pytest_cache/
 .ruff_cache/
+dev_roadmap.md
+planned-evolution.md
