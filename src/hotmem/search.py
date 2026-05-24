@@ -84,13 +84,15 @@ def search_memories(
                 content = content[:char_budget]
                 char_budget -= len(content)
 
-            messages.append({
-                "role": "system",
-                "content": content,
-                "memory_id": item["id"],
-                "identifier": item["identifier"],
-                "score": round(item["final_score"], 4),
-            })
+            messages.append(
+                {
+                    "role": "system",
+                    "content": content,
+                    "memory_id": item["id"],
+                    "identifier": item["identifier"],
+                    "score": round(item["final_score"], 4),
+                }
+            )
 
     _trace.info(
         "rank",

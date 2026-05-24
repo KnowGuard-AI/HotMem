@@ -58,12 +58,8 @@ def bootstrap_mount(mount_path: str | Path) -> MountConfig:
             "mount_path": str(mount_path),
         }
         config.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-        _trace.info(
-            "bootstrap", "created mount directory", detail={"path": str(mount_path)}
-        )
+        _trace.info("bootstrap", "created mount directory", detail={"path": str(mount_path)})
     else:
-        _trace.info(
-            "bootstrap", "using existing mount", detail={"path": str(mount_path)}
-        )
+        _trace.info("bootstrap", "using existing mount", detail={"path": str(mount_path)})
 
     return config

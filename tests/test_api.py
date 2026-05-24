@@ -29,11 +29,14 @@ def test_health(client: TestClient):
 
 
 def test_add_memory(client: TestClient):
-    resp = client.post("/v1/add", json={
-        "identifier": "vendor_x",
-        "fact": "Invoice total was $5000",
-        "importance": 0.8,
-    })
+    resp = client.post(
+        "/v1/add",
+        json={
+            "identifier": "vendor_x",
+            "fact": "Invoice total was $5000",
+            "importance": 0.8,
+        },
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert "memory_id" in data
@@ -48,10 +51,13 @@ def test_add_and_search(client: TestClient):
     client.post("/v1/add", json={"identifier": "c", "fact": "vendor y has clean history"})
 
     # Search
-    resp = client.post("/v1/search", json={
-        "query": "duplicate invoice risk",
-        "top_k": 2,
-    })
+    resp = client.post(
+        "/v1/search",
+        json={
+            "query": "duplicate invoice risk",
+            "top_k": 2,
+        },
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["count"] <= 2
