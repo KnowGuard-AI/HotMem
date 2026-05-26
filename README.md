@@ -121,21 +121,21 @@ uv run ruff format src/ tests/   # format
 uv build                         # build wheel
 ```
 
-## Architecture
+## Architecture (for agents)
 
-Each source module is self-contained with a docstring header describing its purpose and interface:
+Each source module is independently extensible with self-documenting headers:
 
-| Module | Purpose |
-|--------|---------|
-| `trace.py` | Structured JSON logging |
-| `embed.py` | Hash-based embedder (dim=64) |
-| `db.py` | SQLite storage + cosine similarity UDF |
-| `search.py` | Hybrid ranking (cosine + keyword + importance) |
-| `swap.py` | JSONL hydrate/snapshot |
-| `mount.py` | Portable directory management |
-| `server.py` | FastAPI endpoints |
-| `cli.py` | Click CLI |
-| `client.py` | Python SDK (httpx) |
+| Module | Purpose | Extension Point |
+|--------|---------|------------------|
+| `trace.py` | Structured JSON logging | Add sinks, formatters |
+| `embed.py` | Hash-based embedder (dim=64) | Swap for real model |
+| `db.py` | SQLite + cosine UDF | Add FTS5, indexes |
+| `search.py` | Hybrid ranking | Add reranking, MMR |
+| `swap.py` | JSONL hydrate/snapshot | Add compression |
+| `mount.py` | Directory bootstrap | Add remote sync |
+| `server.py` | FastAPI endpoints | Add CORS, new routes |
+| `cli.py` | Click CLI | Add subcommands |
+| `client.py` | httpx SDK | Add async client |
 
 Every operation emits structured JSON traces to stderr with component tags:
 
@@ -145,8 +145,52 @@ hotmem serve --mount ./data 2>&1 | grep '"component": "search"'
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+Contributions are welcome! Whether you're fixing bugs, adding features, or improving documentation, here's how to get started:
 
-## License
+### Setup
 
-MIT — see [LICENSE](LICENSE).
+```bash
+git clone https://github.com/KnowGuard-AI/HotMem.git
+cd HotMem
+uv sync
+```
+
+### Testing
+
+```bash
+uv run pytest              # run all tests
+uv run pytest -v          # verbose output
+uv run pytest tests/test_search.py  # run specific test file
+```
+
+### Code Quality
+
+```bash
+uv run ruff check src/ tests/    # lint
+uv run ruff format src/ tests/   # auto-format
+```
+
+Before submitting a PR:
+- Ensure all tests pass: `uv run pytest`
+- Format your code: `uv run ruff format src/ tests/`
+- Run linter: `uv run ruff check src/ tests/`
+
+### Module Guidelines
+
+When adding features, follow the module architecture:
+
+- **Keep concerns isolated** — each module has a single responsibility
+- **Add self-documenting headers** — module docstrings explain the extension point
+- **Emit JSON traces** — use `trace.py` for structured logging
+- **Write tests** — place tests in `tests/` alongside the module name
+
+### Pull Requests
+
+- Target `main` branch
+- Include tests for new features
+- Update `README.md` if adding public APIs
+- Keep commits focused and descriptive
+
+### License
+
+By contributing, you agree that your contributions will be licensed under the same license as the project.
