@@ -11,6 +11,8 @@ A local-first memory sidecar for agent applications. One SQLite DB. One port: 87
 
 HotMem provides fast, queryable working memory with hybrid vector + keyword search. Store facts, retrieve them ranked, and get back LLM-ready message objects you can stitch directly into prompts.
 
+Supports Python 3.11, 3.12, 3.13, and 3.14.
+
 ## Install
 
 ```bash
