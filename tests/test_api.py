@@ -44,6 +44,21 @@ def test_add_memory(client: TestClient):
     assert "trace_ms" in data
 
 
+def test_add_memory_with_ttl(client: TestClient):
+    resp = client.post(
+        "/v1/add",
+        json={
+            "identifier": "vendor_x",
+            "fact": "Temporary invoice note",
+            "ttl_seconds": 3600,
+        },
+    )
+    assert resp.status_code == 200
+
+    search = client.post("/v1/search", json={"query": "temporary invoice note"}).json()
+    assert search["count"] == 1
+
+
 def test_add_and_search(client: TestClient):
     # Add some facts
     client.post("/v1/add", json={"identifier": "a", "fact": "duplicate invoice risk for vendor x"})

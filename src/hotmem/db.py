@@ -8,7 +8,6 @@ Purpose:
 Interface:
     MemoryDB(db_path: str | Path)
         .insert(id, identifier, fact_text, embedding_blob, ...) -> None
-        .search_all() -> list[Row]
         .count() -> int
         .all_rows() -> list[Row]
         .exists(content_hash: str) -> bool
@@ -43,6 +42,7 @@ CREATE TABLE IF NOT EXISTS memories (
     importance      REAL DEFAULT 0.5,
     metadata_json   TEXT DEFAULT '{{}}',
     content_hash    TEXT DEFAULT '',
+    ttl_seconds     INTEGER,
     created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 CREATE INDEX IF NOT EXISTS idx_memories_identifier ON memories(identifier);
@@ -65,6 +65,11 @@ def _cosine_similarity(blob_a: bytes | None, blob_b: bytes | None) -> float | No
     return dot / (norm_a * norm_b)
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
 class MemoryDB:
     """SQLite-backed memory store with cosine similarity UDF."""
 
@@ -76,7 +81,15 @@ class MemoryDB:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.create_function("cosine_sim", 2, _cosine_similarity)
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         _trace.info("init", "database opened", detail={"path": self.db_path})
+
+    def _migrate(self) -> None:
+        """Apply additive schema updates for existing HotMem databases."""
+        if not _has_column(self._conn, "memories", "ttl_seconds"):
+            self._conn.execute("ALTER TABLE memories ADD COLUMN ttl_seconds INTEGER")
+            self._conn.commit()
+            _trace.info("migrate", "added ttl_seconds column")
 
     def insert(
         self,
@@ -91,13 +104,18 @@ class MemoryDB:
         importance: float = 0.5,
         metadata_json: str = "{}",
         content_hash: str = "",
+        ttl_seconds: int | None = None,
+        created_at: str | None = None,
     ) -> None:
         """Insert a memory row."""
         self._conn.execute(
             """INSERT OR REPLACE INTO memories
             (id, identifier, fact_text, embedding, embedding_dim, embedding_model,
-             source, importance, metadata_json, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             source, importance, metadata_json, content_hash, ttl_seconds, created_at)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )""",
             (
                 id,
                 identifier,
@@ -109,6 +127,8 @@ class MemoryDB:
                 importance,
                 metadata_json,
                 content_hash,
+                ttl_seconds,
+                created_at,
             ),
         )
         self._conn.commit()
@@ -120,6 +140,8 @@ class MemoryDB:
             """SELECT id, identifier, fact_text, importance, metadata_json, source,
                       cosine_sim(embedding, ?) AS cosine_score
                FROM memories
+               WHERE ttl_seconds IS NULL
+                  OR (strftime('%s', 'now') - strftime('%s', created_at)) < ttl_seconds
                ORDER BY cosine_score DESC""",
             (query_embedding,),
         ).fetchall()
@@ -134,7 +156,7 @@ class MemoryDB:
         """Return all memory rows as dicts (for snapshot export)."""
         rows = self._conn.execute(
             """SELECT id, identifier, fact_text, embedding_dim, embedding_model,
-                      source, importance, metadata_json, content_hash, created_at
+                      source, importance, metadata_json, content_hash, ttl_seconds, created_at
                FROM memories"""
         ).fetchall()
         return [dict(r) for r in rows]

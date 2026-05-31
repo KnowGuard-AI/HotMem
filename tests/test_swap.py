@@ -64,3 +64,25 @@ def test_snapshot_roundtrip(tmp_db: MemoryDB, tmp_path: Path):
     assert len(lines) == 1
     data = json.loads(lines[0])
     assert data["fact_text"] == "test fact"
+
+
+def test_snapshot_hydrate_preserves_ttl_and_created_at(tmp_db: MemoryDB, tmp_path: Path):
+    swap = tmp_path / "ttl_swap.jsonl"
+    record = {
+        "id": "ttl-swap",
+        "identifier": "swap",
+        "fact_text": "ttl fact",
+        "ttl_seconds": 3600,
+        "created_at": "2026-05-31T00:00:00Z",
+    }
+    swap.write_text(json.dumps(record) + "\n")
+
+    result = hydrate(tmp_db, swap)
+    assert result.loaded == 1
+
+    out = tmp_path / "out.jsonl"
+    snapshot(tmp_db, out)
+    data = json.loads(out.read_text().strip())
+
+    assert data["ttl_seconds"] == 3600
+    assert data["created_at"] == "2026-05-31T00:00:00Z"

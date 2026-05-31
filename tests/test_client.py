@@ -33,6 +33,14 @@ def test_add_and_search(mock_client: HotMemClient):
     assert "score" in memories[0]
 
 
+def test_add_with_ttl(mock_client: HotMemClient):
+    result = mock_client.add("vendor_a", "temporary client fact", ttl_seconds=3600)
+    assert "memory_id" in result
+
+    memories = mock_client.search("temporary client fact", top_k=1)
+    assert len(memories) == 1
+
+
 def test_health(mock_client: HotMemClient):
     data = mock_client.health()
     assert data["status"] == "ok"

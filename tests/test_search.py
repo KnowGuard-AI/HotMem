@@ -50,3 +50,21 @@ def test_search_ranking_uses_importance(tmp_db: MemoryDB):
 def test_search_empty_db(tmp_db: MemoryDB):
     results = search_memories(tmp_db, "anything", top_k=5)
     assert results == []
+
+
+def test_search_filters_expired_memories(tmp_db: MemoryDB):
+    _add_fact(tmp_db, "permanent", "invoice memory permanent")
+    vec = embed_text("invoice memory expired")
+    blob = pack_embedding(vec)
+    tmp_db.insert(
+        id="expired",
+        identifier="test",
+        fact_text="invoice memory expired",
+        embedding=blob,
+        ttl_seconds=1,
+        created_at="2000-01-01T00:00:00Z",
+    )
+
+    results = search_memories(tmp_db, "invoice memory", top_k=5)
+
+    assert [r["memory_id"] for r in results] == ["permanent"]
