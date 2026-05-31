@@ -29,6 +29,24 @@ jobs:
       - name: Build
         run: uv build
 
+      - name: Verify package metadata
+        run: |
+          uvx twine check dist/*
+          python - <<'PY'
+          import pathlib
+          import tarfile
+
+          readme = pathlib.Path("README.md").read_text()
+          sdist = next(pathlib.Path("dist").glob("*.tar.gz"))
+
+          with tarfile.open(sdist) as tar:
+              member = next(m for m in tar.getmembers() if m.name.endswith("/PKG-INFO"))
+              metadata = tar.extractfile(member).read().decode()
+
+          if readme.strip() not in metadata:
+              raise SystemExit("README.md was not embedded in package metadata")
+          PY
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
