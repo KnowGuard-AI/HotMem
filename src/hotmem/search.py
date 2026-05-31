@@ -2,7 +2,7 @@
 
 Purpose:
     Given a query, embed it, retrieve candidates from the DB, apply hybrid scoring
-    (cosine + keyword overlap + importance), and return LLM-ready message objects.
+    (cosine + FTS5 BM25 + importance), and return LLM-ready message objects.
 
 Interface:
     search_memories(db, query, top_k, max_chars?) -> list[MessageObject]
@@ -23,18 +23,22 @@ _trace = get_tracer("search")
 
 # Scoring weights
 W_COSINE = 0.6
-W_KEYWORD = 0.2
+W_FTS = 0.2
 W_IMPORTANCE = 0.2
 
 
-def _keyword_overlap(query: str, text: str) -> float:
-    """Compute Jaccard-like keyword overlap between query and text."""
-    q_words = set(query.lower().split())
-    t_words = set(text.lower().split())
-    if not q_words:
-        return 0.0
-    overlap = q_words & t_words
-    return len(overlap) / len(q_words)
+def _normalize_bm25(rows: list[dict[str, Any]]) -> dict[str, float]:
+    """Convert raw BM25 scores into 0..1 scores where 1.0 is best."""
+    if not rows:
+        return {}
+
+    scores = [float(row["bm25_score"]) for row in rows]
+    best = min(scores)
+    worst = max(scores)
+    if best == worst:
+        return {row["id"]: 1.0 for row in rows}
+
+    return {row["id"]: 1.0 - ((float(row["bm25_score"]) - best) / (worst - best)) for row in rows}
 
 
 def search_memories(
@@ -55,17 +59,16 @@ def search_memories(
 
         # Get all candidates with cosine scores from DB
         candidates = db.search_with_cosine(query_blob)
+        fts_scores = _normalize_bm25(db.fts_search(query))
 
         # Apply hybrid scoring
         scored = []
         for row in candidates:
             cosine_score = row.get("cosine_score") or 0.0
-            keyword_score = _keyword_overlap(query, row["fact_text"])
+            fts_score = fts_scores.get(row["id"], 0.0)
             importance = row.get("importance", 0.5)
 
-            final_score = (
-                W_COSINE * cosine_score + W_KEYWORD * keyword_score + W_IMPORTANCE * importance
-            )
+            final_score = W_COSINE * cosine_score + W_FTS * fts_score + W_IMPORTANCE * importance
 
             scored.append({**row, "final_score": final_score})
 

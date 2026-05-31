@@ -20,6 +20,7 @@ Extension: add indexes, FTS5, or WAL mode tuning here.
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 import struct
 from pathlib import Path
@@ -47,7 +48,31 @@ CREATE TABLE IF NOT EXISTS memories (
 );
 CREATE INDEX IF NOT EXISTS idx_memories_identifier ON memories(identifier);
 CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    fact_text,
+    content='memories',
+    content_rowid='rowid',
+    tokenize='porter unicode61'
+);
+
+CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, fact_text) VALUES (new.rowid, new.fact_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, fact_text)
+    VALUES('delete', old.rowid, old.fact_text);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, fact_text)
+    VALUES('delete', old.rowid, old.fact_text);
+    INSERT INTO memories_fts(rowid, fact_text) VALUES (new.rowid, new.fact_text);
+END;
 """
+
+_FTS_TOKEN_RE = re.compile(r"[\w]+")
 
 
 def _cosine_similarity(blob_a: bytes | None, blob_b: bytes | None) -> float | None:
@@ -70,6 +95,12 @@ def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(row["name"] == column for row in rows)
 
 
+def _fts_query(query: str) -> str:
+    """Convert free text into a safe FTS5 prefix query."""
+    terms = _FTS_TOKEN_RE.findall(query.lower())
+    return " ".join(f"{term}*" for term in terms)
+
+
 class MemoryDB:
     """SQLite-backed memory store with cosine similarity UDF."""
 
@@ -79,9 +110,11 @@ class MemoryDB:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA recursive_triggers=ON")
         self._conn.create_function("cosine_sim", 2, _cosine_similarity)
         self._conn.executescript(_SCHEMA)
         self._migrate()
+        self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
         _trace.info("init", "database opened", detail={"path": self.db_path})
 
     def _migrate(self) -> None:
@@ -144,6 +177,27 @@ class MemoryDB:
                   OR (strftime('%s', 'now') - strftime('%s', created_at)) < ttl_seconds
                ORDER BY cosine_score DESC""",
             (query_embedding,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def fts_search(self, query: str) -> list[dict[str, Any]]:
+        """Return full-text matches with raw BM25 scores."""
+        fts_query = _fts_query(query)
+        if not fts_query:
+            return []
+
+        rows = self._conn.execute(
+            """SELECT m.id, m.identifier, m.fact_text, m.importance, m.metadata_json,
+                      m.source, bm25(memories_fts) AS bm25_score
+               FROM memories_fts
+               JOIN memories AS m ON m.rowid = memories_fts.rowid
+               WHERE memories_fts MATCH ?
+                 AND (
+                    m.ttl_seconds IS NULL
+                    OR (strftime('%s', 'now') - strftime('%s', m.created_at)) < m.ttl_seconds
+                 )
+               ORDER BY bm25_score ASC""",
+            (fts_query,),
         ).fetchall()
         return [dict(r) for r in rows]
 
