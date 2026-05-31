@@ -46,6 +46,34 @@ def test_cosine_search(tmp_db: MemoryDB):
     assert results[0]["fact_text"] == "the quick brown fox"
 
 
+def test_fts_search(tmp_db: MemoryDB):
+    vec = embed_text("invoice validation required")
+    blob = pack_embedding(vec)
+    tmp_db.insert(
+        id="fts1",
+        identifier="test",
+        fact_text="invoice validation required",
+        embedding=blob,
+    )
+
+    results = tmp_db.fts_search("invoice valid")
+
+    assert len(results) == 1
+    assert results[0]["id"] == "fts1"
+    assert "bm25_score" in results[0]
+
+
+def test_fts_search_updates_on_replace(tmp_db: MemoryDB):
+    vec = embed_text("old invoice text")
+    blob = pack_embedding(vec)
+    tmp_db.insert(id="same", identifier="test", fact_text="old invoice text", embedding=blob)
+    tmp_db.insert(id="same", identifier="test", fact_text="new contract text", embedding=blob)
+
+    assert tmp_db.fts_search("old invoice") == []
+    results = tmp_db.fts_search("new contract")
+    assert [r["id"] for r in results] == ["same"]
+
+
 def test_all_rows(tmp_db: MemoryDB):
     vec = embed_text("fact")
     blob = pack_embedding(vec)

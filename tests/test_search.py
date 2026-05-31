@@ -47,6 +47,15 @@ def test_search_ranking_uses_importance(tmp_db: MemoryDB):
     assert results[0]["memory_id"] == "high"
 
 
+def test_search_ranking_uses_fts(tmp_db: MemoryDB):
+    _add_fact(tmp_db, "exact", "duplicate invoice risk for vendor x", importance=0.1)
+    _add_fact(tmp_db, "other", "payment terms are net 30", importance=1.0)
+
+    results = search_memories(tmp_db, "duplicate invoice", top_k=2)
+
+    assert results[0]["memory_id"] == "exact"
+
+
 def test_search_empty_db(tmp_db: MemoryDB):
     results = search_memories(tmp_db, "anything", top_k=5)
     assert results == []
