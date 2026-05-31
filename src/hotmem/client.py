@@ -44,6 +44,7 @@ class HotMemClient:
         source: str = "",
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
+        ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
         """Add a fact to memory."""
         payload = {
@@ -53,6 +54,8 @@ class HotMemClient:
             "importance": importance,
             "metadata": metadata or {},
         }
+        if ttl_seconds is not None:
+            payload["ttl_seconds"] = ttl_seconds
         resp = self._client.post("/v1/add", json=payload)
         resp.raise_for_status()
         return resp.json()

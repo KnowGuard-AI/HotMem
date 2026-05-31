@@ -91,6 +91,8 @@ def hydrate(db: MemoryDB, swap_path: str | Path) -> HydrateResult:
                     importance=record.get("importance", 0.5),
                     metadata_json=json.dumps(record.get("metadata", {})),
                     content_hash=content_hash,
+                    ttl_seconds=record.get("ttl_seconds"),
+                    created_at=record.get("created_at"),
                 )
                 loaded += 1
 

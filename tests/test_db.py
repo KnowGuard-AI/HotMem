@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from hotmem.db import MemoryDB
 from hotmem.embed import embed_text, pack_embedding
 
@@ -51,3 +53,48 @@ def test_all_rows(tmp_db: MemoryDB):
     rows = tmp_db.all_rows()
     assert len(rows) == 1
     assert rows[0]["id"] == "r1"
+    assert rows[0]["ttl_seconds"] is None
+
+
+def test_insert_with_ttl(tmp_db: MemoryDB):
+    vec = embed_text("temporary fact")
+    blob = pack_embedding(vec)
+    tmp_db.insert(
+        id="ttl1",
+        identifier="x",
+        fact_text="temporary fact",
+        embedding=blob,
+        ttl_seconds=3600,
+    )
+
+    row = tmp_db.all_rows()[0]
+    assert row["ttl_seconds"] == 3600
+
+
+def test_existing_db_gets_ttl_column(tmp_path):
+    db_path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            identifier TEXT NOT NULL,
+            fact_text TEXT NOT NULL,
+            embedding BLOB,
+            embedding_dim INTEGER,
+            embedding_model TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            importance REAL DEFAULT 0.5,
+            metadata_json TEXT DEFAULT '{}',
+            content_hash TEXT DEFAULT '',
+            created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"""
+    )
+    conn.commit()
+    conn.close()
+
+    db = MemoryDB(db_path)
+    try:
+        columns = {row["name"] for row in db._conn.execute("PRAGMA table_info(memories)")}
+        assert "ttl_seconds" in columns
+    finally:
+        db.close()

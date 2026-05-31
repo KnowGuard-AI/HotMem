@@ -49,6 +49,7 @@ class AddRequest(BaseModel):
     source: str = ""
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    ttl_seconds: int | None = Field(default=None, ge=1)
 
 
 class SearchRequest(BaseModel):
@@ -164,6 +165,7 @@ def create_app(
                 importance=req.importance,
                 metadata_json=json.dumps(req.metadata),
                 content_hash=content_hash,
+                ttl_seconds=req.ttl_seconds,
             )
         return {
             "memory_id": memory_id,
