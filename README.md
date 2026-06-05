@@ -1,3 +1,5 @@
+![HotMem banner](hotmem/hotmem-banner.png)
+
 # HotMem
 
 [![CI](https://github.com/KnowGuard-AI/HotMem/actions/workflows/ci.yml/badge.svg)](https://github.com/KnowGuard-AI/HotMem/actions/workflows/ci.yml)
