@@ -8,6 +8,7 @@ build/
 venv/
 *.sqlite
 swap.jsonl
+.DS_Store
 .pytest_cache/
 .ruff_cache/
 dev_roadmap.md
