@@ -23,6 +23,24 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Check runtime version matches package version
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+          import tomllib
+
+          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          project_version = pyproject["project"]["version"]
+          init_text = pathlib.Path("src/hotmem/__init__.py").read_text()
+          init_version = re.search(r'__version__ = "([^"]+)"', init_text).group(1)
+
+          if init_version != project_version:
+              raise SystemExit(
+                  f"hotmem.__version__ {init_version} does not match pyproject version {project_version}"
+              )
+          PY
+
       - name: Check if tag exists
         id: check
         run: |
