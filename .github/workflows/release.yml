@@ -30,13 +30,33 @@ jobs:
         run: uv build
 
       - name: Verify package metadata
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           uvx twine check dist/*
           python - <<'PY'
+          import os
           import pathlib
+          import re
           import tarfile
+          import tomllib
 
           readme = pathlib.Path("README.md").read_text()
+          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          project_version = pyproject["project"]["version"]
+          init_text = pathlib.Path("src/hotmem/__init__.py").read_text()
+          init_version = re.search(r'__version__ = "([^"]+)"', init_text).group(1)
+          release_tag = os.environ["RELEASE_TAG"]
+
+          if release_tag != f"v{project_version}":
+              raise SystemExit(
+                  f"release tag {release_tag} does not match pyproject version {project_version}"
+              )
+          if init_version != project_version:
+              raise SystemExit(
+                  f"hotmem.__version__ {init_version} does not match pyproject version {project_version}"
+              )
+
           sdist = next(pathlib.Path("dist").glob("*.tar.gz"))
 
           with tarfile.open(sdist) as tar:
