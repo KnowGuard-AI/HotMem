@@ -123,20 +123,22 @@ def hydrate(db: MemoryDB, swap_path: str | Path) -> HydrateResult:
                 else:
                     reused_embeddings += 1
 
-                records.append(MemoryRecord(
-                    id=record.get("id", uuid.uuid4().hex),
-                    identifier=identifier,
-                    fact_text=fact_text,
-                    embedding=blob,
-                    embedding_dim=record.get("embedding_dim", EMBEDDING_DIM),
-                    embedding_model=record.get("embedding_model", EMBEDDING_MODEL),
-                    source=record.get("source", "swap"),
-                    importance=record.get("importance", 0.5),
-                    metadata_json=_metadata_json(record),
-                    content_hash=content_hash,
-                    ttl_seconds=record.get("ttl_seconds"),
-                    created_at=record.get("created_at"),
-                ))
+                records.append(
+                    MemoryRecord(
+                        id=record.get("id", uuid.uuid4().hex),
+                        identifier=identifier,
+                        fact_text=fact_text,
+                        embedding=blob,
+                        embedding_dim=record.get("embedding_dim", EMBEDDING_DIM),
+                        embedding_model=record.get("embedding_model", EMBEDDING_MODEL),
+                        source=record.get("source", "swap"),
+                        importance=record.get("importance", 0.5),
+                        metadata_json=_metadata_json(record),
+                        content_hash=content_hash,
+                        ttl_seconds=record.get("ttl_seconds"),
+                        created_at=record.get("created_at"),
+                    )
+                )
 
         loaded = db.insert_many_ignore(records)
         skipped += len(records) - loaded
