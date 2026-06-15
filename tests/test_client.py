@@ -1,4 +1,4 @@
-"""Tests for hotmem.client — HotMemClient SDK."""
+"""Tests for hotmem.client - HotMemClient SDK."""
 
 from __future__ import annotations
 

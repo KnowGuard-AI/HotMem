@@ -8,8 +8,9 @@ Purpose:
 Interface:
     MemoryDB(db_path: str | Path)
         .insert(id, identifier, fact_text, embedding_blob, ...) -> None
+        .insert_many_ignore(records) -> int
         .count() -> int
-        .all_rows() -> list[Row]
+        .all_rows(include_embedding=False) -> list[Row]
         .exists(content_hash: str) -> bool
         .close() -> None
 
@@ -23,6 +24,8 @@ import math
 import re
 import sqlite3
 import struct
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +78,24 @@ END;
 _FTS_TOKEN_RE = re.compile(r"[\w]+")
 
 
+@dataclass(frozen=True)
+class MemoryRecord:
+    """Database-ready memory row."""
+
+    id: str
+    identifier: str
+    fact_text: str
+    embedding: bytes
+    embedding_dim: int = EMBEDDING_DIM
+    embedding_model: str = ""
+    source: str = ""
+    importance: float = 0.5
+    metadata_json: str = "{}"
+    content_hash: str = ""
+    ttl_seconds: int | None = None
+    created_at: str | None = None
+
+
 def _cosine_similarity(blob_a: bytes | None, blob_b: bytes | None) -> float | None:
     """SQLite UDF: cosine similarity between two packed float32 blobs."""
     if blob_a is None or blob_b is None:
@@ -124,6 +145,19 @@ class MemoryDB:
             self._conn.commit()
             _trace.info("migrate", "added ttl_seconds column")
 
+        try:
+            self._conn.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash_unique
+                   ON memories(content_hash)
+                   WHERE content_hash != ''"""
+            )
+            self._conn.commit()
+        except sqlite3.IntegrityError:
+            _trace.warn(
+                "migrate",
+                "skipped unique content_hash index because duplicate hashes exist",
+            )
+
     def insert(
         self,
         id: str,
@@ -167,6 +201,43 @@ class MemoryDB:
         self._conn.commit()
         _trace.debug("insert", f"stored memory {id[:8]}…", detail={"identifier": identifier})
 
+    def insert_many_ignore(self, records: Iterable[MemoryRecord]) -> int:
+        """Insert many memory rows in one transaction, ignoring duplicate hashes/ids."""
+        rows = [
+            (
+                record.id,
+                record.identifier,
+                record.fact_text,
+                record.embedding,
+                record.embedding_dim,
+                record.embedding_model,
+                record.source,
+                record.importance,
+                record.metadata_json,
+                record.content_hash,
+                record.ttl_seconds,
+                record.created_at,
+            )
+            for record in records
+        ]
+        if not rows:
+            return 0
+
+        cursor = self._conn.executemany(
+            """INSERT OR IGNORE INTO memories
+            (id, identifier, fact_text, embedding, embedding_dim, embedding_model,
+             source, importance, metadata_json, content_hash, ttl_seconds, created_at)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+            )""",
+            rows,
+        )
+        self._conn.commit()
+        inserted = cursor.rowcount if cursor.rowcount != -1 else 0
+        _trace.debug("insert_many", f"stored {inserted} memories", detail={"attempted": len(rows)})
+        return inserted
+
     def search_with_cosine(self, query_embedding: bytes) -> list[dict[str, Any]]:
         """Return all memories with their cosine similarity to the query embedding."""
         rows = self._conn.execute(
@@ -206,14 +277,27 @@ class MemoryDB:
         row = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()
         return row[0]
 
-    def all_rows(self) -> list[dict[str, Any]]:
+    def all_rows(self, *, include_embedding: bool = False) -> list[dict[str, Any]]:
         """Return all memory rows as dicts (for snapshot export)."""
-        rows = self._conn.execute(
+        query = (
             """SELECT id, identifier, fact_text, embedding_dim, embedding_model,
-                      source, importance, metadata_json, content_hash, ttl_seconds, created_at
+                      source, importance, metadata_json, content_hash, ttl_seconds, created_at,
+                      embedding
                FROM memories"""
-        ).fetchall()
+            if include_embedding
+            else """SELECT id, identifier, fact_text, embedding_dim, embedding_model,
+                           source, importance, metadata_json, content_hash, ttl_seconds, created_at
+                    FROM memories"""
+        )
+        rows = self._conn.execute(query).fetchall()
         return [dict(r) for r in rows]
+
+    def content_hashes(self) -> set[str]:
+        """Return non-empty content hashes currently stored in the database."""
+        rows = self._conn.execute(
+            "SELECT content_hash FROM memories WHERE content_hash != ''"
+        ).fetchall()
+        return {row["content_hash"] for row in rows}
 
     def exists(self, content_hash: str) -> bool:
         """Check if a memory with this content hash already exists."""

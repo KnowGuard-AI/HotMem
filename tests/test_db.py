@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from hotmem.db import MemoryDB
+from hotmem.db import MemoryDB, MemoryRecord
 from hotmem.embed import embed_text, pack_embedding
 
 
@@ -29,6 +29,31 @@ def test_exists(tmp_db: MemoryDB):
     tmp_db.insert(id="a", identifier="x", fact_text="fact", embedding=blob, content_hash="hash1")
     assert tmp_db.exists("hash1")
     assert not tmp_db.exists("hash2")
+
+
+def test_insert_many_ignore_deduplicates_content_hash(tmp_db: MemoryDB):
+    blob = pack_embedding(embed_text("same fact"))
+    inserted = tmp_db.insert_many_ignore(
+        [
+            MemoryRecord(
+                id="bulk1",
+                identifier="x",
+                fact_text="same fact",
+                embedding=blob,
+                content_hash="same-hash",
+            ),
+            MemoryRecord(
+                id="bulk2",
+                identifier="x",
+                fact_text="same fact",
+                embedding=blob,
+                content_hash="same-hash",
+            ),
+        ]
+    )
+
+    assert inserted == 1
+    assert tmp_db.count() == 1
 
 
 def test_cosine_search(tmp_db: MemoryDB):
@@ -82,6 +107,15 @@ def test_all_rows(tmp_db: MemoryDB):
     assert len(rows) == 1
     assert rows[0]["id"] == "r1"
     assert rows[0]["ttl_seconds"] is None
+
+
+def test_all_rows_can_include_embedding(tmp_db: MemoryDB):
+    blob = pack_embedding(embed_text("fact"))
+    tmp_db.insert(id="r1", identifier="x", fact_text="fact", embedding=blob)
+
+    rows = tmp_db.all_rows(include_embedding=True)
+
+    assert rows[0]["embedding"] == blob
 
 
 def test_insert_with_ttl(tmp_db: MemoryDB):

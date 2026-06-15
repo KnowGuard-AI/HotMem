@@ -1,4 +1,4 @@
-"""Tests for hotmem.server — FastAPI endpoint integration tests."""
+"""Tests for hotmem.server - FastAPI endpoint integration tests."""
 
 from __future__ import annotations
 

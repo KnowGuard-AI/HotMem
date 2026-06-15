@@ -1,4 +1,4 @@
-"""HotMem client — Python SDK for the memory sidecar.
+"""HotMem client - Python SDK for the memory sidecar.
 
 Purpose:
     Provide a simple, typed client for the HotMem HTTP API.

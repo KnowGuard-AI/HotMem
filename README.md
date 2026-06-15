@@ -108,9 +108,9 @@ with HotMemClient("http://127.0.0.1:8711") as client:
 
 Any directory can be a HotMem mount. The mount contains:
 
-- `hotmem.sqlite` — the database
-- `swap.jsonl` — portable JSONL backup
-- `manifest.json` — mount metadata
+- `hotmem.sqlite` - the database
+- `swap.jsonl` - portable JSONL backup
+- `manifest.json` - mount metadata
 
 Plain `.jsonl` is the canonical portable swap format. HotMem can also hydrate
 from and snapshot to `.jsonl.gz` for compressed archives.
@@ -158,4 +158,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

@@ -1,4 +1,4 @@
-"""HotMem server — FastAPI app with traced endpoints.
+"""HotMem server - FastAPI app with traced endpoints.
 
 Purpose:
     HTTP sidecar serving memory operations on a single port.
