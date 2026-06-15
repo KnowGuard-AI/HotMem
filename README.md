@@ -39,6 +39,7 @@ hotmem serve
 hotmem serve --port 8711 --mount ./data/hotmem
 hotmem serve --db ./my.sqlite
 hotmem hydrate --file swap.jsonl --db ./my.sqlite
+hotmem hydrate --file swap.jsonl.gz --db ./my.sqlite
 hotmem snapshot --file swap.jsonl --db ./my.sqlite
 hotmem status
 ```
@@ -110,6 +111,9 @@ Any directory can be a HotMem mount. The mount contains:
 - `hotmem.sqlite` — the database
 - `swap.jsonl` — portable JSONL backup
 - `manifest.json` — mount metadata
+
+Plain `.jsonl` is the canonical portable swap format. HotMem can also hydrate
+from and snapshot to `.jsonl.gz` for compressed archives.
 
 ```bash
 hotmem serve --mount /mnt/usb/hotmem     # portable memory on USB
