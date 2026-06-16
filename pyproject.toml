@@ -1,6 +1,6 @@
 [project]
 name = "hotmem"
-version = "0.1.7"
+version = "0.1.8"
 description = "A local-first memory sidecar for agent applications"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,6 +32,9 @@ Homepage = "https://github.com/KnowGuard-AI/HotMem"
 Repository = "https://github.com/KnowGuard-AI/HotMem"
 
 [project.optional-dependencies]
+mcp = [
+    "mcp>=1.0,<2",
+]
 dev = [
     "pytest>=9,<10",
     "pytest-cov>=6,<7",

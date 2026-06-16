@@ -1,13 +1,14 @@
 """HotMem CLI — command-line interface for the memory sidecar.
 
 Purpose:
-    Provide serve, hydrate, snapshot, and status commands.
+    Provide serve, mcp, hydrate, snapshot, and status commands.
     Entry point: `hotmem` (registered in pyproject.toml).
 
 Interface:
     main() — Click group with subcommands
 
-Deps: click, uvicorn, hotmem.server, hotmem.mount, hotmem.db, hotmem.swap, hotmem.trace
+Deps: click, uvicorn, hotmem.server, hotmem.mcp_server, hotmem.mount, hotmem.db,
+      hotmem.swap, hotmem.trace
 Extension: add new subcommands (e.g. `hotmem inspect`, `hotmem gc`) here.
 """
 
@@ -62,6 +63,44 @@ def serve(port: int, mount: str | None, db_path: str | None, host: str):
         detail={"db": db_path, "mount": mount},
     )
     uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+@main.command()
+@click.option("--mount", default=None, type=click.Path(), help="Mount directory path.")
+@click.option("--db", "db_path", default=None, type=click.Path(), help="Explicit database path.")
+def mcp(mount: str | None, db_path: str | None):
+    """Start the HotMem MCP server on stdio transport."""
+    import asyncio
+
+    try:
+        from hotmem.mcp_server import run as run_mcp_server
+    except ImportError as err:
+        raise click.ClickException(
+            "MCP support is not installed. Install it with: uv pip install 'hotmem[mcp]'"
+        ) from err
+
+    from hotmem.mount import bootstrap_mount
+
+    swap_path = None
+
+    if mount:
+        config = bootstrap_mount(mount)
+        db_path = str(config.db_path)
+        swap_path = str(config.swap_path)
+    elif not db_path:
+        db_path = tempfile.mktemp(suffix=".sqlite", prefix="hotmem_")
+        _trace.warn(
+            "mcp",
+            "no mount or db path specified, using temp db",
+            detail={"path": db_path},
+        )
+
+    _trace.info(
+        "mcp",
+        "starting mcp server on stdio",
+        detail={"db": db_path, "mount": mount},
+    )
+    asyncio.run(run_mcp_server(db_path=db_path, swap_path=swap_path))
 
 
 @main.command()
