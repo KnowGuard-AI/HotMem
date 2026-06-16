@@ -19,7 +19,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v4
       - run: uv venv
-      - run: uv pip install -e ".[dev]"
+      - run: uv pip install -e ".[dev,mcp]"
       - run: uv run ruff check src/ tests/
       - run: uv run ruff format --check src/ tests/
       - run: uv run pytest --cov=hotmem --cov-report=xml
