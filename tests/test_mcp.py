@@ -9,8 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from hotmem.db import MemoryDB
-from hotmem.mcp_server import (
+pytest.importorskip("mcp", reason="requires the optional [mcp] extra")
+
+from hotmem.db import MemoryDB  # noqa: E402
+from hotmem.mcp_server import (  # noqa: E402
     _handle_add_memory,
     _handle_hydrate,
     _handle_memory_health,
