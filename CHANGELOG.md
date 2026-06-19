@@ -4,6 +4,16 @@ All notable changes to HotMem will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.7] - 2026-06-15
+
+### Added
+- Async Python client with async equivalents of the synchronous SDK methods.
+- Compressed `.jsonl.gz` swap hydrate and snapshot support.
+
+### Fixed
+- Swap endpoints now return clear API errors for unsupported swap formats.
+- Malformed compressed swap files now report actionable hydration errors.
+
 ## [0.1.6] - 2026-06-09
 
 ### Added

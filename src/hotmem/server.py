@@ -1,4 +1,4 @@
-"""HotMem server — FastAPI app with traced endpoints.
+"""HotMem server - FastAPI app with traced endpoints.
 
 Purpose:
     HTTP sidecar serving memory operations on a single port.
@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from hotmem.db import MemoryDB
@@ -190,7 +190,10 @@ def create_app(
     async def hydrate(req: HydrateRequest):
         db: MemoryDB = _state["db"]
         swap = req.file or _state.get("swap_path") or "swap.jsonl"
-        result = swap_hydrate(db, swap)
+        try:
+            result = swap_hydrate(db, swap)
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
         return {
             "loaded": result.loaded,
             "skipped_dupes": result.skipped_dupes,
@@ -200,7 +203,10 @@ def create_app(
     async def snapshot(req: SnapshotRequest):
         db: MemoryDB = _state["db"]
         swap = req.file or _state.get("swap_path") or "swap.jsonl"
-        result = swap_snapshot(db, swap)
+        try:
+            result = swap_snapshot(db, swap)
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
         return {
             "exported": result.exported,
             "path": result.path,

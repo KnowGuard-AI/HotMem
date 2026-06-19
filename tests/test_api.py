@@ -1,4 +1,4 @@
-"""Tests for hotmem.server — FastAPI endpoint integration tests."""
+"""Tests for hotmem.server - FastAPI endpoint integration tests."""
 
 from __future__ import annotations
 
@@ -117,3 +117,16 @@ def test_hydrate_endpoint(client: TestClient, tmp_path: Path):
     # Verify it's searchable
     health = client.get("/v1/health").json()
     assert health["memory_count"] == 1
+
+
+def test_hydrate_endpoint_rejects_unsupported_swap_extension(
+    client: TestClient,
+    tmp_path: Path,
+):
+    swap = tmp_path / "h.txt"
+    swap.write_text(json.dumps({"identifier": "h", "fact_text": "hydrated fact"}) + "\n")
+
+    resp = client.post("/v1/hydrate", json={"file": str(swap)})
+
+    assert resp.status_code == 400
+    assert "supported: .jsonl, .jsonl.gz" in resp.json()["detail"]
