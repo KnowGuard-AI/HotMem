@@ -29,3 +29,46 @@ jobs:
         with:
           files: coverage.xml
           fail_ci_if_error: false
+
+  adapters:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v4
+      - run: uv venv
+      - run: uv pip install -e ".[dev,mcp]"
+      - name: Install adapters
+        run: |
+          uv pip install -e adapters/langchain
+          uv pip install -e adapters/crewai
+          uv pip install -e adapters/autogen
+          uv pip install -e adapters/pydanticai
+          uv pip install -e adapters/hermes
+      - name: Lint adapters
+        run: uv run ruff check adapters/
+      - name: Test adapters
+        run: uv run pytest adapters/
+
+  typescript:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ["18", "20"]
+    defaults:
+      run:
+        working-directory: ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test

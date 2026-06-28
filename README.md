@@ -104,6 +104,27 @@ with HotMemClient("http://127.0.0.1:8711") as client:
     messages = memories + [{"role": "user", "content": "Analyze this vendor."}]
 ```
 
+## Ecosystem
+
+HotMem core stays zero-dep. Framework adapters live in `adapters/`, each a separate
+pip-installable package wrapping `HotMemClient`:
+
+| Package | Framework |
+| --- | --- |
+| `hotmem-langchain` | LangChain (`BaseChatMessageHistory`, `BaseRetriever`) |
+| `hotmem-crewai` | CrewAI memory backend |
+| `hotmem-autogen` | AutoGen memory plugin |
+| `hotmem-pydanticai` | Pydantic AI dependency + tools |
+| `hotmem-hermes` | [Hermes Agent](https://github.com/NousResearch/hermes-agent) memory provider plugin |
+
+The `hotmem-hermes` adapter is the deep integration: HotMem implements the Hermes
+[Memory Provider Plugin](https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin)
+interface, so Hermes calls into HotMem at every lifecycle point automatically
+(prefetch, sync, memory-write mirroring, pre-compress extraction, session-end snapshot).
+
+A typed TypeScript client (`npm install hotmem`) lives in `ts/` — zero-dependency,
+works in Node 18+, Deno, Bun, and edge runtimes.
+
 ## Mounting
 
 Any directory can be a HotMem mount. The mount contains:

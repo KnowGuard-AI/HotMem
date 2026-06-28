@@ -1,0 +1,54 @@
+{
+  "name": "hotmem",
+  "version": "0.1.0",
+  "description": "A typed TypeScript client for the HotMem local-first memory sidecar.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "memory",
+    "agent",
+    "llm",
+    "sidecar",
+    "vector-search",
+    "hotmem"
+  ],
+  "license": "MIT",
+  "author": "valiantone",
+  "homepage": "https://github.com/KnowGuard-AI/HotMem",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KnowGuard-AI/HotMem",
+    "directory": "ts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.27.7": true,
+    "esbuild@0.21.5": true
+  }
+}
