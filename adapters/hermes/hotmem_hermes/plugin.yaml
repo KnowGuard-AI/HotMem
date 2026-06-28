@@ -1,0 +1,9 @@
+name: hotmem
+version: 0.1.0
+description: "Local-first HotMem memory sidecar as a Hermes memory provider."
+hooks:
+  - prefetch
+  - sync_turn
+  - on_memory_write
+  - on_pre_compress
+  - on_session_end
