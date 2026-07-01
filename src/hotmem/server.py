@@ -19,6 +19,7 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
+from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,8 @@ from hotmem.swap import snapshot as swap_snapshot
 from hotmem.trace import Timer, get_tracer, new_trace_id
 
 _trace = get_tracer("server")
+
+_VERSION = pkg_version("hotmem")
 
 # ── App state (set during lifespan) ──────────────────────────────────────────
 
@@ -113,7 +116,7 @@ def create_app(
     app = FastAPI(
         title="HotMem",
         description="Local-first memory sidecar for agent applications",
-        version="0.1.0",
+        version=_VERSION,
         lifespan=lifespan,
     )
 
