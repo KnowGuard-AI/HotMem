@@ -1,0 +1,28 @@
+# Build artifacts
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+
+# Version control
+.git/
+.github/
+.gitignore
+
+# Tests and dev tooling
+tests/
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Docs (built in CI, not needed in image)
+docs/
+site/
+mkdocs.yml
+
+# Local data
+data/
+hotmem/
+*.sqlite
+*.jsonl
+*.jsonl.gz
