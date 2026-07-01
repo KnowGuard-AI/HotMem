@@ -200,3 +200,18 @@ def openapi(output: str | None, fmt: str):
             click.echo(yaml.dump(spec, sort_keys=False, default_flow_style=False))
         else:
             click.echo(json.dumps(spec, indent=2))
+
+
+@main.command()
+@click.option("--db", "db_path", default=None, type=click.Path(), help="Database file path.")
+@click.option("--url", default=None, help="Running server URL (e.g. http://127.0.0.1:8711).")
+def playground(db_path: str | None, url: str | None):
+    """Interactive terminal UI for add/search/inspect."""
+    from hotmem.playground import run_playground
+
+    try:
+        run_playground(db_path=db_path, url=url)
+    except ImportError as err:
+        raise click.ClickException(str(err)) from err
+    except ValueError as err:
+        raise click.ClickException(str(err)) from err
