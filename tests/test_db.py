@@ -160,3 +160,128 @@ def test_existing_db_gets_ttl_column(tmp_path):
         assert "ttl_seconds" in columns
     finally:
         db.close()
+
+
+def test_v2_migration_opens_v01_db(tmp_path):
+    db_path = tmp_path / "v01.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            identifier TEXT NOT NULL,
+            fact_text TEXT NOT NULL,
+            embedding BLOB,
+            embedding_dim INTEGER,
+            embedding_model TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            importance REAL DEFAULT 0.5,
+            metadata_json TEXT DEFAULT '{}',
+            content_hash TEXT DEFAULT '',
+            ttl_seconds INTEGER,
+            created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )"""
+    )
+    blob = pack_embedding(embed_text("legacy fact"))
+    conn.execute(
+        """INSERT INTO memories (id, identifier, fact_text, embedding)
+           VALUES ('legacy1', 'x', 'legacy fact', ?)""",
+        (blob,),
+    )
+    conn.commit()
+    conn.close()
+
+    db = MemoryDB(db_path)
+    try:
+        columns = {row["name"] for row in db._conn.execute("PRAGMA table_info(memories)")}
+        for col in (
+            "namespace",
+            "tier",
+            "memory_type",
+            "source_uri",
+            "source_format",
+            "source_checksum",
+            "byte_offset",
+            "byte_length",
+            "updated_at",
+            "snapshot_id",
+            "promotion_state",
+            "promotion_candidate",
+            "parent_memory",
+            "related_memories",
+            "tags",
+            "schema_version",
+        ):
+            assert col in columns, f"missing v2 column: {col}"
+
+        version = db._conn.execute("PRAGMA user_version").fetchone()[0]
+        assert version == 2
+
+        row = db.all_rows()[0]
+        assert row["id"] == "legacy1"
+        assert row["promotion_state"] == "HOT"
+        assert row["schema_version"] == 1
+        assert row["tags"] == "[]"
+        assert db.count() == 1
+    finally:
+        db.close()
+
+
+def test_v2_fields_roundtrip(tmp_db: MemoryDB):
+    blob = pack_embedding(embed_text("provenance fact"))
+    tmp_db.insert(
+        id="v2-1",
+        identifier="ns-a",
+        fact_text="provenance fact",
+        embedding=blob,
+        namespace="contracts",
+        tier="hot",
+        memory_type="fact",
+        source_uri="file:///data/contract.pdf",
+        source_format="pdf",
+        source_checksum="sha256:abc123",
+        byte_offset=4096,
+        byte_length=128,
+        updated_at="2026-07-01T00:00:00Z",
+        snapshot_id="snap-1",
+        promotion_state="READY",
+        promotion_candidate=1,
+        parent_memory="parent-1",
+        related_memories='["m1","m2"]',
+        tags='["legal","contract"]',
+        schema_version=2,
+    )
+
+    row = tmp_db.all_rows()[0]
+    assert row["namespace"] == "contracts"
+    assert row["tier"] == "hot"
+    assert row["memory_type"] == "fact"
+    assert row["source_uri"] == "file:///data/contract.pdf"
+    assert row["source_format"] == "pdf"
+    assert row["source_checksum"] == "sha256:abc123"
+    assert row["byte_offset"] == 4096
+    assert row["byte_length"] == 128
+    assert row["updated_at"] == "2026-07-01T00:00:00Z"
+    assert row["snapshot_id"] == "snap-1"
+    assert row["promotion_state"] == "READY"
+    assert row["promotion_candidate"] == 1
+    assert row["parent_memory"] == "parent-1"
+    assert row["related_memories"] == '["m1","m2"]'
+    assert row["tags"] == '["legal","contract"]'
+    assert row["schema_version"] == 2
+
+
+def test_v2_fields_default_when_unset(tmp_db: MemoryDB):
+    blob = pack_embedding(embed_text("plain fact"))
+    tmp_db.insert(id="d1", identifier="x", fact_text="plain fact", embedding=blob)
+
+    row = tmp_db.all_rows()[0]
+    assert row["namespace"] == ""
+    assert row["tier"] == "hot"
+    assert row["memory_type"] == "fact"
+    assert row["source_uri"] == ""
+    assert row["promotion_state"] == "HOT"
+    assert row["promotion_candidate"] == 0
+    assert row["tags"] == "[]"
+    assert row["schema_version"] == 1
+    assert row["byte_offset"] is None
+    assert row["byte_length"] is None
