@@ -189,6 +189,26 @@ def create_app(
             "trace_ms": round(t.ms, 2),
         }
 
+    @app.get("/v1/memories")
+    async def list_memories(
+        identifier: str,
+        order: str = "asc",
+        limit: int = 100,
+    ):
+        """Return memories for an identifier in created_at order."""
+        db: MemoryDB = _state["db"]
+        if order not in ("asc", "desc"):
+            raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'")
+        if limit < 1 or limit > 1000:
+            raise HTTPException(status_code=400, detail="limit must be 1..1000")
+        with Timer() as t:
+            rows = db.list_by_identifier(identifier, order=order, limit=limit)
+        return {
+            "memories": rows,
+            "count": len(rows),
+            "trace_ms": round(t.ms, 2),
+        }
+
     @app.post("/v1/hydrate")
     async def hydrate(req: HydrateRequest):
         db: MemoryDB = _state["db"]

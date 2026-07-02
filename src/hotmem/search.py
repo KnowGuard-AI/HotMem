@@ -94,6 +94,7 @@ def search_memories(
                     "memory_id": item["id"],
                     "identifier": item["identifier"],
                     "score": round(item["final_score"], 4),
+                    "created_at": item.get("created_at"),
                 }
             )
 

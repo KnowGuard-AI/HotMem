@@ -362,7 +362,7 @@ class MemoryDB:
         """Return all memories with their cosine similarity to the query embedding."""
         rows = self._conn.execute(
             """SELECT id, identifier, fact_text, importance, metadata_json, source,
-                      cosine_sim(embedding, ?) AS cosine_score
+                      created_at, cosine_sim(embedding, ?) AS cosine_score
                FROM memories
                WHERE ttl_seconds IS NULL
                   OR (strftime('%s', 'now') - strftime('%s', created_at)) < ttl_seconds
@@ -379,7 +379,7 @@ class MemoryDB:
 
         rows = self._conn.execute(
             """SELECT m.id, m.identifier, m.fact_text, m.importance, m.metadata_json,
-                      m.source, bm25(memories_fts) AS bm25_score
+                      m.source, m.created_at, bm25(memories_fts) AS bm25_score
                FROM memories_fts
                JOIN memories AS m ON m.rowid = memories_fts.rowid
                WHERE memories_fts MATCH ?
@@ -422,11 +422,36 @@ class MemoryDB:
         return {row["content_hash"] for row in rows}
 
     def exists(self, content_hash: str) -> bool:
-        """Check if a memory with this content hash already exists."""
+        """Check if a memory with this content_hash already exists."""
         row = self._conn.execute(
             "SELECT 1 FROM memories WHERE content_hash = ? LIMIT 1", (content_hash,)
         ).fetchone()
         return row is not None
+
+    def list_by_identifier(
+        self,
+        identifier: str,
+        *,
+        order: str = "asc",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return memories for an identifier in created_at order (chronological).
+
+        Excludes TTL-expired memories, consistent with search.
+        """
+        direction = "ASC" if order.lower() == "asc" else "DESC"
+        rows = self._conn.execute(
+            f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
+                       created_at
+                FROM memories
+                WHERE identifier = ?
+                  AND (ttl_seconds IS NULL
+                       OR (strftime('%s', 'now') - strftime('%s', created_at)) < ttl_seconds)
+                ORDER BY created_at {direction}
+                LIMIT ?""",
+            (identifier, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def close(self) -> None:
         """Close the database connection."""
