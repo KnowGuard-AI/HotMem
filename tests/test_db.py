@@ -285,3 +285,71 @@ def test_v2_fields_default_when_unset(tmp_db: MemoryDB):
     assert row["schema_version"] == 1
     assert row["byte_offset"] is None
     assert row["byte_length"] is None
+
+
+def test_list_by_identifier_chronological(tmp_db: MemoryDB):
+    blob = pack_embedding(embed_text("fact"))
+    tmp_db.insert(
+        id="first",
+        identifier="chat",
+        fact_text="hello",
+        embedding=blob,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    tmp_db.insert(
+        id="second",
+        identifier="chat",
+        fact_text="world",
+        embedding=blob,
+        created_at="2026-06-01T00:00:00Z",
+    )
+    tmp_db.insert(
+        id="other",
+        identifier="other",
+        fact_text="noise",
+        embedding=blob,
+        created_at="2026-03-01T00:00:00Z",
+    )
+
+    asc = tmp_db.list_by_identifier("chat", order="asc")
+    assert [r["id"] for r in asc] == ["first", "second"]
+    assert all("created_at" in r for r in asc)
+
+    desc = tmp_db.list_by_identifier("chat", order="desc")
+    assert [r["id"] for r in desc] == ["second", "first"]
+
+
+def test_list_by_identifier_limit(tmp_db: MemoryDB):
+    blob = pack_embedding(embed_text("fact"))
+    for i in range(5):
+        tmp_db.insert(
+            id=f"m{i}",
+            identifier="chat",
+            fact_text=f"msg {i}",
+            embedding=blob,
+            created_at=f"2026-01-0{i + 1}T00:00:00Z",
+        )
+    rows = tmp_db.list_by_identifier("chat", order="asc", limit=2)
+    assert len(rows) == 2
+    assert [r["id"] for r in rows] == ["m0", "m1"]
+
+
+def test_list_by_identifier_excludes_expired(tmp_db: MemoryDB):
+    blob = pack_embedding(embed_text("fact"))
+    tmp_db.insert(
+        id="live",
+        identifier="chat",
+        fact_text="alive",
+        embedding=blob,
+        created_at="2026-01-01T00:00:00Z",
+    )
+    tmp_db.insert(
+        id="dead",
+        identifier="chat",
+        fact_text="expired",
+        embedding=blob,
+        ttl_seconds=1,
+        created_at="2000-01-01T00:00:00Z",
+    )
+    rows = tmp_db.list_by_identifier("chat", order="asc")
+    assert [r["id"] for r in rows] == ["live"]

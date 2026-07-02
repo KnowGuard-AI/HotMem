@@ -77,3 +77,10 @@ def test_search_filters_expired_memories(tmp_db: MemoryDB):
     results = search_memories(tmp_db, "invoice memory", top_k=5)
 
     assert [r["memory_id"] for r in results] == ["permanent"]
+
+
+def test_search_includes_created_at(tmp_db: MemoryDB):
+    _add_fact(tmp_db, "1", "invoice validation required")
+    results = search_memories(tmp_db, "invoice", top_k=5)
+    assert "created_at" in results[0]
+    assert results[0]["created_at"] is not None

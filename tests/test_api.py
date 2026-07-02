@@ -130,3 +130,53 @@ def test_hydrate_endpoint_rejects_unsupported_swap_extension(
 
     assert resp.status_code == 400
     assert "supported: .jsonl, .jsonl.gz" in resp.json()["detail"]
+
+
+def test_search_includes_created_at(client: TestClient):
+    client.post(
+        "/v1/add",
+        json={"identifier": "user", "fact": "prefers dark mode"},
+    )
+    resp = client.post("/v1/search", json={"query": "theme", "top_k": 5})
+    assert resp.status_code == 200
+    memories = resp.json()["memories"]
+    assert len(memories) == 1
+    assert "created_at" in memories[0]
+    assert memories[0]["created_at"] is not None
+
+
+def test_list_memories_endpoint(client: TestClient):
+    for i in range(3):
+        client.post(
+            "/v1/add",
+            json={"identifier": "chat", "fact": f"message {i}"},
+        )
+
+    resp = client.get("/v1/memories", params={"identifier": "chat", "order": "asc"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 3
+    assert all("created_at" in m for m in data["memories"])
+
+
+def test_list_memories_filters_by_identifier(client: TestClient):
+    client.post("/v1/add", json={"identifier": "a", "fact": "aaa"})
+    client.post("/v1/add", json={"identifier": "b", "fact": "bbb"})
+
+    resp = client.get("/v1/memories", params={"identifier": "a"})
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 1
+
+
+def test_list_memories_limit(client: TestClient):
+    for i in range(5):
+        client.post("/v1/add", json={"identifier": "chat", "fact": f"m{i}"})
+
+    resp = client.get("/v1/memories", params={"identifier": "chat", "limit": 2})
+    assert resp.status_code == 200
+    assert resp.json()["count"] == 2
+
+
+def test_list_memories_rejects_bad_order(client: TestClient):
+    resp = client.get("/v1/memories", params={"identifier": "x", "order": "sideways"})
+    assert resp.status_code == 400
