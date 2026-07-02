@@ -24,9 +24,7 @@ import math
 import re
 import sqlite3
 import struct
-import threading
 from collections.abc import Iterable
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,66 +38,14 @@ _trace = get_tracer("db")
 # statement generation and SQLite-to-SQLite import projection so the three
 # write paths cannot drift.
 _MEMORY_COLUMNS: tuple[str, ...] = (
-    "id",
-    "identifier",
-    "fact_text",
-    "embedding",
-    "embedding_dim",
-    "embedding_model",
-    "source",
-    "importance",
-    "metadata_json",
-    "content_hash",
-    "ttl_seconds",
-    "created_at",
-    "namespace",
-    "tier",
-    "memory_type",
-    "source_uri",
-    "source_format",
-    "source_checksum",
-    "byte_offset",
-    "byte_length",
-    "updated_at",
-    "snapshot_id",
-    "promotion_state",
-    "promotion_candidate",
-    "parent_memory",
-    "related_memories",
-    "tags",
-    "schema_version",
+    "id", "identifier", "fact_text", "embedding", "embedding_dim",
+    "embedding_model", "source", "importance", "metadata_json",
+    "content_hash", "ttl_seconds", "created_at", "namespace", "tier",
+    "memory_type", "source_uri", "source_format", "source_checksum",
+    "byte_offset", "byte_length", "updated_at", "snapshot_id",
+    "promotion_state", "promotion_candidate", "parent_memory",
+    "related_memories", "tags", "schema_version",
 )
-
-# SQL default expressions for optional columns, used when projecting rows from
-# a source DB that lacks them (v0.1 schema). Required columns (id, identifier,
-# fact_text, embedding) have no default and must exist in the source.
-_COLUMN_DEFAULTS: dict[str, str] = {
-    "embedding_dim": str(EMBEDDING_DIM),
-    "embedding_model": "''",
-    "source": "''",
-    "importance": "0.5",
-    "metadata_json": "'{}'",
-    "content_hash": "''",
-    "ttl_seconds": "NULL",
-    "created_at": "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
-    "namespace": "''",
-    "tier": "'hot'",
-    "memory_type": "'fact'",
-    "source_uri": "''",
-    "source_format": "''",
-    "source_checksum": "''",
-    "byte_offset": "NULL",
-    "byte_length": "NULL",
-    "updated_at": "NULL",
-    "snapshot_id": "''",
-    "promotion_state": "'HOT'",
-    "promotion_candidate": "0",
-    "parent_memory": "''",
-    "related_memories": "'[]'",
-    "tags": "'[]'",
-    "schema_version": "1",
-}
-
 
 # TTL-live predicate — single source of truth so search and list agree on what
 # "expired" means. `alias` is "" for the unqualified table or "m." for joins.
@@ -254,7 +200,6 @@ class MemoryDB:
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = str(db_path)
-        self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -493,74 +438,75 @@ class MemoryDB:
     def import_sqlite(self, src_path: str | Path) -> tuple[int, int]:
         """Merge memories from another HotMem SQLite database (fast-path).
 
-        ATTACHs the source read-only, validates it has a memories table, and
-        inserts rows that don't already exist (dedupe on content_hash via the
-        unique index). Embeddings are reused as-is — no recompute and no Python
-        materialization: a single INSERT ... SELECT copies rows inside SQLite.
-        Handles v0.1 and v2 source schemas (missing columns default via
-        COALESCE). Column projection uses a fixed whitelist, never raw source
-        column names, so a crafted source DB cannot inject SQL.
+        Opens the source on a SEPARATE connection and only ever SELECTs from it,
+        so a crafted source DB's triggers cannot affect the main database (a
+        different connection). Rows are streamed in batches and inserted via
+        insert_many_ignore, deduping on content_hash through the unique index.
+        Embeddings are reused as-is — no recompute. Handles v0.1 and v2 source
+        schemas (missing optional columns take dataclass defaults).
+
+        Using a separate connection (rather than ATTACH) avoids connection-global
+        schema state on the shared check_same_thread=False connection and works
+        with WAL-mode source databases across SQLite versions.
 
         Returns (loaded, skipped_dupes).
         """
         resolved = Path(src_path).resolve()
-        # Read-only URI prevents a crafted source DB from writing to the main
-        # connection or mutating itself during the import. (immutable=1 is
-        # avoided because source DBs may use WAL and immutable skips the WAL.)
-        uri = f"file:{resolved}?mode=ro"
-        alias = "_hotmem_src"
-        with self._lock:
-            self._conn.execute(f"ATTACH DATABASE ? AS {alias}", (uri,))
-            try:
-                tables = {
-                    row["name"]
-                    for row in self._conn.execute(
-                        f"SELECT name FROM {alias}.sqlite_master WHERE type='table'"
-                    ).fetchall()
-                }
-                if "memories" not in tables:
-                    raise ValueError(
-                        f"source database {resolved} has no 'memories' table; not a HotMem DB"
-                    )
-
-                src_columns = {
-                    row["name"]
-                    for row in self._conn.execute(f"PRAGMA {alias}.table_info(memories)").fetchall()
-                }
-                required = {"id", "identifier", "fact_text", "embedding"}
-                missing = required - src_columns
-                if missing:
-                    raise ValueError(
-                        f"source memories table missing required columns: {sorted(missing)}"
-                    )
-
-                # Project each canonical column from the source, defaulting
-                # missing optional columns. Only whitelisted column names are
-                # referenced — source column names are never interpolated.
-                # Unqualified names resolve to the single FROM table below.
-                projection = ", ".join(
-                    f"COALESCE({c}, {_COLUMN_DEFAULTS[c]})"
-                    if c in src_columns and c in _COLUMN_DEFAULTS
-                    else c
-                    if c in src_columns
-                    else _COLUMN_DEFAULTS.get(c, "NULL")
-                    for c in _MEMORY_COLUMNS
+        src_conn = sqlite3.connect(str(resolved))
+        src_conn.row_factory = sqlite3.Row
+        loaded = 0
+        skipped = 0
+        try:
+            tables = {
+                row["name"]
+                for row in src_conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "memories" not in tables:
+                raise ValueError(
+                    f"source database {resolved} has no 'memories' table; not a HotMem DB"
                 )
 
-                count_row = self._conn.execute(f"SELECT COUNT(*) FROM {alias}.memories").fetchone()
-                attempted = count_row[0] if count_row else 0
-
-                cursor = self._conn.execute(
-                    f"INSERT OR IGNORE INTO memories ({', '.join(_MEMORY_COLUMNS)}) "
-                    f"SELECT {projection} FROM {alias}.memories"
+            src_columns = {
+                row["name"]
+                for row in src_conn.execute("PRAGMA table_info(memories)").fetchall()
+            }
+            required = {"id", "identifier", "fact_text", "embedding"}
+            missing = required - src_columns
+            if missing:
+                raise ValueError(
+                    f"source memories table missing required columns: {sorted(missing)}"
                 )
-                self._conn.commit()
-                loaded = cursor.rowcount if cursor.rowcount != -1 else 0
-                skipped = attempted - loaded
-            finally:
-                with suppress(sqlite3.OperationalError):
-                    self._conn.execute(f"DETACH DATABASE {alias}")
-                self._conn.commit()
+
+            # SELECT only whitelisted canonical columns that exist in the source.
+            # Source-provided column names are never interpolated into SQL, so a
+            # crafted column name cannot inject.
+            select_cols = [c for c in _MEMORY_COLUMNS if c in src_columns]
+            col_sql = ", ".join(select_cols)
+            cursor = src_conn.execute(f"SELECT {col_sql} FROM memories")
+
+            seen_hashes = self.content_hashes()
+            while True:
+                batch = cursor.fetchmany(1000)
+                if not batch:
+                    break
+                records: list[MemoryRecord] = []
+                for row in batch:
+                    d = dict(row)
+                    ch = d.get("content_hash", "")
+                    if ch and ch in seen_hashes:
+                        skipped += 1
+                        continue
+                    if ch:
+                        seen_hashes.add(ch)
+                    # Build from the columns present; dataclass defaults fill the
+                    # rest (missing v2 columns in v0.1 sources).
+                    records.append(MemoryRecord(**{c: d[c] for c in select_cols}))
+                if records:
+                    loaded += self.insert_many_ignore(records)
+        finally:
+            src_conn.close()
 
         _trace.info(
             "import_sqlite",
