@@ -38,14 +38,36 @@ _trace = get_tracer("db")
 # statement generation and SQLite-to-SQLite import projection so the three
 # write paths cannot drift.
 _MEMORY_COLUMNS: tuple[str, ...] = (
-    "id", "identifier", "fact_text", "embedding", "embedding_dim",
-    "embedding_model", "source", "importance", "metadata_json",
-    "content_hash", "ttl_seconds", "created_at", "namespace", "tier",
-    "memory_type", "source_uri", "source_format", "source_checksum",
-    "byte_offset", "byte_length", "updated_at", "snapshot_id",
-    "promotion_state", "promotion_candidate", "parent_memory",
-    "related_memories", "tags", "schema_version",
+    "id",
+    "identifier",
+    "fact_text",
+    "embedding",
+    "embedding_dim",
+    "embedding_model",
+    "source",
+    "importance",
+    "metadata_json",
+    "content_hash",
+    "ttl_seconds",
+    "created_at",
+    "namespace",
+    "tier",
+    "memory_type",
+    "source_uri",
+    "source_format",
+    "source_checksum",
+    "byte_offset",
+    "byte_length",
+    "updated_at",
+    "snapshot_id",
+    "promotion_state",
+    "promotion_candidate",
+    "parent_memory",
+    "related_memories",
+    "tags",
+    "schema_version",
 )
+
 
 # TTL-live predicate — single source of truth so search and list agree on what
 # "expired" means. `alias` is "" for the unqualified table or "m." for joins.
@@ -469,8 +491,7 @@ class MemoryDB:
                 )
 
             src_columns = {
-                row["name"]
-                for row in src_conn.execute("PRAGMA table_info(memories)").fetchall()
+                row["name"] for row in src_conn.execute("PRAGMA table_info(memories)").fetchall()
             }
             required = {"id", "identifier", "fact_text", "embedding"}
             missing = required - src_columns
