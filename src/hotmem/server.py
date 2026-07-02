@@ -19,6 +19,7 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,13 @@ from hotmem.trace import Timer, get_tracer, new_trace_id
 
 _trace = get_tracer("server")
 
-_VERSION = pkg_version("hotmem")
+try:
+    _VERSION = pkg_version("hotmem")
+except PackageNotFoundError:
+    try:
+        from hotmem import __version__ as _VERSION
+    except ImportError:
+        _VERSION = "0.0.0+unknown"
 
 # ── App state (set during lifespan) ──────────────────────────────────────────
 

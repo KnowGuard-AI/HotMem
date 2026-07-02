@@ -325,3 +325,37 @@ def test_hydrate_sqlite_imports_v01_source(tmp_path):
     assert row["promotion_state"] == "HOT"
     assert row["schema_version"] == 1
     dst.close()
+
+
+def test_hydrate_sqlite_rejects_malicious_column_name(tmp_path):
+    """A crafted source DB with a SQL-injection column name must not execute."""
+    import sqlite3
+
+    evil_path = tmp_path / "evil.sqlite"
+    conn = sqlite3.connect(evil_path)
+    # Column name that would break out of a SELECT if interpolated raw.
+    evil_col = "x) UNION SELECT sql FROM sqlite_master--"
+    create_sql = (
+        'CREATE TABLE memories ("id" TEXT, "identifier" TEXT, '
+        '"fact_text" TEXT, "embedding" BLOB, '
+        f'"{evil_col}" TEXT)'
+    )
+    conn.execute(create_sql)
+    conn.execute(
+        "INSERT INTO memories (id, identifier, fact_text, embedding)"
+        " VALUES ('e1', 'x', 'evil', X'00')"
+    )
+    conn.commit()
+    conn.close()
+
+    dst = MemoryDB(tmp_path / "dst.sqlite")
+    # import_sqlite projects only whitelisted columns, so the malicious column
+    # is never referenced. The row imports cleanly via the known columns.
+    result = hydrate(dst, evil_path)
+    assert result.loaded == 1
+    assert dst.count() == 1
+    # The injected column must not have leaked sqlite_master contents anywhere.
+    row = dst.all_rows()[0]
+    assert row["id"] == "e1"
+    assert row["fact_text"] == "evil"
+    dst.close()
