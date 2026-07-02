@@ -47,7 +47,23 @@ CREATE TABLE IF NOT EXISTS memories (
     metadata_json   TEXT DEFAULT '{{}}',
     content_hash    TEXT DEFAULT '',
     ttl_seconds     INTEGER,
-    created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    namespace       TEXT DEFAULT '',
+    tier            TEXT DEFAULT 'hot',
+    memory_type     TEXT DEFAULT 'fact',
+    source_uri      TEXT DEFAULT '',
+    source_format   TEXT DEFAULT '',
+    source_checksum TEXT DEFAULT '',
+    byte_offset     INTEGER,
+    byte_length     INTEGER,
+    updated_at      TEXT,
+    snapshot_id     TEXT DEFAULT '',
+    promotion_state TEXT DEFAULT 'HOT',
+    promotion_candidate INTEGER DEFAULT 0,
+    parent_memory   TEXT DEFAULT '',
+    related_memories TEXT DEFAULT '[]',
+    tags            TEXT DEFAULT '[]',
+    schema_version  INTEGER DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_memories_identifier ON memories(identifier);
 CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
@@ -94,6 +110,22 @@ class MemoryRecord:
     content_hash: str = ""
     ttl_seconds: int | None = None
     created_at: str | None = None
+    namespace: str = ""
+    tier: str = "hot"
+    memory_type: str = "fact"
+    source_uri: str = ""
+    source_format: str = ""
+    source_checksum: str = ""
+    byte_offset: int | None = None
+    byte_length: int | None = None
+    updated_at: str | None = None
+    snapshot_id: str = ""
+    promotion_state: str = "HOT"
+    promotion_candidate: int = 0
+    parent_memory: str = ""
+    related_memories: str = "[]"
+    tags: str = "[]"
+    schema_version: int = 1
 
 
 def _cosine_similarity(blob_a: bytes | None, blob_b: bytes | None) -> float | None:
@@ -145,6 +177,38 @@ class MemoryDB:
             self._conn.commit()
             _trace.info("migrate", "added ttl_seconds column")
 
+        _V2_COLUMNS: dict[str, str] = {
+            "namespace": "TEXT DEFAULT ''",
+            "tier": "TEXT DEFAULT 'hot'",
+            "memory_type": "TEXT DEFAULT 'fact'",
+            "source_uri": "TEXT DEFAULT ''",
+            "source_format": "TEXT DEFAULT ''",
+            "source_checksum": "TEXT DEFAULT ''",
+            "byte_offset": "INTEGER",
+            "byte_length": "INTEGER",
+            "updated_at": "TEXT",
+            "snapshot_id": "TEXT DEFAULT ''",
+            "promotion_state": "TEXT DEFAULT 'HOT'",
+            "promotion_candidate": "INTEGER DEFAULT 0",
+            "parent_memory": "TEXT DEFAULT ''",
+            "related_memories": "TEXT DEFAULT '[]'",
+            "tags": "TEXT DEFAULT '[]'",
+            "schema_version": "INTEGER DEFAULT 1",
+        }
+        added = []
+        for column, decl in _V2_COLUMNS.items():
+            if not _has_column(self._conn, "memories", column):
+                self._conn.execute(f"ALTER TABLE memories ADD COLUMN {column} {decl}")
+                added.append(column)
+        if added:
+            self._conn.commit()
+            _trace.info("migrate", "added v2 columns", detail={"columns": added})
+
+        current_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if current_version < 2:
+            self._conn.execute("PRAGMA user_version = 2")
+            self._conn.commit()
+
         try:
             self._conn.execute(
                 """CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash_unique
@@ -173,15 +237,35 @@ class MemoryDB:
         content_hash: str = "",
         ttl_seconds: int | None = None,
         created_at: str | None = None,
+        namespace: str = "",
+        tier: str = "hot",
+        memory_type: str = "fact",
+        source_uri: str = "",
+        source_format: str = "",
+        source_checksum: str = "",
+        byte_offset: int | None = None,
+        byte_length: int | None = None,
+        updated_at: str | None = None,
+        snapshot_id: str = "",
+        promotion_state: str = "HOT",
+        promotion_candidate: int = 0,
+        parent_memory: str = "",
+        related_memories: str = "[]",
+        tags: str = "[]",
+        schema_version: int = 1,
     ) -> None:
         """Insert a memory row."""
         self._conn.execute(
             """INSERT OR REPLACE INTO memories
             (id, identifier, fact_text, embedding, embedding_dim, embedding_model,
-             source, importance, metadata_json, content_hash, ttl_seconds, created_at)
+             source, importance, metadata_json, content_hash, ttl_seconds, created_at,
+             namespace, tier, memory_type, source_uri, source_format, source_checksum,
+             byte_offset, byte_length, updated_at, snapshot_id, promotion_state,
+             promotion_candidate, parent_memory, related_memories, tags, schema_version)
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )""",
             (
                 id,
@@ -196,6 +280,22 @@ class MemoryDB:
                 content_hash,
                 ttl_seconds,
                 created_at,
+                namespace,
+                tier,
+                memory_type,
+                source_uri,
+                source_format,
+                source_checksum,
+                byte_offset,
+                byte_length,
+                updated_at,
+                snapshot_id,
+                promotion_state,
+                promotion_candidate,
+                parent_memory,
+                related_memories,
+                tags,
+                schema_version,
             ),
         )
         self._conn.commit()
@@ -217,6 +317,22 @@ class MemoryDB:
                 record.content_hash,
                 record.ttl_seconds,
                 record.created_at,
+                record.namespace,
+                record.tier,
+                record.memory_type,
+                record.source_uri,
+                record.source_format,
+                record.source_checksum,
+                record.byte_offset,
+                record.byte_length,
+                record.updated_at,
+                record.snapshot_id,
+                record.promotion_state,
+                record.promotion_candidate,
+                record.parent_memory,
+                record.related_memories,
+                record.tags,
+                record.schema_version,
             )
             for record in records
         ]
@@ -226,10 +342,14 @@ class MemoryDB:
         cursor = self._conn.executemany(
             """INSERT OR IGNORE INTO memories
             (id, identifier, fact_text, embedding, embedding_dim, embedding_model,
-             source, importance, metadata_json, content_hash, ttl_seconds, created_at)
+             source, importance, metadata_json, content_hash, ttl_seconds, created_at,
+             namespace, tier, memory_type, source_uri, source_format, source_checksum,
+             byte_offset, byte_length, updated_at, snapshot_id, promotion_state,
+             promotion_candidate, parent_memory, related_memories, tags, schema_version)
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )""",
             rows,
         )
@@ -279,16 +399,18 @@ class MemoryDB:
 
     def all_rows(self, *, include_embedding: bool = False) -> list[dict[str, Any]]:
         """Return all memory rows as dicts (for snapshot export)."""
-        query = (
-            """SELECT id, identifier, fact_text, embedding_dim, embedding_model,
-                      source, importance, metadata_json, content_hash, ttl_seconds, created_at,
-                      embedding
-               FROM memories"""
-            if include_embedding
-            else """SELECT id, identifier, fact_text, embedding_dim, embedding_model,
-                           source, importance, metadata_json, content_hash, ttl_seconds, created_at
-                    FROM memories"""
+        v2_cols = (
+            "namespace, tier, memory_type, source_uri, source_format, "
+            "source_checksum, byte_offset, byte_length, updated_at, snapshot_id, "
+            "promotion_state, promotion_candidate, parent_memory, "
+            "related_memories, tags, schema_version"
         )
+        base = (
+            "id, identifier, fact_text, embedding_dim, embedding_model, source, "
+            "importance, metadata_json, content_hash, ttl_seconds, created_at"
+        )
+        tail = ", embedding" if include_embedding else ""
+        query = f"SELECT {base}, {v2_cols}{tail} FROM memories"
         rows = self._conn.execute(query).fetchall()
         return [dict(r) for r in rows]
 
