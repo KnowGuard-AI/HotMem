@@ -231,3 +231,131 @@ def test_hydrate_recomputes_incompatible_stored_embedding(
 
     assert result.loaded == 1
     assert tmp_db.all_rows(include_embedding=True)[0]["embedding"] == recomputed_blob
+
+
+def test_hydrate_sqlite_fast_path(tmp_path):
+    """SQLite-to-SQLite import reuses embeddings and dedupes on content_hash."""
+    src_path = tmp_path / "src.sqlite"
+    dst_path = tmp_path / "dst.sqlite"
+
+    src = MemoryDB(src_path)
+    blob = pack_embedding(embed_text("fast path fact"))
+    src.insert(
+        id="s1",
+        identifier="x",
+        fact_text="fast path fact",
+        embedding=blob,
+        content_hash="hash-s1",
+    )
+    src.close()
+
+    dst = MemoryDB(dst_path)
+    result = hydrate(dst, src_path)
+    assert result.loaded == 1
+    assert result.skipped_dupes == 0
+    assert dst.count() == 1
+
+    row = dst.all_rows(include_embedding=True)[0]
+    assert row["embedding"] == blob
+    dst.close()
+
+
+def test_hydrate_sqlite_skips_existing_hashes(tmp_path):
+    src_path = tmp_path / "src.sqlite"
+    dst_path = tmp_path / "dst.sqlite"
+
+    blob = pack_embedding(embed_text("dup fact"))
+
+    src = MemoryDB(src_path)
+    src.insert(id="s1", identifier="x", fact_text="dup fact", embedding=blob, content_hash="dup")
+    src.close()
+
+    dst = MemoryDB(dst_path)
+    dst.insert(
+        id="existing", identifier="x", fact_text="dup fact", embedding=blob, content_hash="dup"
+    )
+
+    result = hydrate(dst, src_path)
+    assert result.loaded == 0
+    assert result.skipped_dupes == 1
+    assert dst.count() == 1
+    dst.close()
+
+
+def test_hydrate_sqlite_rejects_non_hotmem_db(tmp_path):
+    import sqlite3
+
+    bad_path = tmp_path / "bad.sqlite"
+    conn = sqlite3.connect(bad_path)
+    conn.execute("CREATE TABLE foo (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    dst = MemoryDB(tmp_path / "dst.sqlite")
+    with pytest.raises(ValueError, match="no 'memories' table"):
+        hydrate(dst, bad_path)
+    dst.close()
+
+
+def test_hydrate_sqlite_imports_v01_source(tmp_path):
+    """A v0.1 schema source DB (no v2 columns) imports with defaults."""
+    import sqlite3
+
+    v01_path = tmp_path / "v01.sqlite"
+    conn = sqlite3.connect(v01_path)
+    conn.execute(
+        """CREATE TABLE memories (
+            id TEXT PRIMARY KEY, identifier TEXT, fact_text TEXT,
+            embedding BLOB, content_hash TEXT DEFAULT ''
+        )"""
+    )
+    blob = pack_embedding(embed_text("legacy sqlite fact"))
+    conn.execute(
+        "INSERT INTO memories (id, identifier, fact_text, embedding, content_hash)"
+        " VALUES (?,?,?,?,?)",
+        ("old1", "x", "legacy sqlite fact", blob, "h-old1"),
+    )
+    conn.commit()
+    conn.close()
+
+    dst = MemoryDB(tmp_path / "dst.sqlite")
+    result = hydrate(dst, v01_path)
+    assert result.loaded == 1
+    row = dst.all_rows()[0]
+    assert row["promotion_state"] == "HOT"
+    assert row["schema_version"] == 1
+    dst.close()
+
+
+def test_hydrate_sqlite_rejects_malicious_column_name(tmp_path):
+    """A crafted source DB with a SQL-injection column name must not execute."""
+    import sqlite3
+
+    evil_path = tmp_path / "evil.sqlite"
+    conn = sqlite3.connect(evil_path)
+    # Column name that would break out of a SELECT if interpolated raw.
+    evil_col = "x) UNION SELECT sql FROM sqlite_master--"
+    create_sql = (
+        'CREATE TABLE memories ("id" TEXT, "identifier" TEXT, '
+        '"fact_text" TEXT, "embedding" BLOB, '
+        f'"{evil_col}" TEXT)'
+    )
+    conn.execute(create_sql)
+    conn.execute(
+        "INSERT INTO memories (id, identifier, fact_text, embedding)"
+        " VALUES ('e1', 'x', 'evil', X'00')"
+    )
+    conn.commit()
+    conn.close()
+
+    dst = MemoryDB(tmp_path / "dst.sqlite")
+    # import_sqlite projects only whitelisted columns, so the malicious column
+    # is never referenced. The row imports cleanly via the known columns.
+    result = hydrate(dst, evil_path)
+    assert result.loaded == 1
+    assert dst.count() == 1
+    # The injected column must not have leaked sqlite_master contents anywhere.
+    row = dst.all_rows()[0]
+    assert row["id"] == "e1"
+    assert row["fact_text"] == "evil"
+    dst.close()

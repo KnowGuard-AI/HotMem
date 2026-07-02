@@ -1,0 +1,47 @@
+site_name: HotMem
+site_description: Local-first memory sidecar for agent applications
+site_url: https://knowguard-ai.github.io/HotMem
+repo_url: https://github.com/KnowGuard-AI/HotMem
+repo_name: KnowGuard-AI/HotMem
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - API Reference: api.md
+  - CLI: cli.md
+  - Architecture:
+      - vNext Design: vnext/0001-file-aware-sidecar.md

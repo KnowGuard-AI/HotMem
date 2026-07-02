@@ -76,6 +76,21 @@ class HotMemClient:
         resp.raise_for_status()
         return resp.json()["memories"]
 
+    def list(
+        self,
+        identifier: str,
+        *,
+        order: str = "asc",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return memories for an identifier in created_at order."""
+        resp = self._client.get(
+            "/v1/memories",
+            params={"identifier": identifier, "order": order, "limit": limit},
+        )
+        resp.raise_for_status()
+        return resp.json()["memories"]
+
     def hydrate(self, file: str | None = None) -> dict[str, Any]:
         """Trigger swap file hydration."""
         payload: dict[str, Any] = {}
@@ -153,6 +168,21 @@ class AsyncHotMemClient:
         if max_chars is not None:
             payload["max_chars"] = max_chars
         resp = await self._client.post("/v1/search", json=payload)
+        resp.raise_for_status()
+        return resp.json()["memories"]
+
+    async def list(
+        self,
+        identifier: str,
+        *,
+        order: str = "asc",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return memories for an identifier in created_at order."""
+        resp = await self._client.get(
+            "/v1/memories",
+            params={"identifier": identifier, "order": order, "limit": limit},
+        )
         resp.raise_for_status()
         return resp.json()["memories"]
 

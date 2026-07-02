@@ -14,6 +14,7 @@ Extension: add new subcommands (e.g. `hotmem inspect`, `hotmem gc`) here.
 
 from __future__ import annotations
 
+import json
 import tempfile
 
 import click
@@ -163,3 +164,54 @@ def status(port: int, host: str):
     except httpx.ConnectError as err:
         click.echo(f"No HotMem server found at {url}", err=True)
         raise SystemExit(1) from err
+
+
+@main.command()
+@click.option(
+    "--output",
+    "-o",
+    default=None,
+    type=click.Path(),
+    help="Output file path. If omitted, print to stdout.",
+)
+@click.option(
+    "--format",
+    "fmt",
+    type=click.Choice(["json", "yaml"]),
+    default="json",
+    help="Output format.",
+)
+def openapi(output: str | None, fmt: str):
+    """Export the OpenAPI specification."""
+    from hotmem.openapi import dump_openapi, export_openapi
+
+    if output:
+        path = dump_openapi(output, fmt=fmt)
+        click.echo(f"OpenAPI spec written to {path}")
+    else:
+        spec = export_openapi()
+        if fmt == "yaml":
+            try:
+                import yaml
+            except ImportError as err:
+                raise click.ClickException(
+                    "YAML output requires PyYAML. Use --format json instead."
+                ) from err
+            click.echo(yaml.dump(spec, sort_keys=False, default_flow_style=False))
+        else:
+            click.echo(json.dumps(spec, indent=2))
+
+
+@main.command()
+@click.option("--db", "db_path", default=None, type=click.Path(), help="Database file path.")
+@click.option("--url", default=None, help="Running server URL (e.g. http://127.0.0.1:8711).")
+def playground(db_path: str | None, url: str | None):
+    """Interactive terminal UI for add/search/inspect."""
+    from hotmem.playground import run_playground
+
+    try:
+        run_playground(db_path=db_path, url=url)
+    except ImportError as err:
+        raise click.ClickException(str(err)) from err
+    except ValueError as err:
+        raise click.ClickException(str(err)) from err

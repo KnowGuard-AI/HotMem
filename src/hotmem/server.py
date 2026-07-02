@@ -19,6 +19,8 @@ import json
 import time
 import uuid
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as pkg_version
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,14 @@ from hotmem.swap import snapshot as swap_snapshot
 from hotmem.trace import Timer, get_tracer, new_trace_id
 
 _trace = get_tracer("server")
+
+try:
+    _VERSION = pkg_version("hotmem")
+except PackageNotFoundError:
+    try:
+        from hotmem import __version__ as _VERSION
+    except ImportError:
+        _VERSION = "0.0.0+unknown"
 
 # ── App state (set during lifespan) ──────────────────────────────────────────
 
@@ -113,7 +123,7 @@ def create_app(
     app = FastAPI(
         title="HotMem",
         description="Local-first memory sidecar for agent applications",
-        version="0.1.0",
+        version=_VERSION,
         lifespan=lifespan,
     )
 
@@ -183,6 +193,26 @@ def create_app(
         return {
             "memories": messages,
             "count": len(messages),
+            "trace_ms": round(t.ms, 2),
+        }
+
+    @app.get("/v1/memories")
+    async def list_memories(
+        identifier: str,
+        order: str = "asc",
+        limit: int = 100,
+    ):
+        """Return memories for an identifier in created_at order."""
+        db: MemoryDB = _state["db"]
+        if order not in ("asc", "desc"):
+            raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'")
+        if limit < 1 or limit > 1000:
+            raise HTTPException(status_code=400, detail="limit must be 1..1000")
+        with Timer() as t:
+            rows = db.list_by_identifier(identifier, order=order, limit=limit)
+        return {
+            "memories": rows,
+            "count": len(rows),
             "trace_ms": round(t.ms, 2),
         }
 
