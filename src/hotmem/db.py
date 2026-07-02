@@ -25,6 +25,7 @@ import re
 import sqlite3
 import struct
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -452,6 +453,100 @@ class MemoryDB:
             (identifier, limit),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def import_sqlite(self, src_path: str | Path) -> tuple[int, int]:
+        """Merge memories from another HotMem SQLite database (fast-path).
+
+        ATTACHs the source read-only, validates it has a memories table, and
+        inserts rows that don't already exist (dedupe on content_hash).
+        Embeddings are reused as-is — no recompute. Handles v0.1 and v2
+        source schemas (missing columns default).
+
+        Returns (loaded, skipped_dupes).
+        """
+        src = str(src_path)
+        alias = "_hotmem_src"
+        self._conn.execute(f"ATTACH DATABASE ? AS {alias}", (src,))
+        try:
+            tables = {
+                row["name"]
+                for row in self._conn.execute(
+                    f"SELECT name FROM {alias}.sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if "memories" not in tables:
+                raise ValueError(f"source database {src} has no 'memories' table; not a HotMem DB")
+
+            src_columns = {
+                row["name"]
+                for row in self._conn.execute(f"PRAGMA {alias}.table_info(memories)").fetchall()
+            }
+            required = {"id", "identifier", "fact_text", "embedding"}
+            missing = required - src_columns
+            if missing:
+                raise ValueError(
+                    f"source memories table missing required columns: {sorted(missing)}"
+                )
+
+            seen_hashes = self.content_hashes()
+            cols_sql = ", ".join(c for c in src_columns if c != "rowid")
+            rows = self._conn.execute(f"SELECT {cols_sql} FROM {alias}.memories").fetchall()
+
+            records: list[MemoryRecord] = []
+            skipped = 0
+            for row in rows:
+                d = dict(row)
+                ch = d.get("content_hash", "")
+                if ch and ch in seen_hashes:
+                    skipped += 1
+                    continue
+                if ch:
+                    seen_hashes.add(ch)
+                records.append(
+                    MemoryRecord(
+                        id=d["id"],
+                        identifier=d["identifier"],
+                        fact_text=d["fact_text"],
+                        embedding=d.get("embedding") or b"",
+                        embedding_dim=d.get("embedding_dim", EMBEDDING_DIM),
+                        embedding_model=d.get("embedding_model", ""),
+                        source=d.get("source", ""),
+                        importance=d.get("importance", 0.5),
+                        metadata_json=d.get("metadata_json", "{}"),
+                        content_hash=ch,
+                        ttl_seconds=d.get("ttl_seconds"),
+                        created_at=d.get("created_at"),
+                        namespace=d.get("namespace", ""),
+                        tier=d.get("tier", "hot"),
+                        memory_type=d.get("memory_type", "fact"),
+                        source_uri=d.get("source_uri", ""),
+                        source_format=d.get("source_format", ""),
+                        source_checksum=d.get("source_checksum", ""),
+                        byte_offset=d.get("byte_offset"),
+                        byte_length=d.get("byte_length"),
+                        updated_at=d.get("updated_at"),
+                        snapshot_id=d.get("snapshot_id", ""),
+                        promotion_state=d.get("promotion_state", "HOT"),
+                        promotion_candidate=d.get("promotion_candidate", 0),
+                        parent_memory=d.get("parent_memory", ""),
+                        related_memories=d.get("related_memories", "[]"),
+                        tags=d.get("tags", "[]"),
+                        schema_version=d.get("schema_version", 1),
+                    )
+                )
+            loaded = self.insert_many_ignore(records)
+            skipped += len(records) - loaded
+        finally:
+            with suppress(sqlite3.OperationalError):
+                self._conn.execute(f"DETACH DATABASE {alias}")
+            self._conn.commit()
+
+        _trace.info(
+            "import_sqlite",
+            f"imported {loaded} memories from {src}",
+            detail={"loaded": loaded, "skipped_dupes": skipped, "src": src},
+        )
+        return loaded, skipped
 
     def close(self) -> None:
         """Close the database connection."""

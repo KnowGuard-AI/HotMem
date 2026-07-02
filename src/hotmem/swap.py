@@ -115,14 +115,20 @@ def _stored_embedding(record: dict) -> bytes | None:
 
 
 def hydrate(db: MemoryDB, swap_path: str | Path) -> HydrateResult:
-    """Load memories from a JSONL or JSONL.GZ swap file into the database.
+    """Load memories from a swap file into the database.
 
+    Accepts JSONL, JSONL.GZ, or a HotMem SQLite database (.sqlite/.db).
     Deduplicates by content_hash - skips rows that already exist in the DB.
+    For SQLite sources, embeddings are reused as-is (fast-path, no recompute).
     """
     swap_path = Path(swap_path)
     if not swap_path.exists():
         _trace.warn("hydrate", "swap file not found", detail={"path": str(swap_path)})
         return HydrateResult(loaded=0, skipped_dupes=0)
+
+    if swap_path.suffix.lower() in (".sqlite", ".db"):
+        loaded, skipped = db.import_sqlite(swap_path)
+        return HydrateResult(loaded=loaded, skipped_dupes=skipped)
 
     with Timer() as t:
         records: list[MemoryRecord] = []
