@@ -24,6 +24,7 @@ import math
 import re
 import sqlite3
 import struct
+import threading
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -34,6 +35,98 @@ from hotmem.embed import EMBEDDING_DIM
 from hotmem.trace import get_tracer
 
 _trace = get_tracer("db")
+
+# Single source of truth for the memories table column order. Drives INSERT
+# statement generation and SQLite-to-SQLite import projection so the three
+# write paths cannot drift.
+_MEMORY_COLUMNS: tuple[str, ...] = (
+    "id",
+    "identifier",
+    "fact_text",
+    "embedding",
+    "embedding_dim",
+    "embedding_model",
+    "source",
+    "importance",
+    "metadata_json",
+    "content_hash",
+    "ttl_seconds",
+    "created_at",
+    "namespace",
+    "tier",
+    "memory_type",
+    "source_uri",
+    "source_format",
+    "source_checksum",
+    "byte_offset",
+    "byte_length",
+    "updated_at",
+    "snapshot_id",
+    "promotion_state",
+    "promotion_candidate",
+    "parent_memory",
+    "related_memories",
+    "tags",
+    "schema_version",
+)
+
+# SQL default expressions for optional columns, used when projecting rows from
+# a source DB that lacks them (v0.1 schema). Required columns (id, identifier,
+# fact_text, embedding) have no default and must exist in the source.
+_COLUMN_DEFAULTS: dict[str, str] = {
+    "embedding_dim": str(EMBEDDING_DIM),
+    "embedding_model": "''",
+    "source": "''",
+    "importance": "0.5",
+    "metadata_json": "'{}'",
+    "content_hash": "''",
+    "ttl_seconds": "NULL",
+    "created_at": "strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+    "namespace": "''",
+    "tier": "'hot'",
+    "memory_type": "'fact'",
+    "source_uri": "''",
+    "source_format": "''",
+    "source_checksum": "''",
+    "byte_offset": "NULL",
+    "byte_length": "NULL",
+    "updated_at": "NULL",
+    "snapshot_id": "''",
+    "promotion_state": "'HOT'",
+    "promotion_candidate": "0",
+    "parent_memory": "''",
+    "related_memories": "'[]'",
+    "tags": "'[]'",
+    "schema_version": "1",
+}
+
+
+# TTL-live predicate — single source of truth so search and list agree on what
+# "expired" means. `alias` is "" for the unqualified table or "m." for joins.
+def _ttl_live(alias: str = "") -> str:
+    return (
+        f"({alias}ttl_seconds IS NULL OR "
+        f"(strftime('%s', 'now') - strftime('%s', {alias}created_at)) < {alias}ttl_seconds)"
+    )
+
+
+def _insert_placeholders() -> str:
+    """Build the VALUES placeholder list, with COALESCE on created_at."""
+    return ", ".join(
+        "COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))" if c == "created_at" else "?"
+        for c in _MEMORY_COLUMNS
+    )
+
+
+_INSERT_OR_REPLACE_SQL = (
+    f"INSERT OR REPLACE INTO memories ({', '.join(_MEMORY_COLUMNS)}) "
+    f"VALUES ({_insert_placeholders()})"
+)
+_INSERT_OR_IGNORE_SQL = (
+    f"INSERT OR IGNORE INTO memories ({', '.join(_MEMORY_COLUMNS)}) "
+    f"VALUES ({_insert_placeholders()})"
+)
+
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS memories (
@@ -67,6 +160,7 @@ CREATE TABLE IF NOT EXISTS memories (
     schema_version  INTEGER DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_memories_identifier ON memories(identifier);
+CREATE INDEX IF NOT EXISTS idx_memories_identifier_created ON memories(identifier, created_at);
 CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -160,6 +254,7 @@ class MemoryDB:
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = str(db_path)
+        self._lock = threading.Lock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -256,104 +351,50 @@ class MemoryDB:
         schema_version: int = 1,
     ) -> None:
         """Insert a memory row."""
+        values = {
+            "id": id,
+            "identifier": identifier,
+            "fact_text": fact_text,
+            "embedding": embedding,
+            "embedding_dim": embedding_dim,
+            "embedding_model": embedding_model,
+            "source": source,
+            "importance": importance,
+            "metadata_json": metadata_json,
+            "content_hash": content_hash,
+            "ttl_seconds": ttl_seconds,
+            "created_at": created_at,
+            "namespace": namespace,
+            "tier": tier,
+            "memory_type": memory_type,
+            "source_uri": source_uri,
+            "source_format": source_format,
+            "source_checksum": source_checksum,
+            "byte_offset": byte_offset,
+            "byte_length": byte_length,
+            "updated_at": updated_at,
+            "snapshot_id": snapshot_id,
+            "promotion_state": promotion_state,
+            "promotion_candidate": promotion_candidate,
+            "parent_memory": parent_memory,
+            "related_memories": related_memories,
+            "tags": tags,
+            "schema_version": schema_version,
+        }
         self._conn.execute(
-            """INSERT OR REPLACE INTO memories
-            (id, identifier, fact_text, embedding, embedding_dim, embedding_model,
-             source, importance, metadata_json, content_hash, ttl_seconds, created_at,
-             namespace, tier, memory_type, source_uri, source_format, source_checksum,
-             byte_offset, byte_length, updated_at, snapshot_id, promotion_state,
-             promotion_candidate, parent_memory, related_memories, tags, schema_version)
-            VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )""",
-            (
-                id,
-                identifier,
-                fact_text,
-                embedding,
-                embedding_dim,
-                embedding_model,
-                source,
-                importance,
-                metadata_json,
-                content_hash,
-                ttl_seconds,
-                created_at,
-                namespace,
-                tier,
-                memory_type,
-                source_uri,
-                source_format,
-                source_checksum,
-                byte_offset,
-                byte_length,
-                updated_at,
-                snapshot_id,
-                promotion_state,
-                promotion_candidate,
-                parent_memory,
-                related_memories,
-                tags,
-                schema_version,
-            ),
+            _INSERT_OR_REPLACE_SQL,
+            tuple(values[c] for c in _MEMORY_COLUMNS),
         )
         self._conn.commit()
         _trace.debug("insert", f"stored memory {id[:8]}…", detail={"identifier": identifier})
 
     def insert_many_ignore(self, records: Iterable[MemoryRecord]) -> int:
         """Insert many memory rows in one transaction, ignoring duplicate hashes/ids."""
-        rows = [
-            (
-                record.id,
-                record.identifier,
-                record.fact_text,
-                record.embedding,
-                record.embedding_dim,
-                record.embedding_model,
-                record.source,
-                record.importance,
-                record.metadata_json,
-                record.content_hash,
-                record.ttl_seconds,
-                record.created_at,
-                record.namespace,
-                record.tier,
-                record.memory_type,
-                record.source_uri,
-                record.source_format,
-                record.source_checksum,
-                record.byte_offset,
-                record.byte_length,
-                record.updated_at,
-                record.snapshot_id,
-                record.promotion_state,
-                record.promotion_candidate,
-                record.parent_memory,
-                record.related_memories,
-                record.tags,
-                record.schema_version,
-            )
-            for record in records
-        ]
+        rows = [tuple(getattr(record, c) for c in _MEMORY_COLUMNS) for record in records]
         if not rows:
             return 0
 
-        cursor = self._conn.executemany(
-            """INSERT OR IGNORE INTO memories
-            (id, identifier, fact_text, embedding, embedding_dim, embedding_model,
-             source, importance, metadata_json, content_hash, ttl_seconds, created_at,
-             namespace, tier, memory_type, source_uri, source_format, source_checksum,
-             byte_offset, byte_length, updated_at, snapshot_id, promotion_state,
-             promotion_candidate, parent_memory, related_memories, tags, schema_version)
-            VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                COALESCE(?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )""",
-            rows,
-        )
+        cursor = self._conn.executemany(_INSERT_OR_IGNORE_SQL, rows)
         self._conn.commit()
         inserted = cursor.rowcount if cursor.rowcount != -1 else 0
         _trace.debug("insert_many", f"stored {inserted} memories", detail={"attempted": len(rows)})
@@ -362,11 +403,10 @@ class MemoryDB:
     def search_with_cosine(self, query_embedding: bytes) -> list[dict[str, Any]]:
         """Return all memories with their cosine similarity to the query embedding."""
         rows = self._conn.execute(
-            """SELECT id, identifier, fact_text, importance, metadata_json, source,
+            f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
                       created_at, cosine_sim(embedding, ?) AS cosine_score
                FROM memories
-               WHERE ttl_seconds IS NULL
-                  OR (strftime('%s', 'now') - strftime('%s', created_at)) < ttl_seconds
+               WHERE {_ttl_live()}
                ORDER BY cosine_score DESC""",
             (query_embedding,),
         ).fetchall()
@@ -379,15 +419,12 @@ class MemoryDB:
             return []
 
         rows = self._conn.execute(
-            """SELECT m.id, m.identifier, m.fact_text, m.importance, m.metadata_json,
+            f"""SELECT m.id, m.identifier, m.fact_text, m.importance, m.metadata_json,
                       m.source, m.created_at, bm25(memories_fts) AS bm25_score
                FROM memories_fts
                JOIN memories AS m ON m.rowid = memories_fts.rowid
                WHERE memories_fts MATCH ?
-                 AND (
-                    m.ttl_seconds IS NULL
-                    OR (strftime('%s', 'now') - strftime('%s', m.created_at)) < m.ttl_seconds
-                 )
+                 AND {_ttl_live("m.")}
                ORDER BY bm25_score ASC""",
             (fts_query,),
         ).fetchall()
@@ -446,8 +483,7 @@ class MemoryDB:
                        created_at
                 FROM memories
                 WHERE identifier = ?
-                  AND (ttl_seconds IS NULL
-                       OR (strftime('%s', 'now') - strftime('%s', created_at)) < ttl_seconds)
+                  AND {_ttl_live()}
                 ORDER BY created_at {direction}
                 LIMIT ?""",
             (identifier, limit),
@@ -458,93 +494,78 @@ class MemoryDB:
         """Merge memories from another HotMem SQLite database (fast-path).
 
         ATTACHs the source read-only, validates it has a memories table, and
-        inserts rows that don't already exist (dedupe on content_hash).
-        Embeddings are reused as-is — no recompute. Handles v0.1 and v2
-        source schemas (missing columns default).
+        inserts rows that don't already exist (dedupe on content_hash via the
+        unique index). Embeddings are reused as-is — no recompute and no Python
+        materialization: a single INSERT ... SELECT copies rows inside SQLite.
+        Handles v0.1 and v2 source schemas (missing columns default via
+        COALESCE). Column projection uses a fixed whitelist, never raw source
+        column names, so a crafted source DB cannot inject SQL.
 
         Returns (loaded, skipped_dupes).
         """
-        src = str(src_path)
+        resolved = Path(src_path).resolve()
+        # Read-only URI prevents a crafted source DB from writing to the main
+        # connection or mutating itself during the import. (immutable=1 is
+        # avoided because source DBs may use WAL and immutable skips the WAL.)
+        uri = f"file:{resolved}?mode=ro"
         alias = "_hotmem_src"
-        self._conn.execute(f"ATTACH DATABASE ? AS {alias}", (src,))
-        try:
-            tables = {
-                row["name"]
-                for row in self._conn.execute(
-                    f"SELECT name FROM {alias}.sqlite_master WHERE type='table'"
-                ).fetchall()
-            }
-            if "memories" not in tables:
-                raise ValueError(f"source database {src} has no 'memories' table; not a HotMem DB")
-
-            src_columns = {
-                row["name"]
-                for row in self._conn.execute(f"PRAGMA {alias}.table_info(memories)").fetchall()
-            }
-            required = {"id", "identifier", "fact_text", "embedding"}
-            missing = required - src_columns
-            if missing:
-                raise ValueError(
-                    f"source memories table missing required columns: {sorted(missing)}"
-                )
-
-            seen_hashes = self.content_hashes()
-            cols_sql = ", ".join(c for c in src_columns if c != "rowid")
-            rows = self._conn.execute(f"SELECT {cols_sql} FROM {alias}.memories").fetchall()
-
-            records: list[MemoryRecord] = []
-            skipped = 0
-            for row in rows:
-                d = dict(row)
-                ch = d.get("content_hash", "")
-                if ch and ch in seen_hashes:
-                    skipped += 1
-                    continue
-                if ch:
-                    seen_hashes.add(ch)
-                records.append(
-                    MemoryRecord(
-                        id=d["id"],
-                        identifier=d["identifier"],
-                        fact_text=d["fact_text"],
-                        embedding=d.get("embedding") or b"",
-                        embedding_dim=d.get("embedding_dim", EMBEDDING_DIM),
-                        embedding_model=d.get("embedding_model", ""),
-                        source=d.get("source", ""),
-                        importance=d.get("importance", 0.5),
-                        metadata_json=d.get("metadata_json", "{}"),
-                        content_hash=ch,
-                        ttl_seconds=d.get("ttl_seconds"),
-                        created_at=d.get("created_at"),
-                        namespace=d.get("namespace", ""),
-                        tier=d.get("tier", "hot"),
-                        memory_type=d.get("memory_type", "fact"),
-                        source_uri=d.get("source_uri", ""),
-                        source_format=d.get("source_format", ""),
-                        source_checksum=d.get("source_checksum", ""),
-                        byte_offset=d.get("byte_offset"),
-                        byte_length=d.get("byte_length"),
-                        updated_at=d.get("updated_at"),
-                        snapshot_id=d.get("snapshot_id", ""),
-                        promotion_state=d.get("promotion_state", "HOT"),
-                        promotion_candidate=d.get("promotion_candidate", 0),
-                        parent_memory=d.get("parent_memory", ""),
-                        related_memories=d.get("related_memories", "[]"),
-                        tags=d.get("tags", "[]"),
-                        schema_version=d.get("schema_version", 1),
+        with self._lock:
+            self._conn.execute(f"ATTACH DATABASE ? AS {alias}", (uri,))
+            try:
+                tables = {
+                    row["name"]
+                    for row in self._conn.execute(
+                        f"SELECT name FROM {alias}.sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                if "memories" not in tables:
+                    raise ValueError(
+                        f"source database {resolved} has no 'memories' table; not a HotMem DB"
                     )
+
+                src_columns = {
+                    row["name"]
+                    for row in self._conn.execute(f"PRAGMA {alias}.table_info(memories)").fetchall()
+                }
+                required = {"id", "identifier", "fact_text", "embedding"}
+                missing = required - src_columns
+                if missing:
+                    raise ValueError(
+                        f"source memories table missing required columns: {sorted(missing)}"
+                    )
+
+                # Project each canonical column from the source, defaulting
+                # missing optional columns. Only whitelisted column names are
+                # referenced — source column names are never interpolated.
+                # Unqualified names resolve to the single FROM table below.
+                projection = ", ".join(
+                    f"COALESCE({c}, {_COLUMN_DEFAULTS[c]})"
+                    if c in src_columns and c in _COLUMN_DEFAULTS
+                    else c
+                    if c in src_columns
+                    else _COLUMN_DEFAULTS.get(c, "NULL")
+                    for c in _MEMORY_COLUMNS
                 )
-            loaded = self.insert_many_ignore(records)
-            skipped += len(records) - loaded
-        finally:
-            with suppress(sqlite3.OperationalError):
-                self._conn.execute(f"DETACH DATABASE {alias}")
-            self._conn.commit()
+
+                count_row = self._conn.execute(f"SELECT COUNT(*) FROM {alias}.memories").fetchone()
+                attempted = count_row[0] if count_row else 0
+
+                cursor = self._conn.execute(
+                    f"INSERT OR IGNORE INTO memories ({', '.join(_MEMORY_COLUMNS)}) "
+                    f"SELECT {projection} FROM {alias}.memories"
+                )
+                self._conn.commit()
+                loaded = cursor.rowcount if cursor.rowcount != -1 else 0
+                skipped = attempted - loaded
+            finally:
+                with suppress(sqlite3.OperationalError):
+                    self._conn.execute(f"DETACH DATABASE {alias}")
+                self._conn.commit()
 
         _trace.info(
             "import_sqlite",
-            f"imported {loaded} memories from {src}",
-            detail={"loaded": loaded, "skipped_dupes": skipped, "src": src},
+            f"imported {loaded} memories from {resolved}",
+            detail={"loaded": loaded, "skipped_dupes": skipped, "src": str(resolved)},
         )
         return loaded, skipped
 
