@@ -38,6 +38,9 @@ mcp = [
 playground = [
     "rich>=13.7,<14",
 ]
+rich = [
+    "rich>=13.7,<14",
+]
 docs = [
     "mkdocs>=1.6,<2",
     "mkdocs-material>=9.5,<10",
@@ -47,6 +50,7 @@ dev = [
     "pytest>=9,<10",
     "pytest-cov>=6,<7",
     "ruff>=0.15,<1",
+    "rich>=13.7,<14",
 ]
 
 [project.scripts]

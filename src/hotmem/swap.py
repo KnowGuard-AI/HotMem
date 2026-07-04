@@ -21,7 +21,7 @@ import gzip
 import hashlib
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,12 +114,21 @@ def _stored_embedding(record: dict) -> bytes | None:
     return blob
 
 
-def hydrate(db: MemoryDB, swap_path: str | Path) -> HydrateResult:
+def hydrate(
+    db: MemoryDB,
+    swap_path: str | Path,
+    *,
+    on_progress: Callable[[int], None] | None = None,
+) -> HydrateResult:
     """Load memories from a swap file into the database.
 
     Accepts JSONL, JSONL.GZ, or a HotMem SQLite database (.sqlite/.db).
     Deduplicates by content_hash - skips rows that already exist in the DB.
     For SQLite sources, embeddings are reused as-is (fast-path, no recompute).
+
+    on_progress, if given, is invoked once per parsed line with the byte
+    length of that line — enabling byte-based progress reporting without
+    coupling swap.py to any UI library.
     """
     swap_path = Path(swap_path)
     if not swap_path.exists():
@@ -142,12 +151,17 @@ def hydrate(db: MemoryDB, swap_path: str | Path) -> HydrateResult:
         try:
             with _open_swap_read(swap_path) as f:
                 for line in f:
-                    bytes_read += len(line.encode())
+                    line_bytes_len = len(line.encode())
+                    bytes_read += line_bytes_len
                     line = line.strip()
                     if not line:
+                        if on_progress is not None:
+                            on_progress(line_bytes_len)
                         continue
                     record = json.loads(line)
                     parsed += 1
+                    if on_progress is not None:
+                        on_progress(line_bytes_len)
 
                     identifier = record.get("identifier", "")
                     fact_text = record.get("fact_text", "")
@@ -214,18 +228,25 @@ def snapshot(
     swap_path: str | Path,
     *,
     include_embeddings: bool = True,
+    on_progress: Callable[[int], None] | None = None,
 ) -> SnapshotResult:
-    """Export all memories from the database to a JSONL or JSONL.GZ swap file."""
+    """Export all memories from the database to a JSONL or JSONL.GZ swap file.
+
+    on_progress, if given, is invoked once per exported row with the count of
+    rows written so far (cumulative).
+    """
     swap_path = Path(swap_path)
 
     with Timer() as t:
         rows = db.all_rows(include_embedding=include_embeddings)
         with _open_swap_write(swap_path) as f:
-            for row in rows:
+            for i, row in enumerate(rows, 1):
                 embedding = row.pop("embedding", None)
                 if embedding is not None:
                     row["embedding_b64"] = base64.b64encode(embedding).decode("ascii")
                 f.write(json.dumps(row, default=str) + "\n")
+                if on_progress is not None:
+                    on_progress(i)
 
     _trace.info(
         "snapshot",
