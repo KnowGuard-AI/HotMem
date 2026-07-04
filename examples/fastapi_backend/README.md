@@ -6,9 +6,12 @@ and `/ask` endpoints.
 
 ## Setup
 
+See [../README.md](../README.md#prerequisites) for the common HotMem install
+steps. This example needs the dev extra (no sidecar required):
+
 ```sh
-pip install fastapi uvicorn
 pip install -e ".[dev]"           # HotMem itself
+pip install fastapi uvicorn
 ```
 
 ## Run

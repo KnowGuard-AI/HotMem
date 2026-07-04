@@ -11,7 +11,7 @@ import pytest
 
 from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_MODEL, embed_text, pack_embedding
-from hotmem.swap import compute_content_hash, hydrate, snapshot
+from hotmem.swap import add_memory, compute_content_hash, hydrate, snapshot
 
 
 def test_compute_content_hash():
@@ -20,6 +20,38 @@ def test_compute_content_hash():
     h3 = compute_content_hash("id1", "fact2")
     assert h1 == h2
     assert h1 != h3
+
+
+def test_add_memory_canonical_contract(tmp_db: MemoryDB):
+    """add_memory emits the full canonical contract (embedding_model, source, metadata)."""
+    memory_id, content_hash = add_memory(
+        tmp_db,
+        "vendor_a",
+        "Invoice total $5000",
+        source="test",
+        importance=0.8,
+        metadata={"doc": "inv-1"},
+    )
+    assert memory_id and content_hash
+    assert tmp_db.count() == 1
+    rows = tmp_db.all_rows()
+    row = rows[0]
+    assert row["identifier"] == "vendor_a"
+    assert row["source"] == "test"
+    assert row["importance"] == 0.8
+    assert row["content_hash"] == content_hash
+    assert json.loads(row["metadata_json"]) == {"doc": "inv-1"}
+    # Canonical fields the FastAPI example previously omitted:
+    assert row["embedding_model"] == EMBEDDING_MODEL
+    assert row["embedding_dim"] is not None
+
+
+def test_add_memory_defaults(tmp_db: MemoryDB):
+    """add_memory with defaults still stamps source/metadata (no NULL drift)."""
+    mid, _ = add_memory(tmp_db, "x", "fact")
+    row = tmp_db.all_rows()[0]
+    assert row["source"] == ""
+    assert json.loads(row["metadata_json"]) == {}
 
 
 def test_hydrate_from_swap(tmp_db: MemoryDB, tmp_path: Path):

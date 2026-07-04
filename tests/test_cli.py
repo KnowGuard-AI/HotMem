@@ -88,6 +88,21 @@ def test_hydrate_progress_runs_without_error_when_piped(tmp_path: Path):
     assert result.exit_code == 0
 
 
+def test_hydrate_gzipped_swap_uses_indeterminate_progress(tmp_path: Path):
+    """Gzipped swap uses total=None (compressed size != uncompressed bytes)."""
+    import gzip
+
+    swap = tmp_path / "swap.jsonl.gz"
+    with gzip.open(swap, "wt") as f:
+        f.write('{"identifier": "a", "fact_text": "gz fact one"}\n')
+        f.write('{"identifier": "b", "fact_text": "gz fact two"}\n')
+    runner = CliRunner()
+    db_path = str(tmp_path / "d.sqlite")
+    result = runner.invoke(main, ["hydrate", "--file", str(swap), "--db", db_path])
+    assert result.exit_code == 0, result.output
+    assert "loaded=2" in result.output
+
+
 # ── snapshot ───────────────────────────────────────────────────────────
 
 

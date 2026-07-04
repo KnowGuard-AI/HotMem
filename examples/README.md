@@ -16,16 +16,16 @@ Copy-paste-runnable examples showing HotMem with each framework and runtime.
 
 ## Prerequisites
 
-Most Python examples target a running sidecar:
+The common setup for most examples (sidecar-based ones):
 
 ```sh
-pip install -e ".[dev,mcp]"          # HotMem itself
-pip install -e adapters/<name>        # the adapter for the example
+pip install -e ".[dev,mcp]"          # HotMem itself + dev/test deps
 hotmem serve                          # http://127.0.0.1:8711
 ```
 
-Framework-specific deps (e.g. `langchain`, `crewai`, `openai`) are listed in
-each example's README — they are NOT bundled with HotMem.
+Per-example READMEs link here and only list their example-specific framework
+deps (adapter package + framework). The FastAPI and MCP examples use different
+extras (`[dev]` / `[mcp]`) — noted in their own READMEs.
 
 ## Notes
 

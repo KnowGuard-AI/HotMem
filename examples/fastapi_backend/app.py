@@ -10,6 +10,7 @@ Run: uvicorn app:app --port 8000
 
 from __future__ import annotations
 
+import os
 import tempfile
 from typing import Any
 
@@ -17,11 +18,12 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from hotmem.db import MemoryDB
-from hotmem.embed import embed_text, pack_embedding
 from hotmem.search import search_memories
-from hotmem.swap import compute_content_hash
+from hotmem.swap import add_memory
 
-DB_PATH = tempfile.mktemp(suffix=".sqlite", prefix="hotmem_fastapi_")
+# Private temp dir for the demo DB (atomic creation, no mktemp race).
+_TMP_DIR = tempfile.mkdtemp(prefix="hotmem_fastapi_")
+DB_PATH = os.path.join(_TMP_DIR, "hotmem.sqlite")
 _db = MemoryDB(DB_PATH)
 
 app = FastAPI(title="hotmem-fastapi-example")
@@ -50,20 +52,14 @@ def health() -> dict[str, Any]:
 
 @app.post("/remember")
 def remember(req: RememberRequest) -> dict[str, Any]:
-    import uuid
-
-    blob = pack_embedding(embed_text(req.fact))
-    content_hash = compute_content_hash(req.identifier, req.fact)
-    memory_id = uuid.uuid4().hex
-    _db.insert(
-        id=memory_id,
-        identifier=req.identifier,
-        fact_text=req.fact,
-        embedding=blob,
+    memory_id, content_hash = add_memory(
+        _db,
+        req.identifier,
+        req.fact,
+        source="fastapi-example",
         importance=req.importance,
-        content_hash=content_hash,
     )
-    return {"memory_id": memory_id}
+    return {"memory_id": memory_id, "content_hash": content_hash}
 
 
 @app.post("/ask")

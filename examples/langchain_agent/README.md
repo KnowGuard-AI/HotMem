@@ -5,13 +5,13 @@ stores new facts afterwards.
 
 ## Setup
 
-```sh
-pip install -e ".[dev,mcp]"
-pip install -e adapters/langchain
-pip install langchain langchain-openai          # framework deps
+See [../README.md](../README.md#prerequisites) for the common HotMem install +
+`hotmem serve` steps. Then install this example's framework deps:
 
-hotmem serve
-export OPENAI_API_KEY=sk-...                     # or use a stub LLM
+```sh
+pip install -e adapters/langchain
+pip install langchain langchain-openai
+export OPENAI_API_KEY=sk-...                     # or use the stub LLM (no key needed)
 ```
 
 ## Run
