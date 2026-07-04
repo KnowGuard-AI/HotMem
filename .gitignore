@@ -11,5 +11,7 @@ swap.jsonl
 .DS_Store
 .pytest_cache/
 .ruff_cache/
+.coverage
+coverage.xml
 dev_roadmap.md
 planned-evolution.md
