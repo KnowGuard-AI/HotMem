@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from pathlib import Path as _Path
 
 import click
 
@@ -275,3 +276,79 @@ def playground(db_path: str | None, url: str | None):
         raise click.ClickException(str(err)) from err
     except ValueError as err:
         raise click.ClickException(str(err)) from err
+
+
+@main.command("import")
+@click.option(
+    "--from",
+    "source",
+    required=True,
+    type=click.Choice(["mem0"], case_sensitive=False),
+    help="Source memory system to import from.",
+)
+@click.option(
+    "--db",
+    "source_db",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Path to the source memory database (e.g. mem0's history SQLite DB).",
+)
+@click.option(
+    "--target",
+    "target_db",
+    default=None,
+    type=click.Path(),
+    help="HotMem database to hydrate into. Defaults to a temp DB.",
+)
+@click.option(
+    "--out",
+    "swap_out",
+    default=None,
+    type=click.Path(),
+    help="Keep the intermediate HotMem swap JSONL at this path (default: temp, deleted).",
+)
+def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str | None):
+    """Import memories from a foreign memory system into HotMem.
+
+    One-command migration: read the source store, convert to HotMem swap JSONL,
+    hydrate into the target DB. Embeddings are re-computed by HotMem's
+    embedder (source dims differ, so reuse is not possible).
+    """
+    import tempfile as _tempfile
+
+    from hotmem.db import MemoryDB
+    from hotmem.importers import IMPORTERS
+    from hotmem.swap import hydrate as do_hydrate
+
+    reader = IMPORTERS[source.lower()]
+
+    ui = get_renderer()
+    swap_path = swap_out or _tempfile.mktemp(suffix=".jsonl", prefix="hotmem_import_")
+    cleanup = swap_out is None
+
+    try:
+        try:
+            with open(swap_path, "w") as f, ui.progress(total=0, desc="Reading source") as tick:
+                for record in reader(_Path(source_db)):
+                    f.write(json.dumps(record, default=str) + "\n")
+                    tick(1)
+        except (ValueError, FileNotFoundError) as err:
+            raise click.ClickException(f"import from {source} failed: {err}") from err
+
+        target = target_db or _tempfile.mktemp(suffix=".sqlite", prefix="hotmem_")
+        db = MemoryDB(target)
+        total = os.path.getsize(swap_path) if os.path.exists(swap_path) else 0
+        with ui.progress(total=total, desc="Hydrating") as tick:
+            result = do_hydrate(db, swap_path, on_progress=tick)
+        db.close()
+
+        ui.summary(
+            "import",
+            source=source,
+            imported=result.loaded,
+            skipped_dupes=result.skipped_dupes,
+            target=target,
+        )
+    finally:
+        if cleanup and os.path.exists(swap_path):
+            os.remove(swap_path)
