@@ -465,6 +465,7 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "rich" },
     { name = "ruff" },
 ]
 docs = [
@@ -476,6 +477,9 @@ mcp = [
     { name = "mcp" },
 ]
 playground = [
+    { name = "rich" },
+]
+rich = [
     { name = "rich" },
 ]
 
@@ -490,11 +494,13 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9,<10" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6,<7" },
     { name = "pyyaml", marker = "extra == 'docs'", specifier = ">=6.0,<7" },
+    { name = "rich", marker = "extra == 'dev'", specifier = ">=13.7,<14" },
     { name = "rich", marker = "extra == 'playground'", specifier = ">=13.7,<14" },
+    { name = "rich", marker = "extra == 'rich'", specifier = ">=13.7,<14" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15,<1" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
-provides-extras = ["mcp", "playground", "docs", "dev"]
+provides-extras = ["mcp", "playground", "rich", "docs", "dev"]
 
 [[package]]
 name = "httpcore"

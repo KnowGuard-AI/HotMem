@@ -15,11 +15,13 @@ Extension: add new subcommands (e.g. `hotmem inspect`, `hotmem gc`) here.
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 
 import click
 
 from hotmem.trace import get_tracer
+from hotmem.ui import get_renderer
 
 _trace = get_tracer("cli")
 
@@ -118,11 +120,15 @@ def hydrate(swap_file: str, db_path: str):
     from hotmem.db import MemoryDB
     from hotmem.swap import hydrate as do_hydrate
 
+    ui = get_renderer()
+    total = os.path.getsize(swap_file) if os.path.exists(swap_file) else 0
+
     db = MemoryDB(db_path)
-    result = do_hydrate(db, swap_file)
+    with ui.progress(total=total, desc="Hydrating") as tick:
+        result = do_hydrate(db, swap_file, on_progress=tick)
     db.close()
 
-    click.echo(f"Loaded: {result.loaded}, Skipped dupes: {result.skipped_dupes}")
+    ui.summary("hydrate", loaded=result.loaded, skipped_dupes=result.skipped_dupes)
 
 
 @main.command()
@@ -139,11 +145,14 @@ def snapshot(swap_file: str, db_path: str):
     from hotmem.db import MemoryDB
     from hotmem.swap import snapshot as do_snapshot
 
+    ui = get_renderer()
     db = MemoryDB(db_path)
-    result = do_snapshot(db, swap_file)
+    total = db.count()
+    with ui.progress(total=total, desc="Snapshotting") as tick:
+        result = do_snapshot(db, swap_file, on_progress=tick)
     db.close()
 
-    click.echo(f"Exported: {result.exported} → {result.path}")
+    ui.summary("snapshot", exported=result.exported, path=result.path)
 
 
 @main.command()
@@ -153,17 +162,68 @@ def status(port: int, host: str):
     """Check if a HotMem server is running."""
     import httpx
 
+    ui = get_renderer()
     url = f"http://{host}:{port}/v1/health"
     try:
         resp = httpx.get(url, timeout=3.0)
         data = resp.json()
-        click.echo(f"Status: {data['status']}")
-        click.echo(f"Memories: {data['memory_count']}")
-        click.echo(f"DB: {data['db_path']}")
-        click.echo(f"Uptime: {data['uptime_s']}s")
+        ui.status(data)
     except httpx.ConnectError as err:
         click.echo(f"No HotMem server found at {url}", err=True)
         raise SystemExit(1) from err
+
+
+@main.command()
+@click.argument("query")
+@click.option("--db", "db_path", default=None, type=click.Path(), help="Database file path.")
+@click.option("--url", default=None, help="Running server URL (e.g. http://127.0.0.1:8711).")
+@click.option("--top-k", "top_k", default=5, type=int, help="Maximum results.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit raw JSON (bypasses the renderer, for scripting).",
+)
+def search(query: str, db_path: str | None, url: str | None, top_k: int, as_json: bool):
+    """Search memories and print formatted results with scores."""
+    rows = _run_search(query, db_path=db_path, url=url, top_k=top_k)
+
+    if as_json:
+        click.echo(json.dumps(rows, indent=2, default=str))
+        return
+
+    get_renderer().search_results(rows)
+
+
+def _run_search(
+    query: str,
+    *,
+    db_path: str | None,
+    url: str | None,
+    top_k: int,
+) -> list[dict]:
+    """Resolve backend (HTTP server or local DB) and return search rows."""
+    if url is not None:
+        import httpx
+
+        resp = httpx.post(
+            f"{url.rstrip('/')}/v1/search",
+            json={"query": query, "top_k": top_k},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp.json()["memories"]
+
+    from hotmem.db import MemoryDB
+    from hotmem.search import search_memories
+
+    if not db_path:
+        raise click.ClickException("search requires --db PATH or --url URL")
+    db = MemoryDB(db_path)
+    try:
+        return search_memories(db, query=query, top_k=top_k)
+    finally:
+        db.close()
 
 
 @main.command()
