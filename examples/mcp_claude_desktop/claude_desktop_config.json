@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "hotmem": {
+      "command": "hotmem",
+      "args": ["mcp", "--db", "~/hotmem.sqlite"]
+    }
+  }
+}
