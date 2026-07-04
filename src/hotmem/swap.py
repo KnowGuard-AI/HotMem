@@ -223,6 +223,15 @@ def hydrate(
     return HydrateResult(loaded=loaded, skipped_dupes=skipped)
 
 
+def write_record(f: TextIO, record: dict) -> None:
+    """Serialize one swap record to a JSONL file handle.
+
+    Centralizes the swap-record serialization contract (json + default=str +
+    trailing newline) so callers (snapshot, import) cannot drift apart.
+    """
+    f.write(json.dumps(record, default=str) + "\n")
+
+
 def snapshot(
     db: MemoryDB,
     swap_path: str | Path,
@@ -244,7 +253,7 @@ def snapshot(
                 embedding = row.pop("embedding", None)
                 if embedding is not None:
                     row["embedding_b64"] = base64.b64encode(embedding).decode("ascii")
-                f.write(json.dumps(row, default=str) + "\n")
+                write_record(f, row)
                 if on_progress is not None:
                     on_progress(i)
 

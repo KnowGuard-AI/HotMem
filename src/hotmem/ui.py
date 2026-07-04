@@ -27,6 +27,10 @@ from typing import Any
 
 import click
 
+# Canonical /v1/health payload keys, in display order. Hoisted so both
+# renderers iterate the same contract — adding a health field only edits here.
+_STATUS_KEYS = ("status", "memory_count", "db_path", "uptime_s")
+
 
 def _rich_available() -> bool:
     try:
@@ -62,7 +66,7 @@ class Renderer:
     def search_results(self, rows: list[dict[str, Any]]) -> None: ...
 
     @contextmanager
-    def progress(self, total: int, desc: str = "") -> Iterator[Callable[[int], None]]: ...
+    def progress(self, total: int | None, desc: str = "") -> Iterator[Callable[[int], None]]: ...
 
     def summary(self, label: str, **kv: Any) -> None: ...
 
@@ -71,7 +75,7 @@ class PlainRenderer(Renderer):
     """Plain-text renderer — used when rich is absent or output is piped."""
 
     def status(self, data: dict[str, Any]) -> None:
-        for key in ("status", "memory_count", "db_path", "uptime_s"):
+        for key in _STATUS_KEYS:
             if key in data:
                 click.echo(f"{key.replace('_', ' ').title()}: {data[key]}")
 
@@ -86,7 +90,7 @@ class PlainRenderer(Renderer):
             click.echo(f"{i}. [{score}] {ident}: {content}")
 
     @contextmanager
-    def progress(self, total: int, desc: str = "") -> Iterator[Callable[[int], None]]:
+    def progress(self, total: int | None, desc: str = "") -> Iterator[Callable[[int], None]]:
         # Silent: no progress output when not a TTY / rich absent.
         def tick(_n: int = 0) -> None:
             pass
@@ -113,7 +117,7 @@ class RichRenderer(Renderer):
         table = Table.grid(padding=(0, 1))
         table.add_column(style="cyan")
         table.add_column()
-        for key in ("status", "memory_count", "db_path", "uptime_s"):
+        for key in _STATUS_KEYS:
             if key in data:
                 table.add_row(key.replace("_", " ").title(), str(data[key]))
         self._console.print(Panel(table, title="hotmem status", border_style="green"))
@@ -139,27 +143,36 @@ class RichRenderer(Renderer):
         self._console.print(table)
 
     @contextmanager
-    def progress(self, total: int, desc: str = "") -> Iterator[Callable[[int], None]]:
+    def progress(self, total: int | None, desc: str = "") -> Iterator[Callable[[int], None]]:
         from rich.progress import (
             BarColumn,
             DownloadColumn,
             Progress,
+            SpinnerColumn,
             TextColumn,
             TimeRemainingColumn,
             TransferSpeedColumn,
         )
 
-        prog = Progress(
-            TextColumn("[bold blue]{task.description}"),
-            BarColumn(),
-            DownloadColumn(),
-            TransferSpeedColumn(),
-            TimeRemainingColumn(),
-            console=self._console,
-        )
+        if total is None:
+            # Indeterminate: spinner + description, no byte/ETA columns.
+            prog = Progress(
+                SpinnerColumn(),
+                TextColumn("[bold blue]{task.description}"),
+                console=self._console,
+            )
+        else:
+            prog = Progress(
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TimeRemainingColumn(),
+                console=self._console,
+            )
         prog.start()
         try:
-            task_id = prog.add_task(desc, total=max(total, 1))
+            task_id = prog.add_task(desc, total=total if total is not None else None)
 
             def tick(n: int = 1) -> None:
                 prog.update(task_id, advance=n)

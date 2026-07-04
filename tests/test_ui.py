@@ -116,3 +116,11 @@ def test_rich_progress_contextmanager():
     with r.progress(total=10, desc="test") as tick:
         for _ in range(10):
             tick(1)
+
+
+def test_rich_progress_indeterminate_total_none():
+    pytest.importorskip("rich")
+    r = ui.RichRenderer()
+    with r.progress(total=None, desc="reading") as tick:
+        tick(1)
+        tick(1)

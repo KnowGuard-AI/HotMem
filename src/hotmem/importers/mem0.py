@@ -11,6 +11,11 @@ Purpose:
     with no stored embedding. The history table has the same text + identity
     + timestamps, requires no extra client libs, and is a single file.
 
+    mem0's history is an audit log: ADD creates a memory, UPDATE records a
+    new current text (the original ADD row is left untouched), DELETE marks
+    the memory gone. To import the *current* state we replay events per
+    memory_id in created_at order and emit one record per live memory_id.
+
 Interface:
     read_mem0_sqlite(path, on_progress=None) -> Iterator[dict]
 
@@ -43,13 +48,14 @@ _MEM0_HISTORY_COLUMNS = {
     "role",
 }
 
-_SELECT_SQL = """
-    SELECT new_memory, actor_id, created_at, id
+# Replay history per memory_id in deterministic order. created_at may tie, so
+# the row id is the tiebreaker. Ordering by memory_id first lets us stream
+# the replay one memory at a time rather than loading the whole table.
+_REPLAY_SQL = """
+    SELECT memory_id, new_memory, event, is_deleted, actor_id, created_at, id
     FROM history
-    WHERE event = 'ADD'
-      AND is_deleted = 0
-      AND new_memory IS NOT NULL
-      AND new_memory != ''
+    WHERE memory_id IS NOT NULL
+    ORDER BY memory_id, created_at, id
 """
 
 
@@ -76,50 +82,94 @@ def read_mem0_sqlite(
     *,
     on_progress: Callable[[int], None] | None = None,
 ) -> Iterator[dict]:
-    """Yield HotMem swap-record dicts from a mem0 SQLite history DB.
+    """Yield HotMem swap-record dicts representing the *current* state of a mem0 DB.
 
-    Only rows with event='ADD' and is_deleted=0 are emitted (live memories).
-    Maps:
+    Replays the audit log per memory_id in created_at order: ADD/UPDATE set the
+    current text, DELETE removes the memory. Emits one record per live
+    memory_id with its latest non-empty new_memory. Rows whose latest event is
+    a DELETE, or whose latest new_memory is NULL/empty, are skipped.
+
+    Maps (from the latest live row per memory_id):
         new_memory  -> fact_text
         actor_id    -> identifier  (falls back to "mem0" when NULL/empty)
         created_at  -> created_at
         source      -> "mem0"
-        id          -> id  (mem0 history row id, reused as HotMem memory id)
 
-    on_progress, if given, is invoked once per yielded row with the 1-based
-    row count, enabling byte/row-based progress reporting without coupling
-    this module to any UI library.
+    HotMem memory ids are intentionally NOT carried from mem0 — hydrate
+    auto-generates uuid4 ids and dedups on content_hash, so re-import is
+    idempotent and foreign PK collisions cannot silently drop memories.
+
+    on_progress, if given, is invoked once per yielded record with the
+    1-based count.
     """
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"mem0 source DB not found: {path}")
 
     conn = sqlite3.connect(str(path))
+    count = 0
     try:
         _validate_mem0_schema(conn)
-        cursor = conn.execute(_SELECT_SQL)
-        count = 0
+        cursor = conn.execute(_REPLAY_SQL)
+
+        current_memory_id: str | None = None
+        current_text: str | None = None
+        current_actor: str | None = None
+        current_created: str | None = None
+        current_live = False
+
+        def _flush() -> Iterator[dict]:
+            nonlocal count
+            if (
+                current_memory_id is not None
+                and current_live
+                and current_text
+                and current_text.strip()
+            ):
+                count += 1
+                yield {
+                    "identifier": current_actor or "mem0",
+                    "fact_text": current_text,
+                    "source": "mem0",
+                    "created_at": current_created,
+                }
+                if on_progress is not None:
+                    on_progress(count)
+
         while True:
             row = cursor.fetchone()
             if row is None:
+                yield from _flush()
                 break
-            new_memory, actor_id, created_at, row_id = row
-            identifier = actor_id or "mem0"
-            count += 1
-            yield {
-                "id": row_id,
-                "identifier": identifier,
-                "fact_text": new_memory,
-                "source": "mem0",
-                "created_at": created_at,
-            }
-            if on_progress is not None:
-                on_progress(count)
+
+            memory_id, new_memory, event, is_deleted, actor_id, created_at, _row_id = row
+
+            if current_memory_id is not None and memory_id != current_memory_id:
+                yield from _flush()
+                current_text = None
+                current_actor = None
+                current_created = None
+                current_live = False
+
+            current_memory_id = memory_id
+            # Replay: latest non-DELETE event wins. is_deleted on the row is
+            # also honored so a row marked deleted (even with event='ADD')
+            # removes the memory.
+            if event == "DELETE" or is_deleted:
+                current_live = False
+                current_text = None
+            else:
+                # ADD or UPDATE: adopt this row's text/identity/timestamp.
+                if new_memory is not None and new_memory.strip():
+                    current_text = new_memory
+                    current_actor = actor_id
+                    current_created = created_at
+                current_live = True
     finally:
         conn.close()
 
     _trace.info(
         "importers.mem0",
-        f"read {count} live memories from mem0 history DB",
+        f"replayed mem0 history, emitted {count} live memories",
         detail={"path": str(path), "count": count},
     )

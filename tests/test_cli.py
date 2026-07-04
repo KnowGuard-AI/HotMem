@@ -161,13 +161,21 @@ def test_search_requires_db_or_url():
 def test_search_url_backend(tmp_path: Path):
     runner = CliRunner()
     rows = [{"role": "system", "content": "hit", "identifier": "a", "score": 0.9}]
-    resp = mock.Mock()
-    resp.raise_for_status = mock.Mock()
-    resp.json = lambda: {"memories": rows}
-    with mock.patch("httpx.post", return_value=resp):
+    fake_client = mock.Mock()
+    fake_client.search = mock.Mock(return_value=rows)
+    with mock.patch("hotmem.client.HotMemClient", return_value=fake_client):
         result = runner.invoke(main, ["search", "q", "--url", "http://127.0.0.1:8711"])
     assert result.exit_code == 0, result.output
     assert "hit" in result.output
+
+
+def test_search_rejects_both_db_and_url(tmp_path: Path):
+    runner = CliRunner()
+    result = runner.invoke(
+        main, ["search", "q", "--db", str(tmp_path / "x.sqlite"), "--url", "http://127.0.0.1:8711"]
+    )
+    assert result.exit_code != 0
+    assert "not both" in result.output.lower()
 
 
 # ── renderer delegation sanity ──────────────────────────────────────────

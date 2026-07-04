@@ -204,16 +204,13 @@ def _run_search(
     top_k: int,
 ) -> list[dict]:
     """Resolve backend (HTTP server or local DB) and return search rows."""
-    if url is not None:
-        import httpx
+    if url is not None and db_path is not None:
+        raise click.ClickException("pass either --db or --url, not both")
 
-        resp = httpx.post(
-            f"{url.rstrip('/')}/v1/search",
-            json={"query": query, "top_k": top_k},
-            timeout=30.0,
-        )
-        resp.raise_for_status()
-        return resp.json()["memories"]
+    if url is not None:
+        from hotmem.client import HotMemClient
+
+        return HotMemClient(url).search(query, top_k=top_k)
 
     from hotmem.db import MemoryDB
     from hotmem.search import search_memories
@@ -319,28 +316,38 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
     from hotmem.db import MemoryDB
     from hotmem.importers import IMPORTERS
     from hotmem.swap import hydrate as do_hydrate
+    from hotmem.swap import write_record
 
     reader = IMPORTERS[source.lower()]
 
     ui = get_renderer()
-    swap_path = swap_out or _tempfile.mktemp(suffix=".jsonl", prefix="hotmem_import_")
-    cleanup = swap_out is None
+
+    # Use a private temp dir for transient artifacts so both the swap JSONL
+    # and the target DB are cleaned up atomically and never leave predictable
+    # paths on disk. mkdtemp creates the dir atomically (no mktemp race).
+    tmp_dir = _tempfile.mkdtemp(prefix="hotmem_import_")
+    swap_keep = swap_out is not None
+    target_keep = target_db is not None
+    swap_path = swap_out or os.path.join(tmp_dir, "import.jsonl")
+    target = target_db or os.path.join(tmp_dir, "hotmem.sqlite")
 
     try:
         try:
-            with open(swap_path, "w") as f, ui.progress(total=0, desc="Reading source") as tick:
+            # Reading phase: indeterminate progress (we don't know the row
+            # count up front); the byte-total bar applies to the hydrate phase.
+            with open(swap_path, "w") as f, ui.progress(total=None, desc="Reading source") as _tick:
                 for record in reader(_Path(source_db)):
-                    f.write(json.dumps(record, default=str) + "\n")
-                    tick(1)
+                    write_record(f, record)
         except (ValueError, FileNotFoundError) as err:
             raise click.ClickException(f"import from {source} failed: {err}") from err
 
-        target = target_db or _tempfile.mktemp(suffix=".sqlite", prefix="hotmem_")
         db = MemoryDB(target)
-        total = os.path.getsize(swap_path) if os.path.exists(swap_path) else 0
-        with ui.progress(total=total, desc="Hydrating") as tick:
-            result = do_hydrate(db, swap_path, on_progress=tick)
-        db.close()
+        try:
+            total = os.path.getsize(swap_path) if os.path.exists(swap_path) else 0
+            with ui.progress(total=total, desc="Hydrating") as tick:
+                result = do_hydrate(db, swap_path, on_progress=tick)
+        finally:
+            db.close()
 
         ui.summary(
             "import",
@@ -350,5 +357,11 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
             target=target,
         )
     finally:
-        if cleanup and os.path.exists(swap_path):
+        # Clean up transient artifacts. Kept paths (--out / --target) survive.
+        if not swap_keep and os.path.exists(swap_path):
             os.remove(swap_path)
+        if not target_keep and os.path.exists(target):
+            os.remove(target)
+        # Remove the temp dir if empty (kept artifacts may live elsewhere).
+        if os.path.isdir(tmp_dir) and not os.listdir(tmp_dir):
+            os.rmdir(tmp_dir)
