@@ -5,12 +5,12 @@ the Writer recalls what the Researcher saved.
 
 ## Setup
 
-```sh
-pip install -e ".[dev,mcp]"
-pip install -e adapters/crewai
-pip install crewai                                # framework dep
+See [../README.md](../README.md#prerequisites) for the common HotMem install +
+`hotmem serve` steps. Then install this example's framework deps:
 
-hotmem serve
+```sh
+pip install -e adapters/crewai
+pip install crewai
 ```
 
 ## Run

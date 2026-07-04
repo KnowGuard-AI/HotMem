@@ -122,7 +122,10 @@ def hydrate(swap_file: str, db_path: str):
     from hotmem.swap import hydrate as do_hydrate
 
     ui = get_renderer()
-    total = os.path.getsize(swap_file) if os.path.exists(swap_file) else 0
+    # For .jsonl.gz the on-disk (compressed) size != uncompressed bytes advanced
+    # by on_progress, so the byte bar would overshoot; use indeterminate instead.
+    is_gz = swap_file.lower().endswith(".gz")
+    total = None if is_gz else (os.path.getsize(swap_file) if os.path.exists(swap_file) else 0)
 
     db = MemoryDB(db_path)
     with ui.progress(total=total, desc="Hydrating") as tick:
@@ -335,7 +338,7 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
         try:
             # Reading phase: indeterminate progress (we don't know the row
             # count up front); the byte-total bar applies to the hydrate phase.
-            with open(swap_path, "w") as f, ui.progress(total=None, desc="Reading source") as _tick:
+            with open(swap_path, "w") as f, ui.progress(total=None, desc="Reading source"):
                 for record in reader(_Path(source_db)):
                     write_record(f, record)
         except (ValueError, FileNotFoundError) as err:

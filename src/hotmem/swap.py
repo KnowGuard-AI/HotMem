@@ -232,6 +232,44 @@ def write_record(f: TextIO, record: dict) -> None:
     f.write(json.dumps(record, default=str) + "\n")
 
 
+def add_memory(
+    db: MemoryDB,
+    identifier: str,
+    fact: str,
+    *,
+    source: str = "",
+    importance: float = 0.5,
+    metadata: dict | None = None,
+    ttl_seconds: int | None = None,
+) -> tuple[str, str]:
+    """Insert one memory into the DB using the canonical add contract.
+
+    Centralizes the uuid → content_hash → embed → pack → insert sequence so
+    callers (server, mcp, playground, examples) cannot drift apart. Returns
+    (memory_id, content_hash).
+    """
+    import uuid
+
+    memory_id = uuid.uuid4().hex
+    content_hash = compute_content_hash(identifier, fact)
+    vec = embed_text(fact)
+    blob = pack_embedding(vec)
+    db.insert(
+        id=memory_id,
+        identifier=identifier,
+        fact_text=fact,
+        embedding=blob,
+        embedding_dim=EMBEDDING_DIM,
+        embedding_model=EMBEDDING_MODEL,
+        source=source,
+        importance=importance,
+        metadata_json=json.dumps(metadata or {}),
+        content_hash=content_hash,
+        ttl_seconds=ttl_seconds,
+    )
+    return memory_id, content_hash
+
+
 def snapshot(
     db: MemoryDB,
     swap_path: str | Path,

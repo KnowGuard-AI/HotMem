@@ -5,8 +5,11 @@ your memories as tools.
 
 ## Setup
 
+See [../README.md](../README.md#prerequisites) for the common HotMem install
+steps. This example needs the MCP extra:
+
 ```sh
-pip install -e ".[mcp]"                # HotMem with MCP support
+pip install -e ".[mcp]"
 ```
 
 ## Configure Claude Desktop
