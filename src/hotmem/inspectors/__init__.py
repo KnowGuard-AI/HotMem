@@ -17,7 +17,7 @@ Extension: register a new inspector by format name in INSPECTORS below.
 
 from __future__ import annotations
 
-from hotmem.storage import UnsupportedSchemeError
+from hotmem.storage import UnsupportedSchemeError  # noqa: F401 — re-exported for callers
 
 from .base import FileInspection, FileInspector, resolve_adapter
 from .csv_inspector import CSVInspector
@@ -59,7 +59,12 @@ def get_inspector(uri: str) -> FileInspector:
     format.
     """
     _, meta = resolve_adapter(uri)
-    fmt = meta["format"]
+    inspector = _inspector_for_format(meta["format"])
+    return inspector
+
+
+def _inspector_for_format(fmt: str) -> FileInspector:
+    """Look up an inspector by format name, or raise UnsupportedFormatError."""
     inspector = INSPECTORS.get(fmt)
     if inspector is None:
         raise UnsupportedFormatError(
@@ -83,16 +88,6 @@ def inspect_file(
     formats; otherwise a FileInspection (which may carry
     ``unsupported_reason`` for a recognized-but-malformed file).
     """
-    try:
-        adapter, meta = resolve_adapter(uri)
-    except UnsupportedSchemeError:
-        raise
-
-    fmt = meta["format"]
-    inspector = INSPECTORS.get(fmt)
-    if inspector is None:
-        raise UnsupportedFormatError(
-            f"no inspector for format {fmt!r}; "
-            "analytical execution (DuckDB/Polars/Arrow) is owned by EMOS, not HotMem"
-        )
+    adapter, meta = resolve_adapter(uri)
+    inspector = _inspector_for_format(meta["format"])
     return inspector.inspect(uri, adapter, meta, count_rows=count_rows, sample_size=sample_size)
