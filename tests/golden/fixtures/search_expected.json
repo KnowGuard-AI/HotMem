@@ -1,0 +1,8 @@
+{
+  "role": "system",
+  "content": "<str>",
+  "memory_id": "<uuid>",
+  "identifier": "<str>",
+  "score": "<float>",
+  "created_at": "<ts>"
+}
