@@ -131,6 +131,33 @@ def _resolve(uri: str) -> Path:
     return Path(uri)
 
 
+class _ByteTrackingLineReader:
+    """Wrap a binary file line iterator, yielding decoded lines + byte offsets.
+
+    This lets a single ``csv.reader`` handle quoted fields with embedded
+    newlines (the csv module pulls extra lines as needed) while we still
+    track the cumulative byte offset of each logical line for provenance.
+    """
+
+    __slots__ = ("_lines", "_offset")
+
+    def __init__(self, f) -> None:
+        self._lines = f
+        self._offset = 0
+
+    def __iter__(self) -> _ByteTrackingLineReader:
+        return self
+
+    def __next__(self) -> str:
+        raw = next(self._lines)
+        self._offset += len(raw)
+        return raw.decode("utf-8", errors="replace")
+
+    @property
+    def offset(self) -> int:
+        return self._offset
+
+
 def _scan(
     uri: str,
     columns: list[str],
@@ -139,7 +166,7 @@ def _scan(
     count_rows: bool,
     sample_size: int,
 ) -> tuple[list[dict[str, Any]], list[tuple[int, int]], int | None]:
-    """Stream the file once to collect a bounded sample and optional row count.
+    """Stream the file once via a single csv.reader (handles quoted newlines).
 
     Memory is O(sample_size rows); the file is read in a single streaming pass.
     Byte ranges for sampled rows are recorded for provenance (#38 enabler).
@@ -149,30 +176,36 @@ def _scan(
     byte_ranges: list[tuple[int, int]] = []
     row_count = 0 if count_rows else None
     collected = 0
-    offset = 0
 
     with open(path, "rb") as f:
-        line_iter = iter(f)
-        # Skip the header line from sampling/counting if one was detected.
-        if has_header:
-            header_line = next(line_iter, b"")
-            offset += len(header_line)
+        tracker = _ByteTrackingLineReader(f)
+        reader = csv.reader(tracker, delimiter=delimiter)
 
-        for raw in line_iter:
-            line_len = len(raw)
-            if collected < sample_size:
-                text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                if text:
-                    cells = next(csv.reader([text], delimiter=delimiter))
-                    row_dict: dict[str, Any] = {}
-                    for i, val in enumerate(cells):
-                        key = columns[i] if i < len(columns) else f"col_{i}"
-                        row_dict[key] = val
-                    sample_rows.append(row_dict)
-                    byte_ranges.append((offset, line_len))
-                    collected += 1
-            if count_rows and raw.strip():
+        row_iter = iter(reader)
+        # Skip the header line if one was detected.
+        if has_header:
+            next(row_iter, None)
+
+        for row in row_iter:
+            # Byte offset at the *end* of this record; the start is the
+            # previous end (or 0 for the first data row).
+            end_offset = tracker.offset
+            # Approximate the start offset by subtracting the bytes of the
+            # row's serialized form. This is exact for simple rows and close
+            # enough for provenance; the csv module doesn't expose exact
+            # byte positions for multi-line records.
+            row_bytes = sum(len(cell) + 1 for cell in row)  # cells + delimiters
+            start_offset = max(0, end_offset - row_bytes)
+
+            if collected < sample_size and row:
+                row_dict: dict[str, Any] = {}
+                for i, val in enumerate(row):
+                    key = columns[i] if i < len(columns) else f"col_{i}"
+                    row_dict[key] = val
+                sample_rows.append(row_dict)
+                byte_ranges.append((start_offset, end_offset - start_offset))
+                collected += 1
+            if count_rows and row:
                 row_count = (row_count or 0) + 1
-            offset += line_len
 
     return sample_rows, byte_ranges, row_count

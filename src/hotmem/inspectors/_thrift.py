@@ -129,9 +129,9 @@ class ThriftCompactReader:
         size = header >> 4
         element_type = header & 0x0F
         if size == 0x0F:
+            # The element type is in the low nibble of the header byte;
+            # only the size is a varint per the Compact Protocol spec.
             size = self._read_varint()
-            # When size==15 the element type byte follows separately.
-            element_type = self._read_byte()
         return [self.read_value(element_type) for _ in range(size)]
 
     def read_map(self) -> dict[Any, Any]:

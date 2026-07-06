@@ -69,6 +69,17 @@ def test_csv_file_uri_scheme(csv_file):
     assert insp.columns == ["id", "vendor", "amount"]
 
 
+def test_csv_handles_quoted_fields_with_embedded_newlines(tmp_path):
+    """A quoted CSV field containing a newline is one record, not two."""
+    path = tmp_path / "quoted.csv"
+    path.write_text('id,note\n1,"line one\nline two"\n2,simple\n')
+    insp = inspect_file(str(path), count_rows=True, sample_size=5)
+    assert insp.row_count == 2
+    assert insp.sample is not None and len(insp.sample) == 2
+    assert insp.sample[0] == {"id": "1", "note": "line one\nline two"}
+    assert insp.sample[1] == {"id": "2", "note": "simple"}
+
+
 # ── JSONL ────────────────────────────────────────────────────────────────────
 
 
@@ -172,6 +183,26 @@ def test_parquet_too_small_reports_unsupported_reason(tmp_path):
 
 
 # ── Registry + error paths ─────────────────────────────────────────────────────
+
+
+def test_thrift_read_list_with_15_plus_elements():
+    """Regression: read_list must not consume an extra element_type byte when
+    the list size is encoded as a varint (size >= 15). The element type lives
+    in the header byte's low nibble per the Compact Protocol spec."""
+    from hotmem.inspectors._thrift import _CT_I32, ThriftCompactReader
+
+    buf = bytearray()
+    buf.append(0xF0 | _CT_I32)  # size >= 15, element type = i32
+    # varint zigzag of 20
+    zz = (20 << 1) ^ (20 >> 63)
+    buf.append(zz & 0x7F)
+    # 20 i32 values of 0 (zigzag varint of 0 is a single 0 byte)
+    for _ in range(20):
+        buf.append(0)
+    reader = ThriftCompactReader(bytes(buf))
+    result = reader.read_list()
+    assert len(result) == 20
+    assert all(v == 0 for v in result)
 
 
 def test_inspect_file_unknown_format_raises(tmp_path):

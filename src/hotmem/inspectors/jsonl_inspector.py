@@ -32,11 +32,6 @@ class JSONLInspector:
         count_rows: bool = False,
         sample_size: int = 5,
     ) -> FileInspection:
-        row_count: int | None
-        sample_rows: list[dict[str, Any]] = []
-        byte_ranges: list[tuple[int, int]] = []
-        unsupported_reason: str | None = None
-
         path = _resolve(uri)
         row_count, sample_rows, byte_ranges, unsupported_reason = _stream(
             path, count_rows=count_rows, sample_size=sample_size
