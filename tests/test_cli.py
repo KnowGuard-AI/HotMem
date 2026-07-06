@@ -193,6 +193,44 @@ def test_search_rejects_both_db_and_url(tmp_path: Path):
     assert "not both" in result.output.lower()
 
 
+# ── inspect ────────────────────────────────────────────────────────────
+
+
+def test_inspect_csv_json_output(tmp_path: Path):
+    path = tmp_path / "data.csv"
+    path.write_text("id,name\n1,alice\n2,bob\n")
+    result = CliRunner().invoke(main, ["inspect", str(path), "--json", "--count-rows"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["format"] == "csv"
+    assert data["columns"] == ["id", "name"]
+    assert data["row_count"] == 2
+    assert len(data["checksum"]) == 64
+
+
+def test_inspect_csv_plain_output(tmp_path: Path):
+    path = tmp_path / "data.csv"
+    path.write_text("id,name\n1,alice\n2,bob\n")
+    result = CliRunner().invoke(main, ["inspect", str(path), "--count-rows"])
+    assert result.exit_code == 0, result.output
+    assert "format=csv" in result.output
+    assert "columns: id, name" in result.output
+
+
+def test_inspect_unsupported_format_errors(tmp_path: Path):
+    path = tmp_path / "notes.txt"
+    path.write_text("just prose\n")
+    result = CliRunner().invoke(main, ["inspect", str(path)])
+    assert result.exit_code != 0
+    assert "EMOS" in result.output
+
+
+def test_inspect_remote_scheme_errors():
+    result = CliRunner().invoke(main, ["inspect", "s3://bucket/key.csv"])
+    assert result.exit_code != 0
+    assert "EMOS" in result.output
+
+
 # ── renderer delegation sanity ──────────────────────────────────────────
 
 
