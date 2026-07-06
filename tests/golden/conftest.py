@@ -104,6 +104,5 @@ def assert_keys_exact(actual: dict, expected_keys: set[str], where: str) -> None
     """Assert the dict has exactly ``expected_keys`` (no more, no fewer)."""
     actual_keys = set(actual)
     assert actual_keys == expected_keys, (
-        f"{where}: key drift. expected {sorted(expected_keys)}, "
-        f"got {sorted(actual_keys)}"
+        f"{where}: key drift. expected {sorted(expected_keys)}, got {sorted(actual_keys)}"
     )

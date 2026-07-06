@@ -95,6 +95,4 @@ def inspect_file(
             f"no inspector for format {fmt!r}; "
             "analytical execution (DuckDB/Polars/Arrow) is owned by EMOS, not HotMem"
         )
-    return inspector.inspect(
-        uri, adapter, meta, count_rows=count_rows, sample_size=sample_size
-    )
+    return inspector.inspect(uri, adapter, meta, count_rows=count_rows, sample_size=sample_size)

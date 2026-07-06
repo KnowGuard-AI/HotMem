@@ -63,8 +63,7 @@ def test_mcp_tool_required_fields_are_locked(tmp_path):
     for name, required in LOCKED_REQUIRED.items():
         schema = tools[name]["inputSchema"]
         assert schema.get("required", []) == required, (
-            f"MCP tool {name}: required drift. expected {required}, "
-            f"got {schema.get('required')}"
+            f"MCP tool {name}: required drift. expected {required}, got {schema.get('required')}"
         )
 
 

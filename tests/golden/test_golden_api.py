@@ -18,9 +18,7 @@ def test_health_shape(client):
     resp = client.get("/v1/health")
     assert resp.status_code == 200
     body = resp.json()
-    assert_keys_exact(
-        body, {"status", "memory_count", "db_path", "uptime_s"}, "GET /v1/health"
-    )
+    assert_keys_exact(body, {"status", "memory_count", "db_path", "uptime_s"}, "GET /v1/health")
     assert mask(body) == {
         "status": "<str>",
         "memory_count": "<int>",

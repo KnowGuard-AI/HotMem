@@ -54,12 +54,33 @@ def test_jsonl_snapshot_record_key_set_is_locked(tmp_path: Path):
         # The full extended-record key set — locked so a column rename/add is
         # an intentional, additive change caught here.
         assert keys == {
-            "id", "identifier", "fact_text", "embedding_dim", "embedding_model",
-            "source", "importance", "metadata_json", "content_hash", "ttl_seconds",
-            "created_at", "namespace", "tier", "memory_type", "source_uri",
-            "source_format", "source_checksum", "byte_offset", "byte_length",
-            "updated_at", "snapshot_id", "promotion_state", "promotion_candidate",
-            "parent_memory", "related_memories", "tags", "schema_version",
+            "id",
+            "identifier",
+            "fact_text",
+            "embedding_dim",
+            "embedding_model",
+            "source",
+            "importance",
+            "metadata_json",
+            "content_hash",
+            "ttl_seconds",
+            "created_at",
+            "namespace",
+            "tier",
+            "memory_type",
+            "source_uri",
+            "source_format",
+            "source_checksum",
+            "byte_offset",
+            "byte_length",
+            "updated_at",
+            "snapshot_id",
+            "promotion_state",
+            "promotion_candidate",
+            "parent_memory",
+            "related_memories",
+            "tags",
+            "schema_version",
             "embedding_b64",
         }
     finally:
@@ -109,8 +130,7 @@ def test_jsonl_hydrate_dedup_is_stable(tmp_path: Path):
     db = MemoryDB(tmp_path / "d.sqlite")
     swap = tmp_path / "s.jsonl"
     swap.write_text(
-        json.dumps({"identifier": "u", "fact_text": "stable fact", "content_hash": "h" * 64})
-        + "\n"
+        json.dumps({"identifier": "u", "fact_text": "stable fact", "content_hash": "h" * 64}) + "\n"
     )
     try:
         first = hydrate(db, swap)
