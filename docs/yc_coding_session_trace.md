@@ -1,10 +1,22 @@
-# Coding Agent Session: Building HotMem
-**A local-first memory sidecar for agent applications**
-Submitted for YC Summer 2026 — Optional coding agent session evidence
----
-Built April 28 - May 1, 2026 (4 days)
+# OKF: Coding Agent Session Trace
 
-## Context
+Status: Archived
+Owner: HotMem maintainers
+Last updated: 2026-07-06
+Scope: Historical build narrative and YC Summer 2026 coding-agent evidence
+
+## 1. Purpose
+
+This archived note preserves the original coding-agent session trace for
+building HotMem. It is historical evidence, not the active implementation plan.
+
+**A local-first memory sidecar for agent applications**
+
+Submitted for YC Summer 2026 as optional coding-agent session evidence.
+
+Built April 28 - May 1, 2026 (4 days).
+
+## 2. Context
 
 We're building KnowGuard — enterprise anomaly detection for financial documents. Our core pipeline already works: ingest invoices, extract features via NVIDIA NIM, score for duplicates and rate mismatches, produce evidence packs.
 
@@ -14,9 +26,7 @@ Rather than adopt an external vector DB or build memory into the core app, we sc
 
 This session shows how we built it from spec to working integration in a single agentic workflow.
 
----
-
-## Our Process
+## 3. Process
 
 We don't use AI to scaffold projects or generate boilerplate. Our codebases are hand-architected with clear foundations. What we use agents for:
 
@@ -27,9 +37,7 @@ We don't use AI to scaffold projects or generate boilerplate. Our codebases are 
 
 The agent doesn't replace us. It operates within the constraints we set, and we course-correct when it drifts.
 
----
-
-## Session Trace
+## 4. Session Trace
 
 ### Phase 1: Specification & Planning
 
@@ -130,9 +138,7 @@ Each fix was a separate commit with verification before and after.
 - Tested available models, found `llama-3.3-nemotron-super-49b-v1` works on Inception account
 - Updated config, committed
 
----
-
-## What This Demonstrates
+## 5. What This Demonstrates
 
 **We don't generate codebases — we extend them.** The KnowGuard app existed before this session. HotMem was conceived, specified, and built as a modular addition. The integration touched 4 files in the existing app.
 
@@ -144,9 +150,7 @@ Each fix was a separate commit with verification before and after.
 
 **The human sets constraints. The agent operates within them.** When the agent tried to rebuild the demo page from scratch, the human stopped it: "Who asked you to do it this way? Plan first, minimally." The agent adjusted.
 
----
-
-## Deliverables
+## 6. Deliverables
 
 | Artifact | Description |
 |---|---|
@@ -156,9 +160,14 @@ Each fix was a separate commit with verification before and after.
 | Demo page (`/demo`) | Real pipeline execution, measured metrics, findings delta, memory trace |
 | `.worklog.md` | Agent resumption context — architecture map, integration state, open items |
 
----
+## 7. Current Relevance
 
-## The Principle
+This note is retained because it captures why HotMem was designed as a small
+sidecar instead of an embedded app feature or external vector database. Current
+vNext planning should use [File-Native Memory Practices](okf/file-native-memory-practices.md)
+and the GitHub issues as the active source of implementation direction.
+
+## 8. The Principle
 
 HotMem doesn't make the model smarter. It makes the task context sharper.
 
