@@ -118,7 +118,12 @@ def test_sync_client_emits_locked_payloads(tmp_path):
     ]
     # add payload — exact key set
     assert set(log[1][2]) == {
-        "identifier", "fact", "source", "importance", "metadata", "ttl_seconds",
+        "identifier",
+        "fact",
+        "source",
+        "importance",
+        "metadata",
+        "ttl_seconds",
     }
     assert log[1][2] == {
         "identifier": "vendor",
@@ -162,7 +167,12 @@ def test_async_client_emits_locked_payloads():
     ]
     # add payload omits ttl_seconds only when None — locked default shape
     assert set(log[1][2]) == {
-        "identifier", "fact", "source", "importance", "metadata", "ttl_seconds",
+        "identifier",
+        "fact",
+        "source",
+        "importance",
+        "metadata",
+        "ttl_seconds",
     }
 
 
@@ -198,8 +208,13 @@ def test_sync_client_return_shapes(tmp_path):
         assert_keys_exact(
             listed[0],
             {
-                "id", "identifier", "fact_text", "importance",
-                "metadata_json", "source", "created_at",
+                "id",
+                "identifier",
+                "fact_text",
+                "importance",
+                "metadata_json",
+                "source",
+                "created_at",
             },
             "client.list()[0]",
         )

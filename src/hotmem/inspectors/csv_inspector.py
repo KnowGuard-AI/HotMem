@@ -127,7 +127,7 @@ def _all_numeric(row: list[str]) -> bool:
 
 def _resolve(uri: str) -> Path:
     if uri.startswith("file://"):
-        return Path(uri[len("file://"):])
+        return Path(uri[len("file://") :])
     return Path(uri)
 
 
