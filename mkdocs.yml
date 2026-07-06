@@ -44,4 +44,12 @@ nav:
   - API Reference: api.md
   - CLI: cli.md
   - Architecture:
-      - vNext Design: vnext/0001-file-aware-sidecar.md
+      - File-Aware Architecture: okf/file-aware-architecture.md
+  - OKF Notes:
+      - Overview: okf/index.md
+      - Format and Maintenance: okf/format-and-maintenance.md
+      - File-Aware Architecture: okf/file-aware-architecture.md
+      - File-Native Memory Epic: okf/file-native-epic.md
+      - File-Native Memory Practices: okf/file-native-memory-practices.md
+  - History:
+      - Coding Agent Session Trace: yc_coding_session_trace.md

@@ -1,4 +1,16 @@
-# CLI
+# OKF: CLI Reference
+
+Status: Accepted
+Owner: HotMem maintainers
+Last updated: 2026-07-06
+Scope: Stable command-line interface reference
+
+## 1. Purpose
+
+This document records the stable HotMem CLI. Existing commands and flags should
+remain compatible as file-native behavior is added.
+
+## 2. Common Commands
 
 ```bash
 hotmem serve --port 8711 --mount ./data/hotmem
@@ -11,9 +23,16 @@ hotmem openapi --output openapi.json
 hotmem openapi --output openapi.yaml --format yaml
 ```
 
-## Commands
+## 3. Compatibility Rules
 
-### `serve`
+- `hydrate` and `snapshot` keep JSONL support.
+- New snapshot formats must be additive.
+- Existing flags should not change meaning.
+- Future warnings about DB growth should be informational by default.
+
+## 4. Commands
+
+### 4.1 `serve`
 
 Start the HotMem sidecar server.
 
@@ -24,7 +43,7 @@ Start the HotMem sidecar server.
 | `--db` | — | Explicit database path |
 | `--host` | 127.0.0.1 | Host to bind to |
 
-### `hydrate`
+### 4.2 `hydrate`
 
 Load a swap file into the database.
 
@@ -33,7 +52,7 @@ Load a swap file into the database.
 | `--file` | swap.jsonl | Swap file path |
 | `--db` | required | Database path |
 
-### `snapshot`
+### 4.3 `snapshot`
 
 Export database memories to a swap file.
 
@@ -42,7 +61,7 @@ Export database memories to a swap file.
 | `--file` | swap.jsonl | Output swap file path |
 | `--db` | required | Database path |
 
-### `status`
+### 4.4 `status`
 
 Check if a HotMem server is running.
 
@@ -51,7 +70,7 @@ Check if a HotMem server is running.
 | `--port` | 8711 | Port to check |
 | `--host` | 127.0.0.1 | Host to check |
 
-### `openapi`
+### 4.5 `openapi`
 
 Export the OpenAPI specification.
 
@@ -59,3 +78,8 @@ Export the OpenAPI specification.
 |---|---|---|
 | `--output` / `-o` | stdout | Output file path |
 | `--format` | json | Output format (json or yaml) |
+
+## 5. Open Questions
+
+- Should future file-native health hints appear under `status`, a new
+  `inspect`, or both?
