@@ -33,10 +33,11 @@ from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedd
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
 from hotmem.provenance import ProvenanceError
 from hotmem.search import search_memories
+from hotmem.snapshot import SnapshotChecksumError
+from hotmem.snapshot import hydrate as snapshot_hydrate
+from hotmem.snapshot import snapshot as snapshot_write
 from hotmem.storage import UnsupportedSchemeError
 from hotmem.swap import compute_content_hash
-from hotmem.swap import hydrate as swap_hydrate
-from hotmem.swap import snapshot as swap_snapshot
 from hotmem.trace import Timer, get_tracer, new_trace_id
 
 _trace = get_tracer("server")
@@ -116,11 +117,29 @@ class SearchRequest(BaseModel):
 
 
 class HydrateRequest(BaseModel):
-    file: str | None = None
+    """Import memories from a snapshot path (v2 directory or legacy JSONL)."""
+
+    model_config = {"populate_by_name": True}
+
+    path: str | None = Field(default=None, description="Snapshot directory or JSONL file")
+    file: str | None = Field(
+        default=None, description="Deprecated alias for 'path'", deprecated=True
+    )
 
 
 class SnapshotRequest(BaseModel):
-    file: str | None = None
+    """Export memories to a snapshot path (v2 directory or legacy JSONL)."""
+
+    model_config = {"populate_by_name": True}
+
+    path: str | None = Field(default=None, description="Snapshot directory or JSONL file")
+    file: str | None = Field(
+        default=None, description="Deprecated alias for 'path'", deprecated=True
+    )
+    copy_attachments: bool = Field(
+        default=False,
+        description="Copy small file-backed byte ranges into attachments/ (v2 only)",
+    )
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
@@ -138,7 +157,7 @@ async def lifespan(app: FastAPI):
 
     # Auto-hydrate if swap file exists
     if swap_path and Path(swap_path).exists():
-        result = swap_hydrate(db, swap_path)
+        result = snapshot_hydrate(db, swap_path)
         _trace.info(
             "startup",
             f"auto-hydrated {result.loaded} memories",
@@ -392,22 +411,50 @@ def create_app(
     @app.post("/v1/hydrate")
     async def hydrate(req: HydrateRequest):
         db: MemoryDB = _state["db"]
-        swap = req.file or _state.get("swap_path") or "swap.jsonl"
+        target = req.path or req.file or _state.get("swap_path") or "swap.jsonl"
         try:
-            result = swap_hydrate(db, swap)
+            result = snapshot_hydrate(db, target)
+        except SnapshotChecksumError as err:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "snapshot_checksum_mismatch",
+                    "reason": err.reason,
+                    "file": err.file,
+                    "expected": err.expected,
+                    "actual": err.actual,
+                    "message": str(err),
+                },
+            )
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
         return {
             "loaded": result.loaded,
             "skipped_dupes": result.skipped_dupes,
+            "path": target,
         }
 
     @app.post("/v1/snapshot")
     async def snapshot(req: SnapshotRequest):
         db: MemoryDB = _state["db"]
-        swap = req.file or _state.get("swap_path") or "swap.jsonl"
+        base_dir: str = _state["base_dir"]
+        target = req.path or req.file or _state.get("swap_path") or "swap.jsonl"
         try:
-            result = swap_snapshot(db, swap)
+            result = snapshot_write(
+                db, target, copy_attachments=req.copy_attachments, base_dir=base_dir
+            )
+        except SnapshotChecksumError as err:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "snapshot_checksum_mismatch",
+                    "reason": err.reason,
+                    "file": err.file,
+                    "expected": err.expected,
+                    "actual": err.actual,
+                    "message": str(err),
+                },
+            )
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
         return {

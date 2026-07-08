@@ -113,17 +113,33 @@ def mcp(mount: str | None, db_path: str | None):
     "swap_file",
     default="swap.jsonl",
     type=click.Path(),
-    help="Swap file path.",
+    help="Snapshot path: a directory (v2) or .jsonl/.jsonl.gz file (legacy).",
 )
 @click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
 def hydrate(swap_file: str, db_path: str):
-    """Load a swap file into the database."""
+    """Load a snapshot into the database (v2 directory or legacy JSONL)."""
     from hotmem.db import MemoryDB
+
+    # Route v2 directories through the snapshot dispatch (no progress bar);
+    # legacy .jsonl/.jsonl.gz goes through swap.hydrate with the UI progress bar.
+    is_dir_target = not swap_file.endswith((".jsonl", ".jsonl.gz"))
+    if is_dir_target:
+        from hotmem.snapshot import hydrate as do_hydrate_v2
+        from hotmem.snapshot.format import SnapshotChecksumError
+
+        db = MemoryDB(db_path)
+        try:
+            result = do_hydrate_v2(db, swap_file)
+        except SnapshotChecksumError as err:
+            db.close()
+            raise click.ClickException(f"Snapshot checksum failure ({err.reason}): {err}") from err
+        db.close()
+        get_renderer().summary("hydrate", loaded=result.loaded, skipped_dupes=result.skipped_dupes)
+        return
+
     from hotmem.swap import hydrate as do_hydrate
 
     ui = get_renderer()
-    # For .jsonl.gz the on-disk (compressed) size != uncompressed bytes advanced
-    # by on_progress, so the byte bar would overshoot; use indeterminate instead.
     is_gz = swap_file.lower().endswith(".gz")
     total = None if is_gz else (os.path.getsize(swap_file) if os.path.exists(swap_file) else 0)
 
@@ -141,12 +157,45 @@ def hydrate(swap_file: str, db_path: str):
     "swap_file",
     default="swap.jsonl",
     type=click.Path(),
-    help="Output swap file path.",
+    help="Snapshot path: a directory (v2) or .jsonl/.jsonl.gz file (legacy).",
 )
 @click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
-def snapshot(swap_file: str, db_path: str):
-    """Export database memories to a swap file."""
+@click.option(
+    "--attach",
+    "copy_attachments",
+    is_flag=True,
+    default=False,
+    help="Copy small file-backed byte ranges into attachments/ (v2 only).",
+)
+def snapshot(swap_file: str, db_path: str, copy_attachments: bool):
+    """Export database memories to a snapshot (v2 directory or legacy JSONL).
+
+    A path ending in .jsonl/.jsonl.gz writes a legacy single-file snapshot;
+    any other path writes a v2 directory (manifest + memories.jsonl + optional
+    attachments). Pass --attach to copy small file-backed byte ranges (<8 KB)
+    into attachments/; large ranges stay referenced.
+    """
+    from pathlib import Path
+
     from hotmem.db import MemoryDB
+
+    # Route v2 directories through the snapshot dispatch;
+    # legacy .jsonl/.jsonl.gz goes through swap.snapshot with the UI progress bar.
+    is_dir_target = not swap_file.endswith((".jsonl", ".jsonl.gz"))
+    if is_dir_target:
+        from hotmem.snapshot import snapshot as do_snapshot_v2
+
+        db = MemoryDB(db_path)
+        result = do_snapshot_v2(
+            db,
+            swap_file,
+            copy_attachments=copy_attachments,
+            base_dir=str(Path(db_path).resolve().parent),
+        )
+        db.close()
+        get_renderer().summary("snapshot", exported=result.exported, path=result.path)
+        return
+
     from hotmem.swap import snapshot as do_snapshot
 
     ui = get_renderer()
