@@ -1,11 +1,16 @@
 """HotMem search — hybrid ranking with message-shaped output.
 
 Purpose:
-    Given a query, embed it, retrieve candidates from the DB, apply hybrid scoring
-    (cosine + FTS5 BM25 + importance), and return LLM-ready message objects.
+     Given a query, embed it, retrieve candidates from the DB, apply hybrid scoring
+     (cosine + FTS5 BM25 + importance), and return LLM-ready message objects.
+
+     File-backed memories with a summary are searched by their summary; those
+     without a summary have NULL embeddings (cosine 0) and NULL fact_text, so
+     they are skipped (no searchable text). The /v1/search response shape is
+     unchanged: each result carries role/content/memory_id/identifier/score.
 
 Interface:
-    search_memories(db, query, top_k, max_chars?) -> list[MessageObject]
+     search_memories(db, query, top_k, max_chars?) -> list[MessageObject]
 
 Deps: hotmem.db, hotmem.embed, hotmem.trace
 Extension: add reranking, decay weighting, or MMR diversity here.
@@ -41,6 +46,14 @@ def _normalize_bm25(rows: list[dict[str, Any]]) -> dict[str, float]:
     return {row["id"]: 1.0 - ((float(row["bm25_score"]) - best) / (worst - best)) for row in rows}
 
 
+def _search_text(row: dict[str, Any]) -> str:
+    """Return the text to rank against: fact_text (inline) or fact_summary (file-backed)."""
+    text = row.get("fact_text")
+    if text:  # truthy: catches None and "" (file-backed uses empty fact_text)
+        return text
+    return row.get("fact_summary") or ""
+
+
 def search_memories(
     db: MemoryDB,
     query: str,
@@ -64,13 +77,17 @@ def search_memories(
         # Apply hybrid scoring
         scored = []
         for row in candidates:
+            text = _search_text(row)
+            # Skip memories with no searchable text (file-backed without summary).
+            if not text:
+                continue
             cosine_score = row.get("cosine_score") or 0.0
             fts_score = fts_scores.get(row["id"], 0.0)
             importance = row.get("importance", 0.5)
 
             final_score = W_COSINE * cosine_score + W_FTS * fts_score + W_IMPORTANCE * importance
 
-            scored.append({**row, "final_score": final_score})
+            scored.append({**row, "final_score": final_score, "_search_text": text})
 
         # Sort by final score descending, take top_k
         scored.sort(key=lambda x: x["final_score"], reverse=True)
@@ -80,7 +97,7 @@ def search_memories(
         messages = []
         char_budget = max_chars
         for item in top:
-            content = item["fact_text"]
+            content = item["_search_text"]
             if char_budget is not None:
                 if char_budget <= 0:
                     break

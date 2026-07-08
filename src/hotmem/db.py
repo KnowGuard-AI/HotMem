@@ -66,6 +66,8 @@ _MEMORY_COLUMNS: tuple[str, ...] = (
     "related_memories",
     "tags",
     "schema_version",
+    "fact_summary",
+    "provenance_json",
 )
 
 
@@ -100,7 +102,7 @@ _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS memories (
     id              TEXT PRIMARY KEY,
     identifier      TEXT NOT NULL,
-    fact_text       TEXT NOT NULL,
+    fact_text       TEXT,
     embedding       BLOB,
     embedding_dim   INTEGER DEFAULT {EMBEDDING_DIM},
     embedding_model TEXT DEFAULT '',
@@ -125,7 +127,9 @@ CREATE TABLE IF NOT EXISTS memories (
     parent_memory   TEXT DEFAULT '',
     related_memories TEXT DEFAULT '[]',
     tags            TEXT DEFAULT '[]',
-    schema_version  INTEGER DEFAULT 1
+    schema_version  INTEGER DEFAULT 1,
+    fact_summary    TEXT,
+    provenance_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_memories_identifier ON memories(identifier);
 CREATE INDEX IF NOT EXISTS idx_memories_identifier_created ON memories(identifier, created_at);
@@ -189,13 +193,21 @@ class MemoryRecord:
     related_memories: str = "[]"
     tags: str = "[]"
     schema_version: int = 1
+    fact_summary: str | None = None
+    provenance_json: str | None = None
 
 
 def _cosine_similarity(blob_a: bytes | None, blob_b: bytes | None) -> float | None:
-    """SQLite UDF: cosine similarity between two packed float32 blobs."""
+    """SQLite UDF: cosine similarity between two packed float32 blobs.
+
+    Returns 0.0 for NULL embeddings (file-backed without summary) so they
+    rank last but don't break search queries.
+    """
     if blob_a is None or blob_b is None:
-        return None
+        return 0.0
     n = len(blob_a) // 4
+    if n == 0 or len(blob_b) // 4 != n:
+        return 0.0  # empty or mismatched embeddings score 0
     a = struct.unpack(f"{n}f", blob_a)
     b = struct.unpack(f"{n}f", blob_b)
     dot = sum(x * y for x, y in zip(a, b, strict=True))
@@ -257,6 +269,8 @@ class MemoryDB:
             "related_memories": "TEXT DEFAULT '[]'",
             "tags": "TEXT DEFAULT '[]'",
             "schema_version": "INTEGER DEFAULT 1",
+            "fact_summary": "TEXT",
+            "provenance_json": "TEXT",
         }
         added = []
         for column, decl in _V2_COLUMNS.items():
@@ -316,6 +330,8 @@ class MemoryDB:
         related_memories: str = "[]",
         tags: str = "[]",
         schema_version: int = 1,
+        fact_summary: str | None = None,
+        provenance_json: str | None = None,
     ) -> None:
         """Insert a memory row."""
         values = {
@@ -347,6 +363,8 @@ class MemoryDB:
             "related_memories": related_memories,
             "tags": tags,
             "schema_version": schema_version,
+            "fact_summary": fact_summary,
+            "provenance_json": provenance_json,
         }
         self._conn.execute(
             _INSERT_OR_REPLACE_SQL,
@@ -354,6 +372,79 @@ class MemoryDB:
         )
         self._conn.commit()
         _trace.debug("insert", f"stored memory {id[:8]}…", detail={"identifier": identifier})
+
+    def insert_file_backed(
+        self,
+        id: str,
+        identifier: str,
+        source_uri: str,
+        byte_offset: int,
+        byte_length: int,
+        source_format: str,
+        source_checksum: str | None,
+        *,
+        fact_summary: str | None = None,
+        embedding: bytes | None = None,
+        embedding_dim: int = EMBEDDING_DIM,
+        embedding_model: str = "",
+        source: str = "",
+        importance: float = 0.5,
+        metadata_json: str = "{}",
+        content_hash: str = "",
+        provenance_json: str | None = None,
+    ) -> None:
+        """Insert a file-backed memory row (zero bytes copied).
+
+        ``fact_text`` is NULL for file-backed memories; ``fact_summary`` may
+        carry a short summary (and its embedding) so the memory is searchable.
+        """
+        self.insert(
+            id=id,
+            identifier=identifier,
+            fact_text="",  # NOT NULL constraint relaxed; use empty string fallback
+            embedding=embedding or b"",
+            embedding_dim=embedding_dim,
+            embedding_model=embedding_model,
+            source=source,
+            importance=importance,
+            metadata_json=metadata_json,
+            content_hash=content_hash,
+            memory_type="file",
+            source_uri=source_uri,
+            source_format=source_format,
+            source_checksum=source_checksum or "",
+            byte_offset=byte_offset,
+            byte_length=byte_length,
+            fact_summary=fact_summary,
+            provenance_json=provenance_json,
+        )
+        _trace.debug(
+            "insert_file",
+            f"stored file-backed memory {id[:8]}…",
+            detail={"identifier": identifier, "source_uri": source_uri},
+        )
+
+    def get_memory(self, id: str) -> dict[str, Any] | None:
+        """Return one memory row as a dict (metadata only; no file I/O)."""
+        cols = ", ".join(_MEMORY_COLUMNS)
+        row = self._conn.execute(
+            f"SELECT {cols} FROM memories WHERE id = ?",
+            (id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_file_backed(self) -> list[dict[str, Any]]:
+        """Return all file-backed memory rows (metadata only; no file I/O).
+
+        Filters on ``memory_type = 'file'`` and returns the same columns as
+        ``get_memory()``. Used for provenance queries and batch hydration
+        without touching any backing file.
+        """
+        cols = ", ".join(_MEMORY_COLUMNS)
+        rows = self._conn.execute(
+            f"SELECT {cols} FROM memories WHERE memory_type = 'file'"
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def insert_many_ignore(self, records: Iterable[MemoryRecord]) -> int:
         """Insert many memory rows in one transaction, ignoring duplicate hashes/ids."""
@@ -370,8 +461,9 @@ class MemoryDB:
     def search_with_cosine(self, query_embedding: bytes) -> list[dict[str, Any]]:
         """Return all memories with their cosine similarity to the query embedding."""
         rows = self._conn.execute(
-            f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
-                      created_at, cosine_sim(embedding, ?) AS cosine_score
+            f"""SELECT id, identifier, fact_text, fact_summary, importance,
+                      metadata_json, source, created_at,
+                      cosine_sim(embedding, ?) AS cosine_score
                FROM memories
                WHERE {_ttl_live()}
                ORDER BY cosine_score DESC""",
@@ -408,7 +500,7 @@ class MemoryDB:
             "namespace, tier, memory_type, source_uri, source_format, "
             "source_checksum, byte_offset, byte_length, updated_at, snapshot_id, "
             "promotion_state, promotion_candidate, parent_memory, "
-            "related_memories, tags, schema_version"
+            "related_memories, tags, schema_version, fact_summary, provenance_json"
         )
         base = (
             "id, identifier, fact_text, embedding_dim, embedding_model, source, "
