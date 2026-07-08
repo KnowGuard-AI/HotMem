@@ -277,6 +277,46 @@ def _run_search(
 
 
 @main.command()
+@click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit raw JSON (bypasses the renderer, for scripting).",
+)
+def hygiene(db_path: str, as_json: bool):
+    """Run advisory hygiene checks on the memory store."""
+    import json as _json
+
+    from hotmem.db import MemoryDB
+    from hotmem.hygiene import check_hygiene
+
+    db = MemoryDB(db_path)
+    try:
+        report = check_hygiene(db, base_dir=str(_Path(db_path).resolve().parent))
+    finally:
+        db.close()
+
+    if as_json:
+        click.echo(_json.dumps(report.to_dict(), indent=2, default=str))
+        return
+
+    r = report.to_dict()
+    if r["warning_count"] == 0:
+        click.echo("No hygiene warnings. Store is healthy.")
+    else:
+        click.echo(
+            f"Hygiene: {r['warning_count']} warnings "
+            f"({r['error_count']} errors, {r['warn_count']} warnings, "
+            f"{r['info_count']} info)"
+        )
+        for w in r["warnings"]:
+            icon = {"error": "!", "warn": "~", "info": "i"}.get(w["severity"], "?")
+            click.echo(f"  [{icon}] [{w['category']}] {w['message']}")
+    click.echo(f"Stats: {r['stats']}")
+
+
+@main.command()
 @click.option(
     "--output",
     "-o",
