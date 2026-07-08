@@ -6,8 +6,12 @@ Purpose:
 
 Interface:
     HotMemClient(base_url)
-        .add(identifier, fact, ...) -> dict
+        .add(identifier, fact, ...) -> dict                  # inline (unchanged)
+        .add_file_ref(identifier, file_ref, ...) -> dict      # file-backed
         .search(query, top_k, max_chars?) -> list[MessageObject]
+        .get_memory(memory_id) -> dict                        # metadata only
+        .hydrate_memory(memory_id) -> bytes                    # lazy payload
+        .list(identifier, ...) -> list[dict]
         .health() -> dict
         .hydrate(file?) -> dict
         .snapshot(file?) -> dict
@@ -48,7 +52,7 @@ class HotMemClient:
         metadata: dict[str, Any] | None = None,
         ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
-        """Add a fact to memory."""
+        """Add an inline fact to memory."""
         payload = {
             "identifier": identifier,
             "fact": fact,
@@ -58,6 +62,43 @@ class HotMemClient:
         }
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
+        resp = self._client.post("/v1/add", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def add_file_ref(
+        self,
+        identifier: str,
+        file_uri: str,
+        *,
+        byte_offset: int = 0,
+        byte_length: int = 0,
+        source_format: str = "",
+        source_checksum: str | None = None,
+        summary: str | None = None,
+        source: str = "",
+        importance: float = 0.5,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Add a file-backed memory by reference (zero bytes copied).
+
+        The memory stores a URI + byte range reference; the backing file is
+        not read at add time. Hydrate on demand via ``hydrate_memory()``.
+        """
+        payload: dict[str, Any] = {
+            "identifier": identifier,
+            "file_uri": file_uri,
+            "byte_offset": byte_offset,
+            "byte_length": byte_length,
+            "source_format": source_format,
+            "source": source,
+            "importance": importance,
+            "metadata": metadata or {},
+        }
+        if source_checksum is not None:
+            payload["source_checksum"] = source_checksum
+        if summary is not None:
+            payload["summary"] = summary
         resp = self._client.post("/v1/add", json=payload)
         resp.raise_for_status()
         return resp.json()
@@ -75,6 +116,18 @@ class HotMemClient:
         resp = self._client.post("/v1/search", json=payload)
         resp.raise_for_status()
         return resp.json()["memories"]
+
+    def get_memory(self, memory_id: str) -> dict[str, Any]:
+        """Return memory metadata without touching the backing file."""
+        resp = self._client.get(f"/v1/memory/{memory_id}")
+        resp.raise_for_status()
+        return resp.json()
+
+    def hydrate_memory(self, memory_id: str) -> bytes:
+        """Materialize a memory's payload on demand (lazy hydration)."""
+        resp = self._client.post(f"/v1/memory/{memory_id}/hydrate")
+        resp.raise_for_status()
+        return resp.content
 
     def list(
         self,
@@ -157,6 +210,39 @@ class AsyncHotMemClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def add_file_ref(
+        self,
+        identifier: str,
+        file_uri: str,
+        *,
+        byte_offset: int = 0,
+        byte_length: int = 0,
+        source_format: str = "",
+        source_checksum: str | None = None,
+        summary: str | None = None,
+        source: str = "",
+        importance: float = 0.5,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Add a file-backed memory by reference (zero bytes copied)."""
+        payload: dict[str, Any] = {
+            "identifier": identifier,
+            "file_uri": file_uri,
+            "byte_offset": byte_offset,
+            "byte_length": byte_length,
+            "source_format": source_format,
+            "source": source,
+            "importance": importance,
+            "metadata": metadata or {},
+        }
+        if source_checksum is not None:
+            payload["source_checksum"] = source_checksum
+        if summary is not None:
+            payload["summary"] = summary
+        resp = await self._client.post("/v1/add", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
     async def search(
         self,
         query: str,
@@ -170,6 +256,18 @@ class AsyncHotMemClient:
         resp = await self._client.post("/v1/search", json=payload)
         resp.raise_for_status()
         return resp.json()["memories"]
+
+    async def get_memory(self, memory_id: str) -> dict[str, Any]:
+        """Return memory metadata without touching the backing file."""
+        resp = await self._client.get(f"/v1/memory/{memory_id}")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def hydrate_memory(self, memory_id: str) -> bytes:
+        """Materialize a memory's payload on demand (lazy hydration)."""
+        resp = await self._client.post(f"/v1/memory/{memory_id}/hydrate")
+        resp.raise_for_status()
+        return resp.content
 
     async def list(
         self,
