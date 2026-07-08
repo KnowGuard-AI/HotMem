@@ -1,6 +1,6 @@
 [project]
 name = "hotmem"
-version = "0.1.9"
+version = "0.2.0"
 description = "A local-first memory sidecar for agent applications"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,8 +16,6 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
 ]
 
 dependencies = [
@@ -32,25 +30,10 @@ Homepage = "https://github.com/KnowGuard-AI/HotMem"
 Repository = "https://github.com/KnowGuard-AI/HotMem"
 
 [project.optional-dependencies]
-mcp = [
-    "mcp>=1.0,<2",
-]
-playground = [
-    "rich>=13.7,<14",
-]
-rich = [
-    "rich>=13.7,<14",
-]
-docs = [
-    "mkdocs>=1.6,<2",
-    "mkdocs-material>=9.5,<10",
-    "pyyaml>=6.0,<7",
-]
 dev = [
     "pytest>=9,<10",
     "pytest-cov>=6,<7",
     "ruff>=0.15,<1",
-    "rich>=13.7,<14",
 ]
 
 [project.scripts]
@@ -72,3 +55,4 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+

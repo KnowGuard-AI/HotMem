@@ -25,11 +25,15 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field, model_validator
 
 from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
+from hotmem.provenance import ProvenanceError
 from hotmem.search import search_memories
+from hotmem.storage import UnsupportedSchemeError
 from hotmem.swap import compute_content_hash
 from hotmem.swap import hydrate as swap_hydrate
 from hotmem.swap import snapshot as swap_snapshot
@@ -45,6 +49,17 @@ except PackageNotFoundError:
     except ImportError:
         _VERSION = "0.0.0+unknown"
 
+
+def _safe_json(value: str | None, default: Any) -> Any:
+    """Decode a JSON column defensively; return ``default`` on failure/None."""
+    if value is None:
+        return default
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return default
+
+
 # ── App state (set during lifespan) ──────────────────────────────────────────
 
 _state: dict[str, Any] = {}
@@ -54,12 +69,44 @@ _state: dict[str, Any] = {}
 
 
 class AddRequest(BaseModel):
+    """Add an inline fact OR a file reference.
+
+    Exactly one of ``fact`` (inline) or ``file_uri`` (file-backed) must be
+    provided. Existing inline payloads using ``identifier`` + ``fact`` are
+    unchanged. When ``file_uri`` is present, the memory stores a reference
+    to the byte range — zero bytes copied into SQLite.
+    """
+
     identifier: str
-    fact: str
+    fact: str | None = None
+    file_uri: str | None = Field(
+        default=None, description="file://, absolute, or relative path to backing file"
+    )
+    byte_offset: int | None = Field(default=None, ge=0)
+    byte_length: int | None = Field(default=None, ge=0)
+    source_format: str | None = Field(default=None, description="e.g. csv, jsonl, parquet, bin")
+    source_checksum: str | None = Field(
+        default=None,
+        description="SHA-256 of the byte range; optional (unverified if omitted)",
+    )
+    summary: str | None = Field(
+        default=None,
+        description="Optional short summary for a file-backed memory (makes it searchable)",
+    )
     source: str = ""
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
     metadata: dict[str, Any] = Field(default_factory=dict)
     ttl_seconds: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _exactly_one_payload(self) -> AddRequest:
+        has_fact = self.fact is not None
+        has_file = self.file_uri is not None
+        if has_fact == has_file:
+            raise ValueError("provide exactly one of 'fact' or 'file_uri'")
+        if has_file and (self.byte_offset is None or self.byte_length is None):
+            raise ValueError("'byte_offset' and 'byte_length' are required when 'file_uri' is set")
+        return self
 
 
 class SearchRequest(BaseModel):
@@ -114,11 +161,19 @@ def create_app(
     db_path: str | Path,
     swap_path: str | Path | None = None,
     port: int = 8711,
+    base_dir: str | Path | None = None,
 ) -> FastAPI:
-    """Create and configure the FastAPI application."""
+    """Create and configure the FastAPI application.
+
+    ``base_dir`` resolves relative file_ref URIs. Defaults to the parent
+    directory of ``db_path`` (i.e. the mount dir).
+    """
     _state["db_path"] = str(db_path)
     _state["swap_path"] = str(swap_path) if swap_path else None
     _state["port"] = port
+    if base_dir is None:
+        base_dir = str(Path(db_path).resolve().parent)
+    _state["base_dir"] = str(base_dir)
 
     app = FastAPI(
         title="HotMem",
@@ -158,25 +213,69 @@ def create_app(
     @app.post("/v1/add")
     async def add_memory(req: AddRequest):
         db: MemoryDB = _state["db"]
+        base_dir: str = _state["base_dir"]
         with Timer() as t:
-            memory_id = uuid.uuid4().hex
-            content_hash = compute_content_hash(req.identifier, req.fact)
-            vec = embed_text(req.fact)
-            blob = pack_embedding(vec)
+            if req.file_uri is not None:
+                # File-backed path: store a reference, zero bytes copied.
+                ref = FileRef(
+                    source_uri=req.file_uri,
+                    byte_offset=req.byte_offset or 0,
+                    byte_length=req.byte_length or 0,
+                    source_format=req.source_format or "",
+                    source_checksum=req.source_checksum,
+                )
+                try:
+                    memory_id, content_hash = add_file_backed(
+                        db,
+                        identifier=req.identifier,
+                        file_ref=ref,
+                        base_dir=base_dir,
+                        summary=req.summary,
+                        importance=req.importance,
+                        metadata=req.metadata,
+                        source=req.source,
+                    )
+                except UnsupportedSchemeError as err:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": "unsupported_scheme",
+                            "scheme": err.args[0] if err.args else "unknown",
+                            "message": (
+                                "only local schemes are supported (file://, "
+                                "absolute, relative); remote schemes remain EMOS-owned"
+                            ),
+                        },
+                    )
+                except FileNotFoundError as err:
+                    return JSONResponse(
+                        status_code=400,
+                        content={
+                            "error": "backing_file_not_found",
+                            "source_uri": req.file_uri,
+                            "message": str(err),
+                        },
+                    )
+            else:
+                # Inline path (unchanged from v1).
+                memory_id = uuid.uuid4().hex
+                content_hash = compute_content_hash(req.identifier, req.fact or "")
+                vec = embed_text(req.fact or "")
+                blob = pack_embedding(vec)
 
-            db.insert(
-                id=memory_id,
-                identifier=req.identifier,
-                fact_text=req.fact,
-                embedding=blob,
-                embedding_dim=EMBEDDING_DIM,
-                embedding_model=EMBEDDING_MODEL,
-                source=req.source,
-                importance=req.importance,
-                metadata_json=json.dumps(req.metadata),
-                content_hash=content_hash,
-                ttl_seconds=req.ttl_seconds,
-            )
+                db.insert(
+                    id=memory_id,
+                    identifier=req.identifier,
+                    fact_text=req.fact or "",
+                    embedding=blob,
+                    embedding_dim=EMBEDDING_DIM,
+                    embedding_model=EMBEDDING_MODEL,
+                    source=req.source,
+                    importance=req.importance,
+                    metadata_json=json.dumps(req.metadata),
+                    content_hash=content_hash,
+                    ttl_seconds=req.ttl_seconds,
+                )
         return {
             "memory_id": memory_id,
             "content_hash": content_hash,
@@ -215,6 +314,80 @@ def create_app(
             "count": len(rows),
             "trace_ms": round(t.ms, 2),
         }
+
+    @app.get("/v1/memory/{memory_id}")
+    async def get_memory(memory_id: str):
+        """Return memory metadata WITHOUT touching the backing file (lazy)."""
+        db: MemoryDB = _state["db"]
+        record = get_memory_metadata(db, memory_id)
+        if record is None:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "not_found", "memory_id": memory_id},
+            )
+        meta = {
+            "id": record["id"],
+            "identifier": record["identifier"],
+            "memory_type": record["memory_type"],
+            "fact_text": record["fact_text"],
+            "fact_summary": record.get("fact_summary"),
+            "embedding_dim": record["embedding_dim"],
+            "embedding_model": record["embedding_model"],
+            "source": record["source"],
+            "importance": record["importance"],
+            "metadata": _safe_json(record["metadata_json"], {}),
+            "content_hash": record["content_hash"],
+            "source_uri": record["source_uri"],
+            "byte_offset": record["byte_offset"],
+            "byte_length": record["byte_length"],
+            "source_checksum": record["source_checksum"],
+            "source_format": record["source_format"],
+            "provenance": _safe_json(record.get("provenance_json"), None),
+            "created_at": record["created_at"],
+        }
+        return meta
+
+    @app.post("/v1/memory/{memory_id}/hydrate")
+    async def hydrate_one(memory_id: str):
+        """Materialize a memory's payload on demand (lazy hydration)."""
+        db: MemoryDB = _state["db"]
+        base_dir: str = _state["base_dir"]
+        with Timer() as t:
+            try:
+                payload = hydrate_memory(db, memory_id, base_dir=base_dir)
+            except KeyError:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": "not_found", "memory_id": memory_id},
+                )
+            except ProvenanceError as err:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "provenance_mismatch",
+                        "reason": err.reason,
+                        "expected": err.expected,
+                        "actual": err.actual,
+                        "source_uri": err.source_uri,
+                        "message": str(err),
+                    },
+                )
+            except UnsupportedSchemeError as err:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "unsupported_scheme", "message": str(err)},
+                )
+
+            record = get_memory_metadata(db, memory_id)
+            verified = record is not None and bool(record["source_checksum"])
+            source_format = record.get("source_format", "") if record else ""
+
+        headers = {
+            "X-HotMem-Source-Format": source_format or "",
+            "X-HotMem-Provenance": "verified" if verified else "unverified",
+            "X-HotMem-Trace-Ms": str(round(t.ms, 2)),
+        }
+        return Response(content=payload, media_type="application/octet-stream", headers=headers)
 
     @app.post("/v1/hydrate")
     async def hydrate(req: HydrateRequest):
