@@ -172,7 +172,8 @@ def write_snapshot_v2(
         inline_count = sum(1 for r in records if r["memory_type"] != "file")
         file_backed_count = sum(1 for r in records if r["memory_type"] == "file")
 
-        # Write metadata.json first (now included in checksums per the plan).
+        # Write metadata.json (informational only — NOT included in checksums
+        # so wall-clock timestamps/host don't break manifest determinism).
         meta = MetadataInfo(
             hotmem_version=__version__,
             created_at=_utc_now_iso(),
@@ -183,13 +184,11 @@ def write_snapshot_v2(
         metadata_path = out_dir / METADATA_NAME
         metadata_path.write_text(json.dumps(meta.to_dict(), sort_keys=True, indent=2) + "\n")
 
-        # Compute per-file checksums for manifest (metadata.json IS listed).
+        # Compute per-file checksums for manifest (metadata.json excluded for
+        # determinism — it carries created_at/host which vary per run).
         per_file: dict[str, FileEntry] = {
             MEMORIES_NAME: FileEntry(
                 size=os.path.getsize(memories_path), sha256=sha256_file(memories_path)
-            ),
-            METADATA_NAME: FileEntry(
-                size=os.path.getsize(metadata_path), sha256=sha256_file(metadata_path)
             ),
         }
         # List attachment files in deterministic (sorted) order.

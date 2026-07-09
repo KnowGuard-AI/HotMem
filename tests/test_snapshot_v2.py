@@ -269,7 +269,13 @@ def test_determinism(populated_db: MemoryDB, tmp_path: Path):
     mem2 = (dir2 / MEMORIES_NAME).read_bytes()
     assert mem1 == mem2, "memories.jsonl must be byte-identical for identical input"
 
-    # metadata.json may differ in created_at/host; the rest must match.
+    # manifest.json must be byte-identical except for created_at (wall-clock).
+    m1.pop("created_at", None)
+    m2.pop("created_at", None)
+    assert m1 == m2, "manifest.json must be identical (minus created_at) for identical input"
+    assert m1["overall_sha256"] == m2["overall_sha256"], "overall_sha256 must be deterministic"
+
+    # metadata.json is informational; may differ in created_at/host.
     meta1 = json.loads((dir1 / METADATA_NAME).read_text())
     meta2 = json.loads((dir2 / METADATA_NAME).read_text())
     meta1.pop("created_at", None)

@@ -1,0 +1,9 @@
+{
+  "id": "<uuid>",
+  "identifier": "<str>",
+  "fact_text": "<str>",
+  "importance": "<float>",
+  "metadata_json": "<str>",
+  "source": "<str>",
+  "created_at": "<ts>"
+}
