@@ -84,7 +84,9 @@ def _capture() -> tuple[list[tuple[str, str, dict]], httpx.MockTransport]:
             case "/v1/memories":
                 return httpx.Response(200, json={"memories": [], "count": 0, "trace_ms": 1.0})
             case "/v1/hydrate":
-                return httpx.Response(200, json={"loaded": 1, "skipped_dupes": 0})
+                return httpx.Response(
+                    200, json={"loaded": 1, "skipped_dupes": 0, "path": "swap.jsonl"}
+                )
             case "/v1/snapshot":
                 return httpx.Response(200, json={"exported": 1, "path": "swap.jsonl"})
         return httpx.Response(404)
@@ -220,7 +222,7 @@ def test_sync_client_return_shapes(tmp_path):
         )
 
         hydrated = client.hydrate()
-        assert_keys_exact(hydrated, {"loaded", "skipped_dupes"}, "client.hydrate()")
+        assert_keys_exact(hydrated, {"loaded", "skipped_dupes", "path"}, "client.hydrate()")
 
         snap = client.snapshot()
         assert_keys_exact(snap, {"exported", "path"}, "client.snapshot()")

@@ -155,8 +155,8 @@ def test_hydrate_response_shape(client, tmp_path):
     resp = client.post("/v1/hydrate", json={"file": str(swap)})
     assert resp.status_code == 200
     body = resp.json()
-    assert_keys_exact(body, {"loaded", "skipped_dupes"}, "POST /v1/hydrate")
-    assert mask(body) == {"loaded": "<int>", "skipped_dupes": "<int>"}
+    assert_keys_exact(body, {"loaded", "skipped_dupes", "path"}, "POST /v1/hydrate")
+    assert mask(body) == {"loaded": "<int>", "skipped_dupes": "<int>", "path": "<path>"}
 
 
 def test_hydrate_rejects_unsupported_extension(client, tmp_path):

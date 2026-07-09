@@ -4,6 +4,36 @@ All notable changes to HotMem will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.1] - 2026-07-08
+
+### Added — Snapshot v2 directory format (#39)
+- Snapshot v2 directory layout: `manifest.json` (authoritative, checksummed),
+  `memories.jsonl` (sorted by id, base64 embeddings), `metadata.json`
+  (informational, not checksummed), and an opt-in `attachments/` directory.
+- `manifest.json` carries `schema_version`, `snapshot_id`, per-file SHA-256
+  + size, an `overall_sha256` aggregate, and a `file_references` array for
+  file-backed memories.
+- Unified path-based dispatch: `hotmem snapshot/hydrate --file <path>` and
+  `/v1/snapshot`/`/v1/hydrate` infer the format from the path (`.jsonl`/
+  `.jsonl.gz` -> legacy single-file; directory -> v2). No new required flags.
+- `--attach` flag (v2 only) copies small file-backed byte ranges (< 8 KB)
+  into `attachments/`; large ranges stay referenced (reference-not-duplicate).
+- Deterministic output: identical DBs produce byte-identical manifest +
+  memories + attachments (only `metadata.json.created_at` differs).
+- Manifest checksum verification on hydrate: any mismatch/missing listed file
+  raises `SnapshotChecksumError` -> HTTP 409 with a precise JSON body.
+- Legacy reader now tolerates stored-embedding records (#25) and v2 columns
+  in JSONL; legacy writer now emits v2 columns + base64 embeddings.
+- `.jsonl.gz` gzip support on legacy read/write.
+- `/v1/snapshot` and `/v1/hydrate` accept `path` (new) with `file` as a
+  deprecated alias for backwards compatibility.
+
+### Changed
+- `MemoryDB.all_rows()` now includes the `embedding` BLOB so snapshots can
+  store embeddings instead of re-embedding on hydrate.
+- `hotmem.swap` is now a thin re-export shim over `hotmem.snapshot.legacy`;
+  existing imports and `tests/test_swap.py` keep working unchanged.
+
 ## [0.2.0] - 2026-07-08
 
 ### Added — File-backed memories (#38)
