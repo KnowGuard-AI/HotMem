@@ -313,6 +313,76 @@ def openapi(output: str | None, fmt: str):
 
 
 @main.command()
+@click.argument("uri")
+@click.option(
+    "--count-rows",
+    is_flag=True,
+    help=(
+        "Compute row counts where cheap (CSV/JSONL). "
+        "Parquet row count always comes from the footer."
+    ),
+)
+@click.option(
+    "--sample",
+    "sample_size",
+    default=5,
+    type=int,
+    help="Max sample rows to preview (CSV/JSONL).",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    help="Emit raw JSON (bypasses the renderer, for scripting).",
+)
+def inspect(uri: str, count_rows: bool, sample_size: int, as_json: bool):
+    """Inspect a local file's structure and provenance without ingesting it.
+
+    Lightweight metadata-only inspection for CSV, JSONL, and Parquet files.
+    Never copies file contents into the database — returns URI, size, checksum,
+    columns, and an optional bounded sample. Unsupported formats and remote
+    schemes fail with a clear error.
+    """
+    from hotmem.inspectors import UnsupportedFormatError, inspect_file
+    from hotmem.storage import UnsupportedSchemeError
+
+    try:
+        inspection = inspect_file(uri, count_rows=count_rows, sample_size=sample_size)
+    except UnsupportedFormatError as err:
+        raise click.ClickException(str(err)) from err
+    except UnsupportedSchemeError as err:
+        raise click.ClickException(str(err)) from err
+
+    data = inspection.to_dict()
+
+    if as_json:
+        click.echo(json.dumps(data, indent=2, default=str))
+        return
+
+    ui = get_renderer()
+    ui.summary(
+        "inspect",
+        format=data["format"],
+        size=data["size"],
+        rows=data["row_count"],
+        checksum=str(data["checksum"])[:12] + "…",
+    )
+    if data["columns"]:
+        click.echo(f"columns: {', '.join(data['columns'])}")
+    if data["delimiter"]:
+        click.echo(f"delimiter: {data['delimiter']!r}  has_header: {data['has_header']}")
+    if data["num_row_groups"] is not None:
+        types = ", ".join(data["schema_types"] or [])
+        click.echo(f"row_groups: {data['num_row_groups']}  schema_types: {types}")
+    if data["sample"]:
+        click.echo("sample:")
+        for row in data["sample"]:
+            click.echo("  " + json.dumps(row, default=str))
+    if data["unsupported_reason"]:
+        click.echo(f"warning: {data['unsupported_reason']}", err=True)
+
+
+@main.command()
 @click.option("--db", "db_path", default=None, type=click.Path(), help="Database file path.")
 @click.option("--url", default=None, help="Running server URL (e.g. http://127.0.0.1:8711).")
 def playground(db_path: str | None, url: str | None):
