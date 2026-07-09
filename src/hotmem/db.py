@@ -162,6 +162,7 @@ CREATE TABLE IF NOT EXISTS bundle_index (
     primary_file     TEXT,
     metadata_json    TEXT DEFAULT '{{}}',
     attachment_count INTEGER DEFAULT 0,
+    checksum         TEXT DEFAULT '',
     modified_time    TEXT,
     size_hint        INTEGER DEFAULT 0,
     warning_count    INTEGER DEFAULT 0,
@@ -457,36 +458,42 @@ class MemoryDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def upsert_bundle_index(self, entry: Any) -> None:
+    def upsert_bundle_index(self, entry: Any, *, _commit: bool = True) -> None:
         """Upsert a BundleIndexEntry into the ``bundle_index`` table.
 
         ``entry`` is a ``hotmem.bundle_index.BundleIndexEntry``; we accept Any
         to avoid a circular import (bundle_index imports db).
+
+        Set ``_commit=False`` to batch multiple upserts in a single transaction
+        (the caller manages BEGIN/COMMIT).
         """
         import json as _json
 
         self._conn.execute(
             """INSERT OR REPLACE INTO bundle_index
                (path, primary_file, metadata_json, attachment_count,
-                modified_time, size_hint, warning_count)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                checksum, modified_time, size_hint, warning_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 entry.path,
                 entry.primary_file,
                 _json.dumps(entry.metadata_summary or {}),
                 entry.attachment_count,
+                getattr(entry, "checksum", ""),
                 entry.modified_time,
                 entry.size_hint,
                 entry.warning_count,
             ),
         )
-        self._conn.commit()
+        if _commit:
+            self._conn.commit()
 
     def list_bundle_index(self) -> list[dict[str, Any]]:
         """Return all bundle index entries (metadata only; no file I/O)."""
         rows = self._conn.execute(
             """SELECT path, primary_file, metadata_json, attachment_count,
-                      modified_time, size_hint, warning_count, discovered_at
+                      checksum, modified_time, size_hint, warning_count,
+                      discovered_at
                FROM bundle_index ORDER BY path"""
         ).fetchall()
         return [dict(r) for r in rows]
