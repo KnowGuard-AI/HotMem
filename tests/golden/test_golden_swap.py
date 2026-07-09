@@ -81,6 +81,8 @@ def test_jsonl_snapshot_record_key_set_is_locked(tmp_path: Path):
             "related_memories",
             "tags",
             "schema_version",
+            "fact_summary",
+            "provenance_json",
             "embedding_b64",
         }
     finally:
