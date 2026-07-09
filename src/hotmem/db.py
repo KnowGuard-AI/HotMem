@@ -156,6 +156,17 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
     VALUES('delete', old.rowid, old.fact_text);
     INSERT INTO memories_fts(rowid, fact_text) VALUES (new.rowid, new.fact_text);
 END;
+
+CREATE TABLE IF NOT EXISTS bundle_index (
+    path             TEXT PRIMARY KEY,
+    primary_file     TEXT,
+    metadata_json    TEXT DEFAULT '{{}}',
+    attachment_count INTEGER DEFAULT 0,
+    modified_time    TEXT,
+    size_hint        INTEGER DEFAULT 0,
+    warning_count    INTEGER DEFAULT 0,
+    discovered_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
 """
 
 _FTS_TOKEN_RE = re.compile(r"[\w]+")
@@ -445,6 +456,45 @@ class MemoryDB:
             f"SELECT {cols} FROM memories WHERE memory_type = 'file'"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def upsert_bundle_index(self, entry: Any) -> None:
+        """Upsert a BundleIndexEntry into the ``bundle_index`` table.
+
+        ``entry`` is a ``hotmem.bundle_index.BundleIndexEntry``; we accept Any
+        to avoid a circular import (bundle_index imports db).
+        """
+        import json as _json
+
+        self._conn.execute(
+            """INSERT OR REPLACE INTO bundle_index
+               (path, primary_file, metadata_json, attachment_count,
+                modified_time, size_hint, warning_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                entry.path,
+                entry.primary_file,
+                _json.dumps(entry.metadata_summary or {}),
+                entry.attachment_count,
+                entry.modified_time,
+                entry.size_hint,
+                entry.warning_count,
+            ),
+        )
+        self._conn.commit()
+
+    def list_bundle_index(self) -> list[dict[str, Any]]:
+        """Return all bundle index entries (metadata only; no file I/O)."""
+        rows = self._conn.execute(
+            """SELECT path, primary_file, metadata_json, attachment_count,
+                      modified_time, size_hint, warning_count, discovered_at
+               FROM bundle_index ORDER BY path"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def clear_bundle_index(self) -> None:
+        """Remove all bundle index entries."""
+        self._conn.execute("DELETE FROM bundle_index")
+        self._conn.commit()
 
     def insert_many_ignore(self, records: Iterable[MemoryRecord]) -> int:
         """Insert many memory rows in one transaction, ignoring duplicate hashes/ids."""
