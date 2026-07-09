@@ -7,7 +7,7 @@ Purpose:
      patterns first; stricter validation is deferred (OKF progressive
      strictness).
 
-Bundle layout (all optional except ``memory.md``)::
+Bundle layout (all optional except a memory body file)::
 
      bundle/
        memory.md          # required — markdown content (becomes fact_text)
@@ -20,10 +20,13 @@ Bundle layout (all optional except ``memory.md``)::
 
 Unknown files are ignored in permissive mode. Attachments are referenced
 by URI/path, not copied into SQLite (reference-not-duplicate, #38).
+Symlinks in attachments/ that escape the bundle directory are rejected.
 
 Interface:
-     detect_bundle(path) -> bool
-     read_bundle(db, bundle_dir, *, base_dir=None) -> BundleResult
+      detect_bundle(path) -> bool
+      read_bundle(db, bundle_dir, *, base_dir=None) -> BundleResult
+      parse_bundle(bundle_dir, *, base_dir=None, strict=False)
+          -> tuple[list[MemoryRecord], list[BundleWarning]]
 
 Deps: hotmem.db, hotmem.embed, hotmem.swap, hotmem.storage, hotmem.trace
 Extension: add strict validation mode, remote bundles, or bundle indexing here.
@@ -68,6 +71,9 @@ _KNOWN_FILES: frozenset[str] = frozenset(
         MANIFEST_JSON,
     }
 )
+
+# Per-file size cap to prevent OOM on malformed/huge bundles (16 MB).
+_MAX_FILE_SIZE = 16 * 1024 * 1024
 
 
 @dataclass
@@ -116,9 +122,67 @@ def _find_memory_body(bundle_dir: Path) -> Path | None:
     return None
 
 
+def _read_file_capped(path: Path, warnings: list[BundleWarning]) -> str | None:
+    """Read a text file with a size cap; warn + return None if too large."""
+    try:
+        size = path.stat().st_size
+    except OSError as err:
+        warnings.append(BundleWarning(str(path), f"stat error: {err}"))
+        return None
+    if size > _MAX_FILE_SIZE:
+        warnings.append(
+            BundleWarning(str(path), f"file too large ({size} bytes > {_MAX_FILE_SIZE}); skipped")
+        )
+        return None
+    return path.read_text(encoding="utf-8")
+
+
+def _build_inline_record(
+    identifier: str,
+    fact_text: str,
+    *,
+    source: str = "bundle",
+    importance: float = 0.5,
+    metadata: dict[str, Any] | None = None,
+    content_hash: str | None = None,
+    namespace: str = "",
+    tier: str = "hot",
+    tags: list[str] | None = None,
+    provenance: dict[str, Any] | None = None,
+    summary: str | None = None,
+    record_id: str | None = None,
+) -> MemoryRecord:
+    """Build an inline MemoryRecord with the canonical hash→embed→pack sequence.
+
+    Centralizes record construction so bundle body, facts, and events share
+    one code path — no default drift across the three parsers.
+    """
+    if content_hash is None:
+        content_hash = compute_content_hash(identifier, fact_text)
+    blob = pack_embedding(embed_text(fact_text))
+    return MemoryRecord(
+        id=record_id or uuid.uuid4().hex,
+        identifier=identifier,
+        fact_text=fact_text,
+        embedding=blob,
+        embedding_dim=EMBEDDING_DIM,
+        embedding_model=EMBEDDING_MODEL,
+        source=source,
+        importance=importance,
+        metadata_json=json.dumps(metadata or {}),
+        content_hash=content_hash,
+        namespace=namespace,
+        tier=tier,
+        tags=json.dumps(tags or []),
+        fact_summary=summary,
+        provenance_json=json.dumps(provenance) if provenance else None,
+    )
+
+
 def parse_bundle(
     bundle_path: str | Path,
     *,
+    base_dir: str | Path | None = None,
     strict: bool = False,
 ) -> tuple[list[MemoryRecord], list[BundleWarning]]:
     """Parse a bundle directory into MemoryRecord objects without DB insertion.
@@ -127,6 +191,8 @@ def parse_bundle(
     hydrates via ``db.insert_many_ignore(records)``.
 
     Args:
+        base_dir: base directory for relativizing attachment source URIs.
+            Defaults to the bundle directory itself.
         strict: when True, fail on unknown files and missing attachments
             (deferred — currently raises NotImplementedError).
     """
@@ -146,44 +212,45 @@ def parse_bundle(
     metadata = _load_metadata(bundle_dir, warnings)
     identifier = metadata.get("identifier") or bundle_dir.name
 
+    # Bundle-level defaults applied to ALL record types (per-item fields override).
+    ns = metadata.get("namespace", "")
+    tier = metadata.get("tier", "hot")
+    tags = metadata.get("tags", [])
+    provenance = metadata.get("provenance")
+
     # --- memory body → inline memory ---
     body_path = _find_memory_body(bundle_dir)
-    if body_path is None:
-        raise FileNotFoundError(f"no memory body file in bundle: {bundle_dir}")
-
-    body_content = body_path.read_text(encoding="utf-8")
-    content_hash = compute_content_hash(identifier, body_content)
-    blob = pack_embedding(embed_text(body_content))
-    records.append(
-        MemoryRecord(
-            id=uuid.uuid4().hex,
-            identifier=identifier,
-            fact_text=body_content,
-            embedding=blob,
-            embedding_dim=EMBEDDING_DIM,
-            embedding_model=EMBEDDING_MODEL,
-            source=metadata.get("source", "bundle"),
-            importance=metadata.get("importance", 0.5),
-            metadata_json=json.dumps(metadata.get("metadata", {})),
-            content_hash=content_hash,
-            namespace=metadata.get("namespace", ""),
-            tier=metadata.get("tier", "hot"),
-            tags=json.dumps(metadata.get("tags", [])),
-            fact_summary=metadata.get("summary"),
-            provenance_json=json.dumps(metadata["provenance"])
-            if metadata.get("provenance")
-            else None,
-        )
-    )
+    if body_path is not None:
+        body_content = _read_file_capped(body_path, warnings)
+        if body_content is not None:
+            records.append(
+                _build_inline_record(
+                    identifier,
+                    body_content,
+                    source=metadata.get("source", "bundle"),
+                    importance=metadata.get("importance", 0.5),
+                    metadata=metadata.get("metadata"),
+                    namespace=ns,
+                    tier=tier,
+                    tags=tags,
+                    provenance=provenance,
+                    summary=metadata.get("summary"),
+                )
+            )
 
     # --- facts.json → additional inline facts ---
-    records.extend(_parse_facts(bundle_dir, identifier, warnings))
+    records.extend(_parse_facts(bundle_dir, identifier, ns, tier, tags, provenance, warnings))
 
     # --- events.jsonl → event memories ---
-    records.extend(_parse_events(bundle_dir, identifier, warnings))
+    records.extend(_parse_events(bundle_dir, identifier, ns, tier, tags, provenance, warnings))
 
     # --- attachments/ → file-backed references ---
-    records.extend(_parse_attachments(bundle_dir, identifier, warnings))
+    attach_base = Path(base_dir) if base_dir else bundle_dir
+    records.extend(
+        _parse_attachments(
+            bundle_dir, identifier, ns, tier, tags, provenance, attach_base, warnings
+        )
+    )
 
     # --- manifest.json → read as additional metadata (not enforced) ---
     _load_manifest(bundle_dir, warnings)
@@ -213,7 +280,7 @@ def read_bundle(
     """
     bundle_dir = Path(bundle_dir)
     with Timer() as t:
-        records, warnings = parse_bundle(bundle_dir)
+        records, warnings = parse_bundle(bundle_dir, base_dir=base_dir)
         loaded = db.insert_many_ignore(records)
         skipped = len(records) - loaded
 
@@ -235,6 +302,14 @@ def _load_metadata(bundle_dir: Path, warnings: list[BundleWarning]) -> dict[str,
     yaml_path = bundle_dir / METADATA_YAML
 
     if json_path.is_file():
+        if yaml_path.is_file():
+            warnings.append(
+                BundleWarning(
+                    str(yaml_path),
+                    f"both {METADATA_JSON} and {METADATA_YAML} present; "
+                    f"using {METADATA_JSON} (YAML ignored)",
+                )
+            )
         try:
             return json.loads(json_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as err:
@@ -265,6 +340,10 @@ def _load_metadata(bundle_dir: Path, warnings: list[BundleWarning]) -> dict[str,
 def _parse_facts(
     bundle_dir: Path,
     default_identifier: str,
+    default_ns: str,
+    default_tier: str,
+    default_tags: list,
+    default_provenance: dict | None,
     warnings: list[BundleWarning],
 ) -> list[MemoryRecord]:
     """Parse ``facts.json`` into MemoryRecord objects (no DB insertion)."""
@@ -272,8 +351,12 @@ def _parse_facts(
     if not facts_path.is_file():
         return []
 
+    raw = _read_file_capped(facts_path, warnings)
+    if raw is None:
+        return []
+
     try:
-        facts = json.loads(facts_path.read_text(encoding="utf-8"))
+        facts = json.loads(raw)
     except json.JSONDecodeError as err:
         warnings.append(BundleWarning(str(facts_path), f"parse error: {err}"))
         return []
@@ -285,28 +368,26 @@ def _parse_facts(
         return []
 
     records: list[MemoryRecord] = []
-    for fact in facts:
+    for i, fact in enumerate(facts):
         if not isinstance(fact, dict):
+            warnings.append(BundleWarning(str(facts_path), f"item {i}: expected object, skipped"))
             continue
         fact_text = fact.get("fact") or fact.get("fact_text") or ""
         if not fact_text:
+            warnings.append(BundleWarning(str(facts_path), f"item {i}: empty fact_text, skipped"))
             continue
-        identifier = fact.get("identifier") or default_identifier
-        content_hash = compute_content_hash(identifier, fact_text)
-        blob = pack_embedding(embed_text(fact_text))
         records.append(
-            MemoryRecord(
-                id=fact.get("id") or uuid.uuid4().hex,
-                identifier=identifier,
-                fact_text=fact_text,
-                embedding=blob,
-                embedding_dim=EMBEDDING_DIM,
-                embedding_model=EMBEDDING_MODEL,
+            _build_inline_record(
+                fact.get("identifier") or default_identifier,
+                fact_text,
                 source=fact.get("source", "bundle:facts"),
                 importance=fact.get("importance", 0.5),
-                metadata_json=json.dumps(fact.get("metadata", {})),
-                content_hash=content_hash,
-                tags=json.dumps(fact.get("tags", [])),
+                metadata=fact.get("metadata"),
+                namespace=fact.get("namespace", default_ns),
+                tier=fact.get("tier", default_tier),
+                tags=fact.get("tags", default_tags),
+                provenance=fact.get("provenance", default_provenance),
+                record_id=fact.get("id"),
             )
         )
     return records
@@ -315,6 +396,10 @@ def _parse_facts(
 def _parse_events(
     bundle_dir: Path,
     default_identifier: str,
+    default_ns: str,
+    default_tier: str,
+    default_tags: list,
+    default_provenance: dict | None,
     warnings: list[BundleWarning],
 ) -> list[MemoryRecord]:
     """Parse ``events.jsonl`` into MemoryRecord objects (no DB insertion)."""
@@ -325,34 +410,42 @@ def _parse_events(
     records: list[MemoryRecord] = []
     try:
         with open(events_path, encoding="utf-8") as f:
-            for line in f:
+            for line_num, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     event = json.loads(line)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as err:
+                    warnings.append(
+                        BundleWarning(str(events_path), f"line {line_num}: parse error: {err}")
+                    )
                     continue
                 if not isinstance(event, dict):
+                    warnings.append(
+                        BundleWarning(
+                            str(events_path), f"line {line_num}: expected object, skipped"
+                        )
+                    )
                     continue
                 fact_text = event.get("event") or event.get("fact_text") or event.get("text") or ""
                 if not fact_text:
+                    warnings.append(
+                        BundleWarning(str(events_path), f"line {line_num}: empty text, skipped")
+                    )
                     continue
-                identifier = event.get("identifier") or default_identifier
-                content_hash = compute_content_hash(identifier, fact_text)
-                blob = pack_embedding(embed_text(fact_text))
                 records.append(
-                    MemoryRecord(
-                        id=event.get("id") or uuid.uuid4().hex,
-                        identifier=identifier,
-                        fact_text=fact_text,
-                        embedding=blob,
-                        embedding_dim=EMBEDDING_DIM,
-                        embedding_model=EMBEDDING_MODEL,
+                    _build_inline_record(
+                        event.get("identifier") or default_identifier,
+                        fact_text,
                         source=event.get("source", "bundle:events"),
                         importance=event.get("importance", 0.5),
-                        metadata_json=json.dumps(event.get("metadata", {})),
-                        content_hash=content_hash,
+                        metadata=event.get("metadata"),
+                        namespace=event.get("namespace", default_ns),
+                        tier=event.get("tier", default_tier),
+                        tags=event.get("tags", default_tags),
+                        provenance=event.get("provenance", default_provenance),
+                        record_id=event.get("id"),
                     )
                 )
     except OSError as err:
@@ -364,29 +457,57 @@ def _parse_events(
 def _parse_attachments(
     bundle_dir: Path,
     default_identifier: str,
+    default_ns: str,
+    default_tier: str,
+    default_tags: list,
+    default_provenance: dict | None,
+    base_dir: Path,
     warnings: list[BundleWarning],
 ) -> list[MemoryRecord]:
     """Create file-backed MemoryRecord objects for files in ``attachments/``.
 
     Attachments are referenced by URI/path, NOT copied into SQLite
-    (reference-not-duplicate principle, #38).
+    (reference-not-duplicate principle, #38). Symlinks that escape the
+    bundle directory are rejected (path-traversal protection).
     """
     att_dir = bundle_dir / ATTACHMENTS_DIR
     if not att_dir.is_dir():
         return []
 
+    base_resolved = base_dir.resolve()
     records: list[MemoryRecord] = []
     for att in sorted(att_dir.iterdir()):
         if not att.is_file():
             continue
-        uri = str(att.resolve())
+
+        # Symlink confinement: reject symlinks that escape the base dir.
+        resolved = att.resolve()
         try:
-            size = att.stat().st_size
-        except OSError as err:
-            warnings.append(BundleWarning(f"attachments/{att.name}", f"stat error: {err}"))
+            resolved.relative_to(base_resolved)
+        except ValueError:
+            warnings.append(
+                BundleWarning(
+                    f"attachments/{att.name}",
+                    f"resolves outside bundle dir ({resolved} not under {base_resolved}); skipped",
+                )
+            )
             continue
 
-        content_hash = hashlib.sha256(f"{default_identifier}:{uri}:0:{size}".encode()).hexdigest()
+        # Store a relative URI for portability (re-resolvable against base_dir).
+        try:
+            rel_uri = str(resolved.relative_to(base_resolved))
+        except ValueError:
+            rel_uri = str(resolved)
+
+        try:
+            file_bytes = att.read_bytes()
+            size = len(file_bytes)
+        except OSError as err:
+            warnings.append(BundleWarning(f"attachments/{att.name}", f"read error: {err}"))
+            continue
+
+        # Content-derived hash (portable, collision-resistant).
+        content_hash = hashlib.sha256(file_bytes).hexdigest()
 
         source_format = att.suffix.lstrip(".") or "bin"
 
@@ -401,11 +522,15 @@ def _parse_attachments(
                 source="bundle:attachments",
                 content_hash=content_hash,
                 memory_type="file",
-                source_uri=uri,
+                source_uri=rel_uri,
                 source_format=source_format,
                 byte_offset=0,
                 byte_length=size,
                 fact_summary=att.name,
+                namespace=default_ns,
+                tier=default_tier,
+                tags=json.dumps(default_tags),
+                provenance_json=json.dumps(default_provenance) if default_provenance else None,
             )
         )
     return records

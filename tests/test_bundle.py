@@ -432,30 +432,166 @@ def test_bundle_warnings_are_structured(tmp_path: Path):
     assert any("random.dat" in w.path for w in warnings)
 
 
-def test_spy_adapter_zero_reads_during_bundle_hydrate(tmp_db: MemoryDB, full_bundle: Path):
-    """Bundle hydrate performs zero adapter reads (Path-based, not adapter-based)."""
-    from spy import SpyAdapter
+def test_bundle_hydrate_uses_path_not_adapter(tmp_db: MemoryDB, full_bundle: Path):
+    """Bundle hydrate reads via Path directly, never touches the storage adapter."""
+    import hotmem.storage as storage_mod
 
-    from hotmem.storage.local import LocalFilesystemAdapter
+    original_get_adapter = getattr(storage_mod, "get_adapter", None)
+    adapter_calls: list[str] = []
 
-    spy = SpyAdapter(LocalFilesystemAdapter())
+    def _tracking_adapter(uri: str):
+        adapter_calls.append(uri)
+        if original_get_adapter is not None:
+            return original_get_adapter(uri)
+        raise RuntimeError("adapter should not be called during bundle hydrate")
 
-    # Monkey-patch get_adapter in bundle module (if it uses one).
-    # The bundle reader uses Path directly, so this just proves it doesn't
-    # touch the adapter at all during hydrate.
-    import hotmem.bundle as bundle_mod
-
-    orig = getattr(bundle_mod, "get_adapter", None)
-    if orig is not None:
-        bundle_mod.get_adapter = lambda uri: spy
-
+    storage_mod.get_adapter = _tracking_adapter
     try:
-        reads_before = spy.total_file_reads
         read_bundle(tmp_db, full_bundle)
-        reads_after = spy.total_file_reads
-        assert reads_after == reads_before, (
-            f"bundle hydrate performed {reads_after - reads_before} adapter reads (expected 0)"
+        assert adapter_calls == [], (
+            f"bundle hydrate called storage adapter {len(adapter_calls)} times (expected 0)"
         )
     finally:
-        if orig is not None:
-            bundle_mod.get_adapter = orig
+        if original_get_adapter is not None:
+            storage_mod.get_adapter = original_get_adapter
+
+
+# ── Review fixes: symlink rejection, metadata propagation, v2 precedence ────
+
+
+def test_symlink_attachment_rejected(tmp_db: MemoryDB, tmp_path: Path):
+    """A symlink in attachments/ pointing outside the bundle is rejected."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "memory.md").write_text("# Test\n\nContent.", encoding="utf-8")
+    att_dir = bundle / "attachments"
+    att_dir.mkdir()
+    # Create a symlink pointing to /etc/passwd (outside the bundle).
+    link = att_dir / "evil"
+    target = tmp_path / "outside_secret.txt"
+    target.write_text("secret", encoding="utf-8")
+    link.symlink_to(target)
+
+    result = read_bundle(tmp_db, bundle)
+    assert result.loaded == 1  # only the memory.md body
+    warning_text = " ".join(str(w) for w in result.warnings)
+    assert "evil" in warning_text
+    assert "outside" in warning_text.lower()
+
+
+def test_metadata_propagated_to_facts_and_events(tmp_db: MemoryDB, tmp_path: Path):
+    """Bundle-level metadata (namespace, tier, tags, provenance) applies to all records."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "memory.md").write_text("# Body", encoding="utf-8")
+    (bundle / "metadata.json").write_text(
+        json.dumps(
+            {
+                "identifier": "test_ns",
+                "namespace": "project_x",
+                "tier": "warm",
+                "tags": ["dev"],
+                "provenance": {"author": "zubin"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (bundle / "facts.json").write_text(json.dumps([{"fact": "a fact"}]), encoding="utf-8")
+    (bundle / "events.jsonl").write_text(json.dumps({"event": "an event"}) + "\n", encoding="utf-8")
+
+    read_bundle(tmp_db, bundle)
+    rows = tmp_db.all_rows()
+    # All non-file rows should carry the bundle-level metadata.
+    for row in rows:
+        if row["memory_type"] != "file":
+            assert row["namespace"] == "project_x"
+            assert row["tier"] == "warm"
+            tags = json.loads(row["tags"])
+            assert "dev" in tags, f"tags not propagated for {row['identifier']}"
+            prov = json.loads(row["provenance_json"]) if row["provenance_json"] else None
+            assert prov is not None, f"provenance not propagated for {row['identifier']}"
+            assert prov["author"] == "zubin"
+
+
+def test_v2_precedence_over_bundle(tmp_db: MemoryDB, tmp_path: Path):
+    """When both memory.md and manifest.json exist, v2 takes precedence."""
+    bundle = tmp_path / "ambiguous"
+    bundle.mkdir()
+    (bundle / "memory.md").write_text("# Bundle content", encoding="utf-8")
+    # Create a v2 snapshot here too.
+    from hotmem.embed import embed_text, pack_embedding
+    from hotmem.snapshot import snapshot as do_snapshot
+
+    tmp_db.insert(
+        id="v2only",
+        identifier="v2",
+        fact_text="v2 content",
+        embedding=pack_embedding(embed_text("v2 content")),
+    )
+    do_snapshot(tmp_db, bundle)
+    assert (bundle / "manifest.json").is_file()
+    assert (bundle / "memory.md").is_file()
+
+    fresh = MemoryDB(tmp_path / "fresh.sqlite")
+    result = hydrate(fresh, bundle)
+    # Should hydrate the v2 snapshot (1 memory), not the bundle (also 1 but different).
+    assert result.loaded == 1
+    rows = fresh.all_rows()
+    assert rows[0]["fact_text"] == "v2 content"
+    fresh.close()
+
+
+def test_malformed_events_jsonl_warns(tmp_db: MemoryDB, tmp_path: Path):
+    """Malformed events.jsonl lines produce BundleWarning, not silent drops."""
+    bundle = _make_bundle(
+        tmp_path / "bundle",
+        **{
+            "memory.md": "# Test",
+            "events.jsonl": (
+                json.dumps({"event": "valid event"})
+                + "\n"
+                + "not valid json\n"
+                + json.dumps({"event": "another valid"})
+                + "\n"
+            ),
+        },
+    )
+    result = read_bundle(tmp_db, bundle)
+    assert result.loaded == 3  # 1 body + 2 valid events
+    warning_text = " ".join(str(w) for w in result.warnings)
+    assert "not valid json" in warning_text or "line 2" in warning_text
+
+
+def test_both_metadata_files_warns(tmp_db: MemoryDB, tmp_path: Path):
+    """Having both metadata.json and metadata.yaml emits an ambiguity warning."""
+    bundle = _make_bundle(
+        tmp_path / "bundle",
+        **{
+            "memory.md": "# Test",
+            "metadata.json": json.dumps({"identifier": "from_json"}),
+            "metadata.yaml": "identifier: from_yaml\n",
+        },
+    )
+    result = read_bundle(tmp_db, bundle)
+    warning_text = " ".join(str(w) for w in result.warnings)
+    assert "metadata.yaml" in warning_text
+    assert "metadata.json" in warning_text
+
+
+def test_attachment_uses_relative_uri(tmp_db: MemoryDB, tmp_path: Path):
+    """Attachment source_uri is relative to the bundle dir (portable)."""
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "memory.md").write_text("# Test", encoding="utf-8")
+    att_dir = bundle / "attachments"
+    att_dir.mkdir()
+    (att_dir / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+
+    read_bundle(tmp_db, bundle)
+    rows = tmp_db.all_rows()
+    file_rows = [r for r in rows if r["memory_type"] == "file"]
+    assert len(file_rows) == 1
+    uri = file_rows[0]["source_uri"]
+    # Should be a relative path, not absolute.
+    assert not Path(uri).is_absolute(), f"expected relative URI, got {uri}"
+    assert "data.csv" in uri

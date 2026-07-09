@@ -30,7 +30,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hotmem.bundle import MEMORY_MD as BUNDLE_MARKER
 from hotmem.bundle import detect_bundle, read_bundle
 from hotmem.db import MemoryDB
 from hotmem.snapshot.format import SnapshotChecksumError
@@ -49,15 +48,17 @@ LEGACY_SUFFIXES: tuple[str, ...] = (".jsonl", ".jsonl.gz")
 def detect_format(path: str | Path) -> str:
     """Return ``'v2'``, ``'legacy'``, or ``'bundle'`` for a snapshot path.
 
-    A path that already exists as a directory is classified by its contents
-    (memory.md -> bundle; manifest.json -> v2; memories.jsonl -> legacy).
-    A path that doesn't exist is classified by its suffix
-    (``.jsonl``/``.jsonl.gz`` -> legacy, else v2 directory).
+    Uses ``detect_bundle()`` (the single source of truth for bundle detection)
+    so detection matches hydrate dispatch. A path that already exists as a
+    directory is classified by its contents (memory.md/index.md/README.md ->
+    bundle; manifest.json -> v2; memories.jsonl -> legacy). A path that doesn't
+    exist is classified by its suffix (``.jsonl``/``.jsonl.gz`` -> legacy,
+    else v2 directory).
     """
     p = Path(path)
     if p.exists():
         if p.is_dir():
-            if (p / BUNDLE_MARKER).is_file():
+            if detect_bundle(p):
                 return "bundle"
             if (p / MANIFEST_NAME).is_file():
                 return "v2"
@@ -99,6 +100,10 @@ def hydrate(db: MemoryDB, path: str | Path) -> HydrateResult:
     ``.jsonl``/``.jsonl.gz`` file, or a directory with only ``memories.jsonl``
     -> legacy reader. A directory with ``manifest.json`` -> v2 reader (with
     manifest checksum verification).
+
+    When a directory has both a bundle marker (memory.md) AND a v2 manifest,
+    the v2 manifest takes precedence (stricter, checksummed format) and a
+    warning is logged.
     """
     p = Path(path)
     if not p.exists():
@@ -106,10 +111,19 @@ def hydrate(db: MemoryDB, path: str | Path) -> HydrateResult:
         return HydrateResult(loaded=0, skipped_dupes=0)
 
     if p.is_dir():
-        if detect_bundle(p):
+        is_bundle = detect_bundle(p)
+        is_v2 = detect_v2(p)
+        if is_bundle and is_v2:
+            _trace.warn(
+                "dispatch",
+                "ambiguous: both bundle marker and v2 manifest present; preferring v2",
+                detail={"path": str(p)},
+            )
+            is_bundle = False
+        if is_bundle:
             _trace.info("dispatch", "bundle hydrate", detail={"path": str(p)})
             return read_bundle(db, p).as_hydrate_result
-        if detect_v2(p):
+        if is_v2:
             _trace.info("dispatch", "v2 directory hydrate", detail={"path": str(p)})
             return hydrate_v2(db, p)
         if (p / MEMORIES_NAME).is_file():
