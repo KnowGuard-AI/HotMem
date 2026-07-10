@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.hygiene import check_hygiene
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
@@ -642,5 +643,16 @@ def create_app(
                         {"memory_id": mid, "error": "invalid_profile", "message": str(err)}
                     )
         return {"results": results, "count": len(results), "trace_ms": round(t.ms, 2)}
+
+    # ── Hygiene endpoint (#51) ─────────────────────────────────────────
+
+    @app.get("/v1/hygiene")
+    async def hygiene():
+        """Run advisory hygiene checks on the store."""
+        import asyncio
+
+        db: MemoryDB = _state["db"]
+        report = await asyncio.to_thread(check_hygiene, db, base_dir=_state.get("base_dir"))
+        return report.to_dict()
 
     return app
