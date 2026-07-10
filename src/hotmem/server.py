@@ -587,11 +587,21 @@ def create_app(
     @app.post("/v1/discover")
     async def discover(req: DiscoverRequest):
         """Trigger bundle discovery under a root directory."""
+        import asyncio
+
         from hotmem.bundle_index import index_bundles
 
         db: MemoryDB = _state["db"]
         with Timer() as t:
-            result = index_bundles(db, req.root, max_depth=req.max_depth)
+            try:
+                result = await asyncio.to_thread(
+                    index_bundles, db, req.root, max_depth=req.max_depth
+                )
+            except FileNotFoundError as err:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "root_not_found", "message": str(err)},
+                )
         return {
             "discovered": result.discovered,
             "indexed": result.indexed,
@@ -626,6 +636,10 @@ def create_app(
                             "reason": err.reason,
                             "source_uri": err.source_uri,
                         }
+                    )
+                except ValueError as err:
+                    results.append(
+                        {"memory_id": mid, "error": "invalid_profile", "message": str(err)}
                     )
         return {"results": results, "count": len(results), "trace_ms": round(t.ms, 2)}
 
