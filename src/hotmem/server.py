@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, model_validator
 from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
+from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
 from hotmem.search import search_memories
 from hotmem.snapshot import SnapshotChecksumError
@@ -140,6 +141,17 @@ class SnapshotRequest(BaseModel):
         default=False,
         description="Copy small file-backed byte ranges into attachments/ (v2 only)",
     )
+
+
+class HydrateOneRequest(BaseModel):
+    """Optional body for POST /v1/memory/{id}/hydrate — profile + verify params.
+
+    When absent (no body), the endpoint returns raw bytes (backward-compatible).
+    When present, returns a JSON ProfiledHydration dict.
+    """
+
+    profile: HydrationProfile = Field(default="agent", description="agent|compact|audit|full")
+    verify: bool = Field(default=True, description="Verify source_checksum if present")
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
@@ -367,10 +379,51 @@ def create_app(
         return meta
 
     @app.post("/v1/memory/{memory_id}/hydrate")
-    async def hydrate_one(memory_id: str):
-        """Materialize a memory's payload on demand (lazy hydration)."""
+    async def hydrate_one(memory_id: str, req: HydrateOneRequest | None = None):
+        """Materialize a memory's payload on demand (lazy hydration).
+
+        When no body is sent, returns raw bytes (backward-compatible).
+        When a body with ``profile`` is sent, returns a JSON ProfiledHydration.
+        """
         db: MemoryDB = _state["db"]
         base_dir: str = _state["base_dir"]
+
+        if req is not None:
+            with Timer() as t:
+                try:
+                    ph = hydrate_with_profile(
+                        db,
+                        memory_id,
+                        profile=req.profile,
+                        base_dir=base_dir,
+                        verify=req.verify,
+                    )
+                except KeyError:
+                    return JSONResponse(
+                        status_code=404,
+                        content={"error": "not_found", "memory_id": memory_id},
+                    )
+                except ProvenanceError as err:
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": "provenance_mismatch",
+                            "reason": err.reason,
+                            "expected": err.expected,
+                            "actual": err.actual,
+                            "source_uri": err.source_uri,
+                            "message": str(err),
+                        },
+                    )
+                except ValueError as err:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": "invalid_profile", "message": str(err)},
+                    )
+            d = ph.to_dict()
+            d["trace_ms"] = round(t.ms, 2)
+            return d
+
         with Timer() as t:
             try:
                 payload = hydrate_memory(db, memory_id, base_dir=base_dir)
