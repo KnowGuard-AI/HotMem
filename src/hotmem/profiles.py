@@ -1,30 +1,30 @@
 """HotMem hydration profiles — profile-aware content and provenance retrieval.
 
 Purpose:
-     Allow consumers to ask for different levels of memory content and
-     provenance without changing existing hydrate defaults. Profiles are
-     additive request parameters; the default hydrate behavior is unchanged.
+      Allow consumers to ask for different levels of memory content and
+      provenance without changing existing hydrate defaults. Profiles are
+      additive request parameters; the default hydrate behavior is unchanged.
 
 Profiles:
-     agent:  concise content (fact_summary or truncated fact_text), no file reads.
-     compact: smallest representation — metadata only, no content, no file reads.
-     audit:   content + provenance, checksums, source references, warnings.
-     full:    maximum detail — inline content, file references, diagnostics.
+      agent:  concise content (fact_summary or truncated fact_text), no file reads.
+      compact: smallest representation — metadata only, no content, no file reads.
+      audit:   content + provenance, checksums, source references, warnings.
+      full:    maximum detail — inline content, file references, provenance, diagnostics.
 
 Rules:
-     - ``compact`` and ``agent`` never call ``adapter.read_range()``.
-     - ``audit`` and ``full`` may read file-backed content (lazy, on demand).
-     - Missing backing files surface as provenance errors (audit/full) or
-       warnings (agent/compact).
-     - Default hydrate (no profile) returns raw bytes — unchanged.
+      - ``compact`` and ``agent`` never call ``adapter.read_range()``.
+      - ``audit`` and ``full`` may read file-backed content (lazy, on demand).
+      - Missing backing files surface as provenance errors (audit/full) or
+        warnings (agent/compact).
+      - Default hydrate (no profile) returns raw bytes — unchanged.
 
 Interface:
-     HydrationProfile = Literal["agent", "compact", "audit", "full"]
-     ProfiledHydration (dataclass): memory_id, identifier, memory_type, content,
-         verified, source_uri, byte_offset, byte_length, source_checksum,
-         fact_summary, warnings, profile
-     hydrate_with_profile(db, memory_id, *, profile="agent", base_dir=None,
-         verify=True) -> ProfiledHydration
+      HydrationProfile = Literal["agent", "compact", "audit", "full"]
+      ProfiledHydration (dataclass): memory_id, identifier, memory_type, content,
+          verified, source_uri, byte_offset, byte_length, source_checksum,
+          fact_summary, provenance, warnings, profile
+      hydrate_with_profile(db, memory_id, *, profile="agent", base_dir=None,
+          verify=True) -> ProfiledHydration
 
 Deps: hotmem.db, hotmem.memory, hotmem.provenance, hotmem.storage, hotmem.trace
 Extension: add custom profiles or profile-specific transformations here.
@@ -35,6 +35,7 @@ from __future__ import annotations
 import contextlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from hotmem.db import MemoryDB
@@ -74,6 +75,7 @@ class ProfiledHydration:
     source_format: str | None = None
     fact_summary: str | None = None
     fact_text: str | None = None
+    provenance: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     exists: bool | None = None  # whether the backing file currently exists
 
@@ -105,11 +107,26 @@ class ProfiledHydration:
             d["fact_summary"] = self.fact_summary
         if self.fact_text:
             d["fact_text"] = self.fact_text
+        if self.provenance is not None:
+            d["provenance"] = self.provenance
         if self.warnings:
             d["warnings"] = self.warnings
         if self.exists is not None:
             d["exists"] = self.exists
         return d
+
+
+def _resolve_source_uri(source_uri: str, base_dir: str | None) -> str:
+    """Resolve a source_uri against base_dir (matches memory._resolve_uri)."""
+    raw = source_uri
+    if raw.startswith("file://"):
+        raw = raw[len("file://") :]
+    if "://" in raw:
+        return source_uri  # non-file scheme, leave as-is
+    path = Path(raw)
+    if not path.is_absolute() and base_dir is not None:
+        path = Path(base_dir) / path
+    return str(path.resolve())
 
 
 def hydrate_with_profile(
@@ -133,7 +150,7 @@ def hydrate_with_profile(
 
     with Timer() as t:
         if profile == "compact":
-            result = _hydrate_compact(record)
+            result = _hydrate_compact(record, base_dir)
         elif profile == "agent":
             result = _hydrate_agent(record, base_dir)
         elif profile == "audit":
@@ -155,16 +172,18 @@ def hydrate_with_profile(
     return result
 
 
-def _hydrate_compact(record: dict[str, Any]) -> ProfiledHydration:
+def _hydrate_compact(record: dict[str, Any], base_dir: str | None) -> ProfiledHydration:
     """Metadata only — no content, no file reads."""
     warnings: list[str] = []
     exists = None
 
     if record["memory_type"] == "file" and record.get("source_uri"):
         # Check if backing file exists (stat only, no read).
+        # Resolve relative URIs against base_dir (matches memory._resolve_uri).
+        resolved = _resolve_source_uri(record["source_uri"], base_dir)
         try:
-            adapter = get_adapter(record["source_uri"])
-            exists = adapter.exists(record["source_uri"])
+            adapter = get_adapter(resolved)
+            exists = adapter.exists(resolved)
             if not exists:
                 warnings.append(f"backing file missing: {record['source_uri']}")
         except Exception:
@@ -188,7 +207,7 @@ def _hydrate_compact(record: dict[str, Any]) -> ProfiledHydration:
 
 def _hydrate_agent(record: dict[str, Any], base_dir: str | None) -> ProfiledHydration:
     """Concise content — fact_summary or truncated fact_text. No file reads."""
-    compact = _hydrate_compact(record)
+    compact = _hydrate_compact(record, base_dir)
 
     # For inline memories: use fact_text (truncated).
     if record["memory_type"] != "file":
@@ -216,8 +235,14 @@ def _hydrate_audit(
     verify: bool,
 ) -> ProfiledHydration:
     """Content + provenance + checksums + source references + warnings."""
-    result = _hydrate_compact(record)
+    result = _hydrate_compact(record, base_dir)
     result.profile = "audit"
+
+    # Add structured provenance from the record.
+    provenance_json = record.get("provenance_json")
+    if provenance_json:
+        with contextlib.suppress(json.JSONDecodeError, TypeError):
+            result.provenance = json.loads(provenance_json)
 
     if record["memory_type"] != "file":
         # Inline: content is fact_text.
@@ -253,14 +278,10 @@ def _hydrate_full(
     result = _hydrate_audit(db, record, base_dir, verify)
     result.profile = "full"
 
-    # Add full fact_text for inline memories (audit already has it).
+    # Full fact_text for inline memories (audit already has it).
     if record["memory_type"] != "file":
         result.fact_text = record.get("fact_text")
 
-    # Add provenance_json if present.
-    provenance = record.get("provenance_json")
-    if provenance:
-        with contextlib.suppress(json.JSONDecodeError, TypeError):
-            result.warnings.append(f"provenance: {json.loads(provenance)}")
+    # Structured provenance is already set by _hydrate_audit.
 
     return result

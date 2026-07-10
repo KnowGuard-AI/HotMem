@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field, model_validator
 from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
-from hotmem.profiles import hydrate_with_profile
+from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
 from hotmem.search import search_memories
 from hotmem.snapshot import SnapshotChecksumError
@@ -150,7 +150,7 @@ class HydrateOneRequest(BaseModel):
     When present, returns a JSON ProfiledHydration dict.
     """
 
-    profile: str = Field(default="agent", description="agent|compact|audit|full")
+    profile: HydrationProfile = Field(default="agent", description="agent|compact|audit|full")
     verify: bool = Field(default=True, description="Verify source_checksum if present")
 
 
@@ -414,6 +414,11 @@ def create_app(
                             "source_uri": err.source_uri,
                             "message": str(err),
                         },
+                    )
+                except ValueError as err:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": "invalid_profile", "message": str(err)},
                     )
             d = ph.to_dict()
             d["trace_ms"] = round(t.ms, 2)
