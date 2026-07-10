@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.hygiene import check_hygiene
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
 from hotmem.provenance import ProvenanceError
 from hotmem.search import search_memories
@@ -461,5 +462,14 @@ def create_app(
             "exported": result.exported,
             "path": result.path,
         }
+
+    # ── Hygiene endpoint (#51) ─────────────────────────────────────────
+
+    @app.get("/v1/hygiene")
+    async def hygiene():
+        """Run advisory hygiene checks on the store."""
+        db: MemoryDB = _state["db"]
+        report = check_hygiene(db, base_dir=_state.get("base_dir"))
+        return report.to_dict()
 
     return app
