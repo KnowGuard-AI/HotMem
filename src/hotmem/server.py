@@ -32,6 +32,7 @@ from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
 from hotmem.hygiene import check_hygiene
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
+from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
 from hotmem.search import search_memories
 from hotmem.snapshot import SnapshotChecksumError
@@ -141,6 +142,32 @@ class SnapshotRequest(BaseModel):
         default=False,
         description="Copy small file-backed byte ranges into attachments/ (v2 only)",
     )
+
+
+class HydrateOneRequest(BaseModel):
+    """Optional body for POST /v1/memory/{id}/hydrate — profile + verify params.
+
+    When absent (no body), the endpoint returns raw bytes (backward-compatible).
+    When present, returns a JSON ProfiledHydration dict.
+    """
+
+    profile: HydrationProfile = Field(default="agent", description="agent|compact|audit|full")
+    verify: bool = Field(default=True, description="Verify source_checksum if present")
+
+
+class HydrateBatchRequest(BaseModel):
+    """Body for POST /v1/memory/hydrate-batch — batch profiled hydration."""
+
+    memory_ids: list[str] = Field(..., min_length=1)
+    profile: HydrationProfile = Field(default="agent", description="agent|compact|audit|full")
+    verify: bool = Field(default=True, description="Verify source_checksum if present")
+
+
+class DiscoverRequest(BaseModel):
+    """Body for POST /v1/discover — trigger bundle discovery."""
+
+    root: str = Field(..., description="Root directory to scan for bundles")
+    max_depth: int = Field(default=10, ge=1, le=50, description="Max directory depth")
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
@@ -368,10 +395,51 @@ def create_app(
         return meta
 
     @app.post("/v1/memory/{memory_id}/hydrate")
-    async def hydrate_one(memory_id: str):
-        """Materialize a memory's payload on demand (lazy hydration)."""
+    async def hydrate_one(memory_id: str, req: HydrateOneRequest | None = None):
+        """Materialize a memory's payload on demand (lazy hydration).
+
+        When no body is sent, returns raw bytes (backward-compatible).
+        When a body with ``profile`` is sent, returns a JSON ProfiledHydration.
+        """
         db: MemoryDB = _state["db"]
         base_dir: str = _state["base_dir"]
+
+        if req is not None:
+            with Timer() as t:
+                try:
+                    ph = hydrate_with_profile(
+                        db,
+                        memory_id,
+                        profile=req.profile,
+                        base_dir=base_dir,
+                        verify=req.verify,
+                    )
+                except KeyError:
+                    return JSONResponse(
+                        status_code=404,
+                        content={"error": "not_found", "memory_id": memory_id},
+                    )
+                except ProvenanceError as err:
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": "provenance_mismatch",
+                            "reason": err.reason,
+                            "expected": err.expected,
+                            "actual": err.actual,
+                            "source_uri": err.source_uri,
+                            "message": str(err),
+                        },
+                    )
+                except ValueError as err:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": "invalid_profile", "message": str(err)},
+                    )
+            d = ph.to_dict()
+            d["trace_ms"] = round(t.ms, 2)
+            return d
+
         with Timer() as t:
             try:
                 payload = hydrate_memory(db, memory_id, base_dir=base_dir)
@@ -463,13 +531,128 @@ def create_app(
             "path": result.path,
         }
 
+    # ── Filesystem awareness endpoints (#43) ────────────────────────────
+
+    @app.get("/v1/files")
+    async def list_files(identifier: str | None = None):
+        """List file-backed memory references (metadata only, no file reads)."""
+        db: MemoryDB = _state["db"]
+        with Timer() as t:
+            rows = db.list_file_backed()
+            if identifier:
+                rows = [r for r in rows if r["identifier"] == identifier]
+            from pathlib import Path as _P
+
+            from hotmem.storage import get_adapter
+
+            files = []
+            for row in rows:
+                source_uri = row.get("source_uri") or ""
+                exists = False
+                size = row.get("byte_length") or 0
+                if source_uri:
+                    resolved = source_uri
+                    if "://" not in source_uri and not _P(source_uri).is_absolute():
+                        resolved = str(_P(_state["base_dir"]) / source_uri)
+                    try:
+                        adapter = get_adapter(resolved)
+                        exists = adapter.exists(resolved)
+                        if exists:
+                            meta = adapter.metadata(resolved)
+                            size = meta["size"]
+                    except Exception:
+                        pass
+                files.append(
+                    {
+                        "memory_id": row["id"],
+                        "identifier": row["identifier"],
+                        "source_uri": source_uri,
+                        "byte_offset": row.get("byte_offset") or 0,
+                        "byte_length": row.get("byte_length") or 0,
+                        "source_format": row.get("source_format") or "",
+                        "source_checksum": row.get("source_checksum") or None,
+                        "exists": exists,
+                        "size": size,
+                    }
+                )
+        return {"files": files, "count": len(files), "trace_ms": round(t.ms, 2)}
+
+    @app.get("/v1/bundles")
+    async def list_bundles():
+        """List discovered bundle index entries from the DB."""
+        db: MemoryDB = _state["db"]
+        with Timer() as t:
+            rows = db.list_bundle_index()
+        return {"bundles": rows, "count": len(rows), "trace_ms": round(t.ms, 2)}
+
+    @app.post("/v1/discover")
+    async def discover(req: DiscoverRequest):
+        """Trigger bundle discovery under a root directory."""
+        import asyncio
+
+        from hotmem.bundle_index import index_bundles
+
+        db: MemoryDB = _state["db"]
+        with Timer() as t:
+            try:
+                result = await asyncio.to_thread(
+                    index_bundles, db, req.root, max_depth=req.max_depth
+                )
+            except FileNotFoundError as err:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": "root_not_found", "message": str(err)},
+                )
+        return {
+            "discovered": result.discovered,
+            "indexed": result.indexed,
+            "warnings": len(result.warnings),
+            "trace_ms": round(t.ms, 2),
+        }
+
+    @app.post("/v1/memory/hydrate-batch")
+    async def hydrate_batch(req: HydrateBatchRequest):
+        """Batch hydrate multiple memories with a profile."""
+        db: MemoryDB = _state["db"]
+        base_dir: str = _state["base_dir"]
+        with Timer() as t:
+            results = []
+            for mid in req.memory_ids:
+                try:
+                    ph = hydrate_with_profile(
+                        db,
+                        mid,
+                        profile=req.profile,
+                        base_dir=base_dir,
+                        verify=req.verify,
+                    )
+                    results.append(ph.to_dict())
+                except KeyError:
+                    results.append({"memory_id": mid, "error": "not_found"})
+                except ProvenanceError as err:
+                    results.append(
+                        {
+                            "memory_id": mid,
+                            "error": "provenance_mismatch",
+                            "reason": err.reason,
+                            "source_uri": err.source_uri,
+                        }
+                    )
+                except ValueError as err:
+                    results.append(
+                        {"memory_id": mid, "error": "invalid_profile", "message": str(err)}
+                    )
+        return {"results": results, "count": len(results), "trace_ms": round(t.ms, 2)}
+
     # ── Hygiene endpoint (#51) ─────────────────────────────────────────
 
     @app.get("/v1/hygiene")
     async def hygiene():
         """Run advisory hygiene checks on the store."""
+        import asyncio
+
         db: MemoryDB = _state["db"]
-        report = check_hygiene(db, base_dir=_state.get("base_dir"))
+        report = await asyncio.to_thread(check_hygiene, db, base_dir=_state.get("base_dir"))
         return report.to_dict()
 
     return app
