@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.events import EventType, append_event, query_events
 from hotmem.hygiene import check_hygiene
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
@@ -186,6 +187,27 @@ async def lifespan(app: FastAPI):
     # Auto-hydrate if swap file exists
     if swap_path and Path(swap_path).exists():
         result = snapshot_hydrate(db, swap_path)
+        from hotmem.events import EventType as _EventType
+        from hotmem.events import append_event as _append_event
+
+        try:
+            from hotmem.snapshot import detect_format as _detect_format
+
+            fmt = _detect_format(swap_path)
+        except Exception:
+            fmt = "legacy"
+        _append_event(
+            db,
+            event_type=(
+                _EventType.BUNDLE_IMPORTED if fmt == "bundle" else _EventType.SNAPSHOT_IMPORTED
+            ),
+            payload={
+                "loaded": result.loaded,
+                "skipped_dupes": result.skipped_dupes,
+                "path": str(swap_path),
+                "format": fmt,
+            },
+        )
         _trace.info(
             "startup",
             f"auto-hydrated {result.loaded} memories",
@@ -303,6 +325,20 @@ def create_app(
                             "message": str(err),
                         },
                     )
+                append_event(
+                    db,
+                    event_type=EventType.MEMORY_CREATED,
+                    memory_id=memory_id,
+                    payload={
+                        "memory_type": "file",
+                        "identifier": req.identifier,
+                        "content_hash": content_hash,
+                        "source_uri": ref.source_uri,
+                        "byte_offset": ref.byte_offset,
+                        "byte_length": ref.byte_length,
+                        "source_format": ref.source_format,
+                    },
+                )
             else:
                 # Inline path (unchanged from v1).
                 memory_id = uuid.uuid4().hex
@@ -322,6 +358,16 @@ def create_app(
                     metadata_json=json.dumps(req.metadata),
                     content_hash=content_hash,
                     ttl_seconds=req.ttl_seconds,
+                )
+                append_event(
+                    db,
+                    event_type=EventType.MEMORY_CREATED,
+                    memory_id=memory_id,
+                    payload={
+                        "memory_type": "fact",
+                        "identifier": req.identifier,
+                        "content_hash": content_hash,
+                    },
                 )
         return {
             "memory_id": memory_id,
@@ -497,6 +543,25 @@ def create_app(
             )
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
+        # Record import event without altering the response shape.
+        from hotmem.snapshot import detect_format as _detect_format
+
+        try:
+            fmt = _detect_format(target)
+        except Exception:
+            fmt = "legacy"
+        append_event(
+            db,
+            event_type=(
+                EventType.BUNDLE_IMPORTED if fmt == "bundle" else EventType.SNAPSHOT_IMPORTED
+            ),
+            payload={
+                "loaded": result.loaded,
+                "skipped_dupes": result.skipped_dupes,
+                "path": target,
+                "format": fmt,
+            },
+        )
         return {
             "loaded": result.loaded,
             "skipped_dupes": result.skipped_dupes,
@@ -603,6 +668,16 @@ def create_app(
                     status_code=400,
                     content={"error": "root_not_found", "message": str(err)},
                 )
+        append_event(
+            db,
+            event_type=EventType.BUNDLE_DISCOVERED,
+            payload={
+                "root": req.root,
+                "discovered": result.discovered,
+                "indexed": result.indexed,
+                "warnings": len(result.warnings),
+            },
+        )
         return {
             "discovered": result.discovered,
             "indexed": result.indexed,
@@ -653,6 +728,77 @@ def create_app(
 
         db: MemoryDB = _state["db"]
         report = await asyncio.to_thread(check_hygiene, db, base_dir=_state.get("base_dir"))
+        # Record a summary event plus one event per error-severity warning so
+        # EMOS can detect store decay from the log without polling /v1/hygiene.
+        counts = {
+            "warning_count": len(report.warnings),
+            "error_count": sum(1 for w in report.warnings if w.severity == "error"),
+            "warn_count": sum(1 for w in report.warnings if w.severity == "warn"),
+            "info_count": sum(1 for w in report.warnings if w.severity == "info"),
+        }
+        append_event(
+            db,
+            event_type=EventType.HYGIENE_CHECKED,
+            payload=counts,
+        )
+        for w in report.warnings:
+            if w.severity != "error":
+                continue
+            append_event(
+                db,
+                event_type=EventType.HYGIENE_WARNING,
+                memory_id=w.detail.get("memory_id"),
+                payload={
+                    "category": w.category,
+                    "severity": w.severity,
+                    "message": w.message,
+                    "source_uri": w.detail.get("source_uri"),
+                    "identifier": w.detail.get("identifier"),
+                },
+            )
         return report.to_dict()
+
+    @app.get("/v1/events")
+    async def list_events(
+        memory_id: str | None = None,
+        namespace: str | None = None,
+        event_type: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        after_seq: int | None = None,
+        before_seq: int | None = None,
+        limit: int = 100,
+        order: str = "asc",
+    ):
+        """List local lifecycle events with filtering and deterministic pagination.
+
+        Events are append-only local metadata — this endpoint never triggers
+        file hydration. Ordering is deterministic via the monotonic ``seq``
+        column. Use ``after_seq`` / ``before_seq`` for cursor-based pagination.
+        """
+        db: MemoryDB = _state["db"]
+        if order not in ("asc", "desc"):
+            raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'")
+        if limit < 1 or limit > 1000:
+            raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+        with Timer() as t:
+            listing = query_events(
+                db,
+                memory_id=memory_id,
+                namespace=namespace,
+                event_type=event_type,
+                since=since,
+                until=until,
+                after_seq=after_seq,
+                before_seq=before_seq,
+                limit=limit,
+                ascending=(order == "asc"),
+            )
+        return {
+            "events": listing["events"],
+            "count": listing["count"],
+            "next_seq": listing["next_seq"],
+            "trace_ms": round(t.ms, 2),
+        }
 
     return app

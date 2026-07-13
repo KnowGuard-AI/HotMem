@@ -111,3 +111,20 @@ def test_file_backed_insert_works_on_migrated_db(v1_db_path: Path):
     assert got["byte_offset"] == 0
     assert got["byte_length"] == 100
     assert got["source_checksum"] == "abc"
+
+
+def test_migration_adds_events_table(v1_db_path: Path):
+    """#41: an existing v1 DB is migrated to include the append-only events table."""
+    db = MemoryDB(v1_db_path)
+    try:
+        tables = {
+            row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert "events" in tables
+        # The event log starts empty; no backfill of historical rows.
+        rows = db._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        assert rows == 0
+        # user_version bumped to 3.
+        assert db._conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    finally:
+        db.close()

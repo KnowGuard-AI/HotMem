@@ -168,6 +168,25 @@ CREATE TABLE IF NOT EXISTS bundle_index (
     warning_count    INTEGER DEFAULT 0,
     discovered_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+
+-- #41: Append-only local event log for memory lifecycle and store signals.
+-- Ordering is deterministic via the monotonic `seq` AUTOINCREMENT; `event_id`
+-- is a stable client-facing identifier that survives re-pagination. Reads are
+-- pure SQL — no file hydration ever. UPDATE/DELETE are intentionally absent
+-- from the public surface (retention helpers exist but are not exposed via API).
+CREATE TABLE IF NOT EXISTS events (
+    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id     TEXT    NOT NULL UNIQUE,
+    memory_id    TEXT,
+    namespace    TEXT    DEFAULT '',
+    event_type   TEXT    NOT NULL,
+    occurred_at  TEXT    NOT NULL,
+    payload_json TEXT    DEFAULT '{{}}'
+);
+CREATE INDEX IF NOT EXISTS idx_events_memory_seq   ON events(memory_id, seq);
+CREATE INDEX IF NOT EXISTS idx_events_namespace_seq ON events(namespace, seq);
+CREATE INDEX IF NOT EXISTS idx_events_type_seq     ON events(event_type, seq);
+CREATE INDEX IF NOT EXISTS idx_events_occurred_seq ON events(occurred_at, seq);
 """
 
 _FTS_TOKEN_RE = re.compile(r"[\w]+")
@@ -297,6 +316,15 @@ class MemoryDB:
         if current_version < 2:
             self._conn.execute("PRAGMA user_version = 2")
             self._conn.commit()
+
+        # #41: events table is created idempotently by _SCHEMA. We bump
+        # user_version to 3 so callers can detect that the event log surface
+        # is available. No backfill is performed — existing memories continue
+        # to operate without lifecycle history.
+        if current_version < 3:
+            self._conn.execute("PRAGMA user_version = 3")
+            self._conn.commit()
+            _trace.info("migrate", "events table available; user_version=3")
 
         try:
             self._conn.execute(
@@ -502,6 +530,123 @@ class MemoryDB:
         """Remove all bundle index entries."""
         self._conn.execute("DELETE FROM bundle_index")
         self._conn.commit()
+
+    # ── Event log (#41) ────────────────────────────────────────────────
+
+    def append_event(
+        self,
+        *,
+        event_type: str,
+        event_id: str,
+        memory_id: str | None = None,
+        namespace: str = "",
+        occurred_at: str,
+        payload_json: str = "{}",
+    ) -> int:
+        """Append one row to the local event log. Returns the monotonic ``seq``.
+
+        This is the only sanctioned write path into ``events``. There is no
+        UPDATE/DELETE method on the public surface — the log is append-only.
+        ``occurred_at`` is supplied by the caller so callers control timestamp
+        semantics (UTC ISO-8601) and tests can inject deterministic times.
+        """
+        cursor = self._conn.execute(
+            """INSERT INTO events
+                   (event_id, memory_id, namespace, event_type, occurred_at, payload_json)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (event_id, memory_id, namespace, event_type, occurred_at, payload_json),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def query_events(
+        self,
+        *,
+        memory_id: str | None = None,
+        namespace: str | None = None,
+        event_type: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        after_seq: int | None = None,
+        before_seq: int | None = None,
+        limit: int = 100,
+        ascending: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Return event rows matching the supplied filters, ordered by ``seq``.
+
+        Pagination cursors:
+            ``after_seq``  — return events with seq strictly greater (forward).
+            ``before_seq`` — return events with seq strictly less (backward).
+
+        When ``ascending`` is False, rows are returned newest-first, which
+        flips the meaning of the cursor relative to the result window but
+        keeps ``seq`` as the deterministic tiebreaker.
+
+        Pure SQL — never touches the storage adapter or any backing file.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if memory_id is not None:
+            clauses.append("memory_id = ?")
+            params.append(memory_id)
+        if namespace is not None:
+            clauses.append("namespace = ?")
+            params.append(namespace)
+        if event_type is not None:
+            clauses.append("event_type = ?")
+            params.append(event_type)
+        if since is not None:
+            clauses.append("occurred_at >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("occurred_at <= ?")
+            params.append(until)
+        if after_seq is not None:
+            clauses.append("seq > ?")
+            params.append(after_seq)
+        if before_seq is not None:
+            clauses.append("seq < ?")
+            params.append(before_seq)
+
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        direction = "ASC" if ascending else "DESC"
+        rows = self._conn.execute(
+            f"""SELECT seq, event_id, memory_id, namespace, event_type,
+                      occurred_at, payload_json
+               FROM events{where}
+               ORDER BY seq {direction}
+               LIMIT ?""",
+            (*params, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def trim_events_before_seq(self, seq: int) -> int:
+        """Local retention helper: delete events with ``seq < seq``.
+
+        Unexposed via the HTTP API in this ticket — retention remains a
+        local, explicit operation. Returns the number of deleted rows.
+        """
+        cursor = self._conn.execute("DELETE FROM events WHERE seq < ?", (seq,))
+        self._conn.commit()
+        return cursor.rowcount if cursor.rowcount != -1 else 0
+
+    def trim_events_by_count(self, keep: int) -> int:
+        """Local retention helper: keep only the most recent ``keep`` events.
+
+        Unexposed via the HTTP API in this ticket. Returns the number of
+        deleted rows. ``keep`` must be non-negative; ``keep=0`` clears the log.
+        """
+        if keep < 0:
+            raise ValueError("keep must be non-negative")
+        cursor = self._conn.execute(
+            """DELETE FROM events
+               WHERE seq NOT IN (
+                   SELECT seq FROM events ORDER BY seq DESC LIMIT ?
+               )""",
+            (keep,),
+        )
+        self._conn.commit()
+        return cursor.rowcount if cursor.rowcount != -1 else 0
 
     def insert_many_ignore(self, records: Iterable[MemoryRecord]) -> int:
         """Insert many memory rows in one transaction, ignoring duplicate hashes/ids."""
