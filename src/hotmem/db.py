@@ -187,6 +187,17 @@ CREATE INDEX IF NOT EXISTS idx_events_memory_seq   ON events(memory_id, seq);
 CREATE INDEX IF NOT EXISTS idx_events_namespace_seq ON events(namespace, seq);
 CREATE INDEX IF NOT EXISTS idx_events_type_seq     ON events(event_type, seq);
 CREATE INDEX IF NOT EXISTS idx_events_occurred_seq ON events(occurred_at, seq);
+
+-- Append-only enforcement: tampering with events raises an error at the DB layer.
+-- Retention uses _trim_events() which temporarily disables these triggers.
+CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'events table is append-only: UPDATE is forbidden');
+END;
+CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'events table is append-only: DELETE is forbidden');
+END;
 """
 
 _FTS_TOKEN_RE = re.compile(r"[\w]+")
@@ -542,13 +553,12 @@ class MemoryDB:
         namespace: str = "",
         occurred_at: str,
         payload_json: str = "{}",
+        _commit: bool = True,
     ) -> int:
         """Append one row to the local event log. Returns the monotonic ``seq``.
 
-        This is the only sanctioned write path into ``events``. There is no
-        UPDATE/DELETE method on the public surface — the log is append-only.
-        ``occurred_at`` is supplied by the caller so callers control timestamp
-        semantics (UTC ISO-8601) and tests can inject deterministic times.
+        ``_commit=False`` lets the caller batch this INSERT into the same
+        transaction as the memory write (atomicity + single fsync).
         """
         cursor = self._conn.execute(
             """INSERT INTO events
@@ -556,7 +566,8 @@ class MemoryDB:
                VALUES (?, ?, ?, ?, ?, ?)""",
             (event_id, memory_id, namespace, event_type, occurred_at, payload_json),
         )
-        self._conn.commit()
+        if _commit:
+            self._conn.commit()
         return int(cursor.lastrowid)
 
     def query_events(
@@ -623,27 +634,40 @@ class MemoryDB:
     def trim_events_before_seq(self, seq: int) -> int:
         """Local retention helper: delete events with ``seq < seq``.
 
-        Unexposed via the HTTP API in this ticket — retention remains a
-        local, explicit operation. Returns the number of deleted rows.
+        Temporarily disables the append-only DELETE trigger (retention is the
+        one sanctioned exception). Returns the number of deleted rows.
         """
+        self._conn.execute("PRAGMA recursive_triggers = OFF")
+        self._conn.execute("DROP TRIGGER IF EXISTS events_no_delete")
         cursor = self._conn.execute("DELETE FROM events WHERE seq < ?", (seq,))
+        self._conn.commit()
+        self._conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events "
+            "BEGIN SELECT RAISE(ABORT, 'events table is append-only: DELETE is forbidden'); END"
+        )
         self._conn.commit()
         return cursor.rowcount if cursor.rowcount != -1 else 0
 
     def trim_events_by_count(self, keep: int) -> int:
         """Local retention helper: keep only the most recent ``keep`` events.
 
-        Unexposed via the HTTP API in this ticket. Returns the number of
-        deleted rows. ``keep`` must be non-negative; ``keep=0`` clears the log.
+        Temporarily disables the append-only DELETE trigger. Returns the number
+        of deleted rows.
         """
         if keep < 0:
             raise ValueError("keep must be non-negative")
+        self._conn.execute("DROP TRIGGER IF EXISTS events_no_delete")
         cursor = self._conn.execute(
             """DELETE FROM events
                WHERE seq NOT IN (
                    SELECT seq FROM events ORDER BY seq DESC LIMIT ?
                )""",
             (keep,),
+        )
+        self._conn.commit()
+        self._conn.execute(
+            "CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events "
+            "BEGIN SELECT RAISE(ABORT, 'events table is append-only: DELETE is forbidden'); END"
         )
         self._conn.commit()
         return cursor.rowcount if cursor.rowcount != -1 else 0

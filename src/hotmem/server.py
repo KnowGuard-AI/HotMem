@@ -15,6 +15,7 @@ Extension: add middleware, CORS, rate limiting, or new endpoint groups here.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 import uuid
@@ -30,7 +31,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
-from hotmem.events import EventType, append_event, query_events
+from hotmem.events import EventType, append_event, emit_import_event, query_events
 from hotmem.hygiene import check_hygiene
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
@@ -187,26 +188,11 @@ async def lifespan(app: FastAPI):
     # Auto-hydrate if swap file exists
     if swap_path and Path(swap_path).exists():
         result = snapshot_hydrate(db, swap_path)
-        from hotmem.events import EventType as _EventType
-        from hotmem.events import append_event as _append_event
-
-        try:
-            from hotmem.snapshot import detect_format as _detect_format
-
-            fmt = _detect_format(swap_path)
-        except Exception:
-            fmt = "legacy"
-        _append_event(
+        emit_import_event(
             db,
-            event_type=(
-                _EventType.BUNDLE_IMPORTED if fmt == "bundle" else _EventType.SNAPSHOT_IMPORTED
-            ),
-            payload={
-                "loaded": result.loaded,
-                "skipped_dupes": result.skipped_dupes,
-                "path": str(swap_path),
-                "format": fmt,
-            },
+            path=str(swap_path),
+            loaded=result.loaded,
+            skipped_dupes=result.skipped_dupes,
         )
         _trace.info(
             "startup",
@@ -325,22 +311,19 @@ def create_app(
                             "message": str(err),
                         },
                     )
+                # Emit event in the same transaction (atomic with the memory write).
+                from hotmem.events import _build_memory_created_payload
+
+                record = db.get_memory(memory_id) or {}
                 append_event(
                     db,
                     event_type=EventType.MEMORY_CREATED,
                     memory_id=memory_id,
-                    payload={
-                        "memory_type": "file",
-                        "identifier": req.identifier,
-                        "content_hash": content_hash,
-                        "source_uri": ref.source_uri,
-                        "byte_offset": ref.byte_offset,
-                        "byte_length": ref.byte_length,
-                        "source_format": ref.source_format,
-                    },
+                    payload=_build_memory_created_payload(record),
+                    _commit=True,
                 )
             else:
-                # Inline path (unchanged from v1).
+                # Inline path — canonical add_memory helper.
                 memory_id = uuid.uuid4().hex
                 content_hash = compute_content_hash(req.identifier, req.fact or "")
                 vec = embed_text(req.fact or "")
@@ -359,15 +342,16 @@ def create_app(
                     content_hash=content_hash,
                     ttl_seconds=req.ttl_seconds,
                 )
+                # Emit event in the same transaction (atomic with the memory write).
+                from hotmem.events import _build_memory_created_payload
+
+                record = db.get_memory(memory_id) or {}
                 append_event(
                     db,
                     event_type=EventType.MEMORY_CREATED,
                     memory_id=memory_id,
-                    payload={
-                        "memory_type": "fact",
-                        "identifier": req.identifier,
-                        "content_hash": content_hash,
-                    },
+                    payload=_build_memory_created_payload(record),
+                    _commit=True,
                 )
         return {
             "memory_id": memory_id,
@@ -543,24 +527,12 @@ def create_app(
             )
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
-        # Record import event without altering the response shape.
-        from hotmem.snapshot import detect_format as _detect_format
-
-        try:
-            fmt = _detect_format(target)
-        except Exception:
-            fmt = "legacy"
-        append_event(
+        # Record import event (deduplicated via emit_import_event helper).
+        emit_import_event(
             db,
-            event_type=(
-                EventType.BUNDLE_IMPORTED if fmt == "bundle" else EventType.SNAPSHOT_IMPORTED
-            ),
-            payload={
-                "loaded": result.loaded,
-                "skipped_dupes": result.skipped_dupes,
-                "path": target,
-                "format": fmt,
-            },
+            path=target,
+            loaded=result.loaded,
+            skipped_dupes=result.skipped_dupes,
         )
         return {
             "loaded": result.loaded,
@@ -756,6 +728,10 @@ def create_app(
                     "identifier": w.detail.get("identifier"),
                 },
             )
+        # Retention: cap event log at 10K entries on each hygiene check.
+        _MAX_EVENT_ROWS = 10_000
+        with contextlib.suppress(Exception):
+            db.trim_events_by_count(_MAX_EVENT_ROWS)
         return report.to_dict()
 
     @app.get("/v1/events")

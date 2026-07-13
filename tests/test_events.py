@@ -36,7 +36,7 @@ def test_append_and_query_basic(tmp_db: MemoryDB):
     )
     e2 = append_event(
         tmp_db,
-        event_type=EventType.MEMORY_PROMOTION,
+        event_type=EventType.SNAPSHOT_IMPORTED,
         memory_id="m1",
         payload={"from": "HOT", "to": "READY"},
         occurred_at="2026-07-13T00:00:01Z",
@@ -59,7 +59,7 @@ def test_append_and_query_basic(tmp_db: MemoryDB):
 def test_filter_by_memory_id(tmp_db: MemoryDB):
     append_event(tmp_db, event_type=EventType.MEMORY_CREATED, memory_id="m1")
     append_event(tmp_db, event_type=EventType.MEMORY_CREATED, memory_id="m2")
-    append_event(tmp_db, event_type=EventType.MEMORY_PROMOTION, memory_id="m1")
+    append_event(tmp_db, event_type=EventType.SNAPSHOT_IMPORTED, memory_id="m1")
 
     listing = query_events(tmp_db, memory_id="m1")
     assert listing["count"] == 2
@@ -78,12 +78,12 @@ def test_filter_by_namespace(tmp_db: MemoryDB):
 
 def test_filter_by_event_type(tmp_db: MemoryDB):
     append_event(tmp_db, event_type=EventType.MEMORY_CREATED, memory_id="m1")
-    append_event(tmp_db, event_type=EventType.MEMORY_PROMOTION, memory_id="m1")
+    append_event(tmp_db, event_type=EventType.SNAPSHOT_IMPORTED, memory_id="m1")
     append_event(tmp_db, event_type=EventType.MEMORY_CREATED, memory_id="m2")
 
-    listing = query_events(tmp_db, event_type=EventType.MEMORY_PROMOTION)
+    listing = query_events(tmp_db, event_type=EventType.SNAPSHOT_IMPORTED)
     assert listing["count"] == 1
-    assert listing["events"][0]["event_type"] == EventType.MEMORY_PROMOTION
+    assert listing["events"][0]["event_type"] == EventType.SNAPSHOT_IMPORTED
 
 
 def test_filter_by_time_range(tmp_db: MemoryDB):
@@ -360,7 +360,7 @@ def test_events_endpoint_filter_by_event_type(client_with_events: TestClient):
     assert resp.status_code == 200
     assert resp.json()["count"] == 2
 
-    resp = client_with_events.get("/v1/events", params={"event_type": EventType.MEMORY_PROMOTION})
+    resp = client_with_events.get("/v1/events", params={"event_type": EventType.SNAPSHOT_IMPORTED})
     assert resp.status_code == 200
     assert resp.json()["count"] == 0
 
