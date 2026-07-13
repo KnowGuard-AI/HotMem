@@ -118,9 +118,7 @@ def test_migration_adds_events_table(v1_db_path: Path):
     db = MemoryDB(v1_db_path)
     try:
         tables = {
-            row[0] for row in db._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
+            row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         assert "events" in tables
         # The event log starts empty; no backfill of historical rows.

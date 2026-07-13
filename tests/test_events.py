@@ -257,8 +257,7 @@ def test_migration_adds_events_table(tmp_path: Path):
     db = MemoryDB(db_path)
     try:
         tables = {
-            row[0]
-            for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         assert "events" in tables
         # Queries against the empty log succeed.
@@ -357,15 +356,11 @@ def test_events_endpoint_lists_created(client_with_events: TestClient):
 
 
 def test_events_endpoint_filter_by_event_type(client_with_events: TestClient):
-    resp = client_with_events.get(
-        "/v1/events", params={"event_type": EventType.MEMORY_CREATED}
-    )
+    resp = client_with_events.get("/v1/events", params={"event_type": EventType.MEMORY_CREATED})
     assert resp.status_code == 200
     assert resp.json()["count"] == 2
 
-    resp = client_with_events.get(
-        "/v1/events", params={"event_type": EventType.MEMORY_PROMOTION}
-    )
+    resp = client_with_events.get("/v1/events", params={"event_type": EventType.MEMORY_PROMOTION})
     assert resp.status_code == 200
     assert resp.json()["count"] == 0
 
@@ -374,9 +369,7 @@ def test_events_endpoint_pagination(client_with_events: TestClient):
     first = client_with_events.get("/v1/events", params={"limit": 1}).json()
     assert first["count"] == 1
     next_seq = first["next_seq"]
-    second = client_with_events.get(
-        "/v1/events", params={"limit": 1, "after_seq": next_seq}
-    ).json()
+    second = client_with_events.get("/v1/events", params={"limit": 1, "after_seq": next_seq}).json()
     assert second["count"] == 1
     assert second["events"][0]["seq"] > first["events"][0]["seq"]
 
@@ -469,15 +462,11 @@ def test_hygiene_emits_summary_and_warning_events(tmp_path: Path, fixture_file: 
 
         c.get("/v1/hygiene")
 
-        summary = c.get(
-            "/v1/events", params={"event_type": EventType.HYGIENE_CHECKED}
-        ).json()
+        summary = c.get("/v1/events", params={"event_type": EventType.HYGIENE_CHECKED}).json()
         assert summary["count"] == 1
         assert summary["events"][0]["payload"]["error_count"] >= 1
 
-        warnings = c.get(
-            "/v1/events", params={"event_type": EventType.HYGIENE_WARNING}
-        ).json()
+        warnings = c.get("/v1/events", params={"event_type": EventType.HYGIENE_WARNING}).json()
         assert warnings["count"] >= 1
         warn = warnings["events"][0]
         assert warn["payload"]["category"] == "missing_backing_file"

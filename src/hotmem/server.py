@@ -780,9 +780,7 @@ def create_app(
         if order not in ("asc", "desc"):
             raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'")
         if limit < 1 or limit > 1000:
-            raise HTTPException(
-                status_code=400, detail="limit must be between 1 and 1000"
-            )
+            raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
         with Timer() as t:
             listing = query_events(
                 db,
