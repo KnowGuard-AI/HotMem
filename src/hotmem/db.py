@@ -484,6 +484,76 @@ class MemoryDB:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    # ── Promotion lifecycle (#42) ───────────────────────────────────────
+
+    def update_promotion_state(
+        self, memory_id: str, state: str, *, updated_at: str | None = None
+    ) -> None:
+        """Update promotion_state + updated_at on a memory row.
+
+        Called by lifecycle.transition() after validating the transition.
+        Emits no event — the caller owns event emission.
+        """
+        ts = updated_at or __import__("datetime").datetime.now(__import__("datetime").UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        self._conn.execute(
+            "UPDATE memories SET promotion_state = ?, updated_at = ? WHERE id = ?",
+            (state, ts, memory_id),
+        )
+        self._conn.commit()
+
+    def set_promotion_candidate(self, memory_id: str, candidate: int) -> None:
+        """Set the promotion_candidate flag (0/1) on a memory row."""
+        self._conn.execute(
+            "UPDATE memories SET promotion_candidate = ? WHERE id = ?",
+            (candidate, memory_id),
+        )
+        self._conn.commit()
+
+    def list_promotion_candidates(
+        self, *, namespace: str | None = None, state: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return memories flagged as promotion candidates.
+
+        Pure DB read — no file hydration.
+        """
+        clauses = ["promotion_candidate = 1"]
+        params: list[Any] = []
+        if namespace is not None:
+            clauses.append("namespace = ?")
+            params.append(namespace)
+        if state is not None:
+            clauses.append("promotion_state = ?")
+            params.append(state)
+        where = " WHERE " + " AND ".join(clauses)
+        cols = ", ".join(_MEMORY_COLUMNS)
+        rows = self._conn.execute(
+            f"SELECT {cols} FROM memories{where} ORDER BY created_at",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def list_by_promotion_state(
+        self, state: str, *, namespace: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return memories in a given promotion_state.
+
+        Pure DB read — no file hydration.
+        """
+        clauses = ["promotion_state = ?"]
+        params: list[Any] = [state]
+        if namespace is not None:
+            clauses.append("namespace = ?")
+            params.append(namespace)
+        where = " WHERE " + " AND ".join(clauses)
+        cols = ", ".join(_MEMORY_COLUMNS)
+        rows = self._conn.execute(
+            f"SELECT {cols} FROM memories{where} ORDER BY created_at",
+            params,
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def list_file_backed(self) -> list[dict[str, Any]]:
         """Return all file-backed memory rows (metadata only; no file I/O).
 
