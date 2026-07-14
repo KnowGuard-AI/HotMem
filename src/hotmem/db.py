@@ -487,12 +487,18 @@ class MemoryDB:
     # ── Promotion lifecycle (#42) ───────────────────────────────────────
 
     def update_promotion_state(
-        self, memory_id: str, state: str, *, updated_at: str | None = None
+        self,
+        memory_id: str,
+        state: str,
+        *,
+        updated_at: str | None = None,
+        _commit: bool = True,
     ) -> None:
         """Update promotion_state + updated_at on a memory row.
 
         Called by lifecycle.transition() after validating the transition.
-        Emits no event — the caller owns event emission.
+        ``_commit=False`` lets the caller batch the state update + event emit
+        in one transaction (atomicity). The caller must commit.
         """
         ts = updated_at or __import__("datetime").datetime.now(__import__("datetime").UTC).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
@@ -501,15 +507,19 @@ class MemoryDB:
             "UPDATE memories SET promotion_state = ?, updated_at = ? WHERE id = ?",
             (state, ts, memory_id),
         )
-        self._conn.commit()
+        if _commit:
+            self._conn.commit()
 
-    def set_promotion_candidate(self, memory_id: str, candidate: int) -> None:
+    def set_promotion_candidate(
+        self, memory_id: str, candidate: int, *, _commit: bool = True
+    ) -> None:
         """Set the promotion_candidate flag (0/1) on a memory row."""
         self._conn.execute(
             "UPDATE memories SET promotion_candidate = ? WHERE id = ?",
             (candidate, memory_id),
         )
-        self._conn.commit()
+        if _commit:
+            self._conn.commit()
 
     def list_promotion_candidates(
         self, *, namespace: str | None = None, state: str | None = None
@@ -611,6 +621,16 @@ class MemoryDB:
         """Remove all bundle index entries."""
         self._conn.execute("DELETE FROM bundle_index")
         self._conn.commit()
+
+    # ── Transaction control (#41/#42) ──────────────────────────────────
+
+    def commit(self) -> None:
+        """Commit the current transaction (public batch-commit API)."""
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        """Rollback the current transaction."""
+        self._conn.rollback()
 
     # ── Event log (#41) ────────────────────────────────────────────────
 
@@ -754,33 +774,45 @@ class MemoryDB:
         _trace.debug("insert_many", f"stored {inserted} memories", detail={"attempted": len(rows)})
         return inserted
 
-    def search_with_cosine(self, query_embedding: bytes) -> list[dict[str, Any]]:
-        """Return all memories with their cosine similarity to the query embedding."""
+    def search_with_cosine(
+        self, query_embedding: bytes, *, include_archived: bool = False
+    ) -> list[dict[str, Any]]:
+        """Return all memories with their cosine similarity to the query embedding.
+
+        Archived memories are excluded by default; pass ``include_archived=True``
+        for audit/full profiles.
+        """
+        archived_clause = "" if include_archived else " AND promotion_state != 'ARCHIVED'"
         rows = self._conn.execute(
             f"""SELECT id, identifier, fact_text, fact_summary, importance,
                       metadata_json, source, created_at,
                       cosine_sim(embedding, ?) AS cosine_score
-               FROM memories
-               WHERE {_ttl_live()}
-               ORDER BY cosine_score DESC""",
+                FROM memories
+                WHERE {_ttl_live()}{archived_clause}
+                ORDER BY cosine_score DESC""",
             (query_embedding,),
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def fts_search(self, query: str) -> list[dict[str, Any]]:
-        """Return full-text matches with raw BM25 scores."""
+    def fts_search(self, query: str, *, include_archived: bool = False) -> list[dict[str, Any]]:
+        """Return full-text matches with raw BM25 scores.
+
+        Archived memories are excluded by default; pass ``include_archived=True``
+        for audit/full profiles.
+        """
         fts_query = _fts_query(query)
         if not fts_query:
             return []
 
+        archived_clause = "" if include_archived else " AND m.promotion_state != 'ARCHIVED'"
         rows = self._conn.execute(
             f"""SELECT m.id, m.identifier, m.fact_text, m.importance, m.metadata_json,
-                      m.source, m.created_at, bm25(memories_fts) AS bm25_score
-               FROM memories_fts
-               JOIN memories AS m ON m.rowid = memories_fts.rowid
-               WHERE memories_fts MATCH ?
-                 AND {_ttl_live("m.")}
-               ORDER BY bm25_score ASC""",
+                       m.source, m.created_at, bm25(memories_fts) AS bm25_score
+                FROM memories_fts
+                JOIN memories AS m ON m.rowid = memories_fts.rowid
+                WHERE memories_fts MATCH ?
+                  AND {_ttl_live("m.")}{archived_clause}
+                ORDER BY bm25_score ASC""",
             (fts_query,),
         ).fetchall()
         return [dict(r) for r in rows]

@@ -123,7 +123,7 @@ def transition(
         raise InvalidTransitionError(memory_id, from_state, to_state)
 
     updated_at = _utc_now_iso()
-    db.update_promotion_state(memory_id, to_state, updated_at=updated_at)
+    db.update_promotion_state(memory_id, to_state, updated_at=updated_at, _commit=False)
 
     payload: dict[str, Any] = {"from": from_state, "to": to_state}
     if reason is not None:
@@ -139,7 +139,10 @@ def transition(
             namespace=namespace,
             payload=payload,
             occurred_at=updated_at,
+            _commit=False,
         )
+    # Single commit for state update + event emit (atomic: both or neither).
+    db.commit()
 
     _trace.info(
         "transition",
@@ -175,7 +178,7 @@ def mark_candidate(
         raise KeyError(f"memory not found: {memory_id}")
 
     namespace = record.get("namespace") or ""
-    db.set_promotion_candidate(memory_id, 1 if candidate else 0)
+    db.set_promotion_candidate(memory_id, 1 if candidate else 0, _commit=False)
 
     payload: dict[str, Any] = {"candidate": bool(candidate)}
     if reason is not None:
@@ -188,7 +191,10 @@ def mark_candidate(
             memory_id=memory_id,
             namespace=namespace,
             payload=payload,
+            _commit=False,
         )
+    # Single commit for candidate flag + event emit (atomic).
+    db.commit()
 
     _trace.info(
         "candidate",
