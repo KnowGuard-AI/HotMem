@@ -1,13 +1,17 @@
-![HotMem banner](hotmem/hotmem-banner.png)
+<p align="center">
+  <img src="hotmem/hotmem-banner.png" alt="HotMem banner" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/KnowGuard-AI/HotMem/actions/workflows/ci.yml"><img src="https://github.com/KnowGuard-AI/HotMem/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://pypi.org/project/hotmem/"><img src="https://img.shields.io/pypi/v/hotmem" alt="PyPI" /></a>
+  <a href="https://pypi.org/project/hotmem/"><img src="https://img.shields.io/pypi/pyversions/hotmem" alt="Python" /></a>
+  <a href="https://codecov.io/gh/KnowGuard-AI/HotMem"><img src="https://codecov.io/gh/KnowGuard-AI/HotMem/branch/main/graph/badge.svg" alt="codecov" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/KnowGuard-AI/HotMem" alt="License: MIT" /></a>
+  <a href="https://github.com/astral-sh/ruff"><img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="Ruff" /></a>
+</p>
 
 # HotMem
-
-[![CI](https://github.com/KnowGuard-AI/HotMem/actions/workflows/ci.yml/badge.svg)](https://github.com/KnowGuard-AI/HotMem/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/hotmem)](https://pypi.org/project/hotmem/)
-[![Python](https://img.shields.io/pypi/pyversions/hotmem)](https://pypi.org/project/hotmem/)
-[![codecov](https://codecov.io/gh/KnowGuard-AI/HotMem/branch/main/graph/badge.svg)](https://codecov.io/gh/KnowGuard-AI/HotMem)
-[![License: MIT](https://img.shields.io/github/license/KnowGuard-AI/HotMem)](LICENSE)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 A local-first memory sidecar for agent applications. One SQLite DB. One port: 8711.
 
