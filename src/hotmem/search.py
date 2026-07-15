@@ -59,8 +59,13 @@ def search_memories(
     query: str,
     top_k: int = 5,
     max_chars: int | None = None,
+    *,
+    include_archived: bool = False,
 ) -> list[dict[str, Any]]:
     """Search memories and return ranked, LLM-ready message objects.
+
+    Archived memories are excluded by default; pass ``include_archived=True``
+    for audit/full profiles.
 
     Returns:
         List of dicts with keys: role, content, memory_id, identifier, score
@@ -71,8 +76,8 @@ def search_memories(
         query_blob = pack_embedding(query_vec)
 
         # Get all candidates with cosine scores from DB
-        candidates = db.search_with_cosine(query_blob)
-        fts_scores = _normalize_bm25(db.fts_search(query))
+        candidates = db.search_with_cosine(query_blob, include_archived=include_archived)
+        fts_scores = _normalize_bm25(db.fts_search(query, include_archived=include_archived))
 
         # Apply hybrid scoring
         scored = []

@@ -487,3 +487,56 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
         # Remove the temp dir if empty (kept artifacts may live elsewhere).
         if os.path.isdir(tmp_dir) and not os.listdir(tmp_dir):
             os.rmdir(tmp_dir)
+
+
+@main.command()
+@click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
+@click.option("--memory-id", "memory_id", required=True, help="Memory ID to promote.")
+@click.option("--to", "to_state", required=True, help="Target state: HOT|READY|PROMOTED|ARCHIVED.")
+@click.option("--reason", default=None, help="Optional reason for the transition.")
+@click.option("--actor", default=None, help="Optional actor performing the transition.")
+def promote(db_path: str, memory_id: str, to_state: str, reason: str | None, actor: str | None):
+    """Apply one promotion lifecycle transition (HOT→READY→PROMOTED→ARCHIVED)."""
+    from hotmem.db import MemoryDB
+    from hotmem.lifecycle import InvalidTransitionError, transition
+
+    db = MemoryDB(db_path)
+    try:
+        result = transition(db, memory_id, to_state, reason=reason, actor=actor)
+    except KeyError:
+        click.echo(f"Memory not found: {memory_id}", err=True)
+        raise SystemExit(1) from None
+    except InvalidTransitionError as err:
+        click.echo(str(err), err=True)
+        raise SystemExit(1) from err
+    except ValueError as err:
+        click.echo(str(err), err=True)
+        raise SystemExit(1) from err
+    finally:
+        db.close()
+    click.echo(
+        f"{result['memory_id']}: {result['promotion_state']} (updated {result['updated_at']})"
+    )
+
+
+@main.command()
+@click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
+@click.option("--namespace", default=None, help="Filter by namespace.")
+@click.option("--state", default=None, help="Filter by promotion state.")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
+def candidates(db_path: str, namespace: str | None, state: str | None, as_json: bool):
+    """List memories flagged as promotion candidates."""
+    from hotmem.db import MemoryDB
+    from hotmem.lifecycle import list_candidates
+
+    db = MemoryDB(db_path)
+    try:
+        rows = list_candidates(db, namespace=namespace, state=state)
+    finally:
+        db.close()
+
+    if as_json:
+        click.echo(json.dumps(rows, default=str, indent=2))
+    else:
+        for r in rows:
+            click.echo(f"{r['id']}\t{r['identifier']}\t{r.get('promotion_state', 'HOT')}")

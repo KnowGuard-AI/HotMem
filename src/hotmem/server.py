@@ -33,6 +33,14 @@ from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
 from hotmem.events import EventType, append_event, emit_import_event, query_events
 from hotmem.hygiene import check_hygiene
+from hotmem.lifecycle import (
+    InvalidTransitionError,
+    list_by_state,
+    list_candidates,
+    mark_candidate,
+    states_model,
+    transition,
+)
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
@@ -170,6 +178,26 @@ class DiscoverRequest(BaseModel):
 
     root: str = Field(..., description="Root directory to scan for bundles")
     max_depth: int = Field(default=10, ge=1, le=50, description="Max directory depth")
+
+
+class PromoteRequest(BaseModel):
+    """Body for POST /v1/memory/{id}/promote — apply one lifecycle transition.
+
+    HotMem stores state and emits signals; EMOS owns policy. Only forward-only
+    transitions in HOT -> READY -> PROMOTED -> ARCHIVED are accepted; any other
+    transition returns 409 invalid_transition without mutating state.
+    """
+
+    to_state: str = Field(..., description="HOT | READY | PROMOTED | ARCHIVED")
+    reason: str | None = None
+    actor: str | None = None
+
+
+class CandidateRequest(BaseModel):
+    """Body for POST /v1/memory/{id}/candidate — set the promotion_candidate flag."""
+
+    candidate: bool = True
+    reason: str | None = None
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────────────
@@ -774,6 +802,115 @@ def create_app(
             "events": listing["events"],
             "count": listing["count"],
             "next_seq": listing["next_seq"],
+            "trace_ms": round(t.ms, 2),
+        }
+
+    # ── Promotion lifecycle endpoints (#42, signal only) ────────────────
+
+    @app.post("/v1/memory/{memory_id}/promote")
+    async def promote_memory(memory_id: str, req: PromoteRequest):
+        """Apply one forward-only promotion transition.
+
+        HotMem stores state and emits a ``memory.promotion`` event; EMOS owns
+        policy. Returns 409 ``invalid_transition`` (without mutating state) for
+        any transition not in HOT -> READY -> PROMOTED -> ARCHIVED.
+        """
+        db: MemoryDB = _state["db"]
+        with Timer() as t:
+            try:
+                result = transition(
+                    db,
+                    memory_id,
+                    req.to_state,
+                    reason=req.reason,
+                    actor=req.actor,
+                )
+            except KeyError:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": "not_found", "memory_id": memory_id},
+                )
+            except InvalidTransitionError as err:
+                return JSONResponse(status_code=409, content=err.to_dict())
+        result["trace_ms"] = round(t.ms, 2)
+        return result
+
+    @app.post("/v1/memory/{memory_id}/candidate")
+    async def set_candidate(memory_id: str, req: CandidateRequest):
+        """Set the ``promotion_candidate`` flag on a memory (independent of state)."""
+        db: MemoryDB = _state["db"]
+        with Timer() as t:
+            try:
+                result = mark_candidate(
+                    db,
+                    memory_id,
+                    req.candidate,
+                    reason=req.reason,
+                )
+            except KeyError:
+                return JSONResponse(
+                    status_code=404,
+                    content={"error": "not_found", "memory_id": memory_id},
+                )
+        result["trace_ms"] = round(t.ms, 2)
+        return result
+
+    @app.get("/v1/promotion/candidates")
+    async def promotion_candidates(
+        namespace: str | None = None,
+        state: str | None = None,
+    ):
+        """List memories flagged as promotion candidates (pure DB read)."""
+        db: MemoryDB = _state["db"]
+        with Timer() as t:
+            rows = list_candidates(db, namespace=namespace, state=state)
+        candidates = [
+            {
+                "memory_id": r["id"],
+                "identifier": r["identifier"],
+                "namespace": r.get("namespace") or "",
+                "promotion_state": r.get("promotion_state") or "HOT",
+                "memory_type": r.get("memory_type") or "fact",
+                "created_at": r.get("created_at"),
+            }
+            for r in rows
+        ]
+        return {
+            "candidates": candidates,
+            "count": len(candidates),
+            "trace_ms": round(t.ms, 2),
+        }
+
+    @app.get("/v1/promotion/states")
+    async def promotion_states():
+        """Return the static lifecycle model: states and valid transitions."""
+        return states_model()
+
+    @app.get("/v1/promotion/by-state")
+    async def promotion_by_state(
+        state: str,
+        namespace: str | None = None,
+    ):
+        """List memories in a given promotion_state (pure DB read)."""
+        db: MemoryDB = _state["db"]
+        with Timer() as t:
+            rows = list_by_state(db, state, namespace=namespace)
+        summaries = [
+            {
+                "memory_id": r["id"],
+                "identifier": r["identifier"],
+                "namespace": r.get("namespace") or "",
+                "promotion_state": r.get("promotion_state") or "HOT",
+                "promotion_candidate": bool(r.get("promotion_candidate") or 0),
+                "memory_type": r.get("memory_type") or "fact",
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+            }
+            for r in rows
+        ]
+        return {
+            "memories": summaries,
+            "count": len(summaries),
             "trace_ms": round(t.ms, 2),
         }
 
