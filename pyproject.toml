@@ -1,6 +1,6 @@
 [project]
 name = "hotmem"
-version = "0.2.1"
+version = "0.2.2"
 description = "A local-first memory sidecar for agent applications"
 readme = "README.md"
 requires-python = ">=3.11"

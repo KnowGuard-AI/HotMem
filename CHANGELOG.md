@@ -4,6 +4,80 @@ All notable changes to HotMem will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.2] - 2026-07-16
+
+### Added — Bundle store (#52, #50)
+- Loose local markdown bundle reader: a bundle is a directory containing
+  `memory.md` (or `index.md`/`README.md`), optional `metadata.json`/
+  `metadata.yaml`, `facts.json`, `events.jsonl`, and an `attachments/`
+  directory. Files in `attachments/` become file-backed memory records
+  (`memory_type="file"`) referenced by relative URI, not copied into
+  SQLite. Symlinks escaping the bundle directory are rejected.
+- Bundle discovery: `discover_bundles(root, max_depth=10)` walks a
+  directory tree (no symlink following) and returns `BundleIndexEntry`
+  records with path, primary file, metadata summary, attachment refs,
+  checksum, modified time, size hint, and warnings.
+- Bundle indexing: `index_bundles(db, root)` discovers and upserts into
+  a `bundle_index` SQLite table in a single transaction. Resource caps:
+  10 000 files per bundle, 1 GB per bundle, 16 MB per file.
+
+### Added — Hydration profiles (#40)
+- `HydrationProfile` literal: `agent` | `compact` | `audit` | `full`.
+- `hydrate_with_profile(db, memory_id, *, profile, base_dir, verify)`
+  returns a `ProfiledHydration` result with content, verified flag,
+  provenance, warnings, and existence check.
+- `compact`: metadata only, no file I/O (stat only for `exists`).
+- `agent`: `fact_summary` or truncated `fact_text` (max 4096 chars), no
+  file I/O — designed for LLM context windows.
+- `audit`: full content (inline or file-backed bytes, lazy read), full
+  provenance (`provenance_json`, checksums, warnings) — for compliance.
+- `full`: everything `audit` has plus full `fact_text` for inline memories.
+- `compact`/`agent` never call `adapter.read_range()`; `audit`/`full`
+  may read file-backed content on demand.
+
+### Added — API extensions (#43)
+- `GET /v1/files` — list file-backed memory references.
+- `GET /v1/bundles` — list bundle index entries.
+- `POST /v1/discover` — trigger bundle discovery under a root directory.
+- `POST /v1/memory/hydrate-batch` — batch hydrate with a profile.
+
+### Added — Append-only event log (#41)
+- `events` table with `seq` (AUTOINCREMENT PK), `event_id` (UUID4 hex),
+  `memory_id` (nullable FK), `namespace`, `event_type`, `occurred_at`
+  (ISO-8601 UTC), `payload_json`. Indexes on `(memory_id, seq)`,
+  `(namespace, seq)`, `(event_type, seq)`, `(occurred_at, seq)`.
+- `BEFORE UPDATE` and `BEFORE DELETE` triggers `RAISE(ABORT)` to enforce
+  append-only semantics at the database layer.
+- Built-in event types: `memory.created` (full row snapshot payload),
+  `snapshot.imported`, `bundle.imported`, `bundle.discovered`,
+  `hygiene.checked`, `hygiene.warning`.
+- `replay(db, *, after_seq=0)` streams events in seq order (500 per
+  batch) for state reconstruction.
+- `replay_into(db, target_db)` reconstructs full memory state from
+  `memory.created` events into a target DB via `insert_many_ignore`.
+- `GET /v1/events` query endpoint with cursor pagination, filtering by
+  `memory_id`, `namespace`, `event_type`, time range, and `after_seq`/
+  `before_seq` cursors. `limit` 1–1000, default 100. Returns
+  `next_seq` for cursor pagination.
+- Atomic emission: events appended in the same transaction as the
+  mutation they record.
+- Retention: `trim_events(db, keep_last)` prunes old events while
+  preserving the monotonic seq sequence.
+
+### Added — Hygiene warnings (#51)
+- Advisory hygiene checks surface as `hygiene.checked` and
+  `hygiene.warning` events in the event log, queryable via `/v1/events`
+  and `/v1/hygiene`.
+
+### Changed
+- `memory.created` event payload captures the full 30-field row
+  snapshot (including `provenance_json`, `source_checksum`,
+  `snapshot_id`, `promotion_state`, `parent_memory`,
+  `related_memories`, `tags`, `fact_summary`) for deterministic replay.
+- All existing public APIs (`hotmem.db`, `hotmem.mount`, `hotmem.search`,
+  `hotmem.swap`, `hotmem.embed`) remain unchanged — the new modules are
+  purely additive.
+
 ## [0.2.1] - 2026-07-08
 
 ### Added — Snapshot v2 directory format (#39)
