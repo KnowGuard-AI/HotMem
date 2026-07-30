@@ -18,6 +18,7 @@ harden into final API or format specifications.
 - [File-Aware Architecture](file-aware-architecture.md)
 - [File-Native Memory Epic](file-native-epic.md)
 - [File-Native Memory Practices](file-native-memory-practices.md)
+- [Portable Company Brain and Ecosystem Strategy](company-brain-interchange.md)
 
 ## 3. Compatibility Rule
 
