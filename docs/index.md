@@ -54,6 +54,7 @@ curl -X POST http://127.0.0.1:8711/v1/search \
 - [OKF Notes](okf/index.md)
 - [File-Native Memory Practices](okf/file-native-memory-practices.md)
 - [File-Aware Architecture](okf/file-aware-architecture.md)
+- [Portable Company Brain and Ecosystem Strategy](okf/company-brain-interchange.md)
 - [GitHub](https://github.com/KnowGuard-AI/HotMem)
 
 ## 5. Open Questions
