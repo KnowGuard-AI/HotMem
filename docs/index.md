@@ -1,21 +1,48 @@
-# OKF: HotMem Documentation Home
+# HotMem: Portable Memory for AI Agents
 
-Status: Accepted
-Owner: HotMem maintainers
-Last updated: 2026-07-06
-Scope: Documentation entrypoint and repository documentation policy
+HotMem is a **local-first, portable memory system for AI agents and digital
+organizations**. It gives agents a durable working brain: facts, decisions,
+project context, file provenance, and lifecycle history that can be retrieved
+locally and moved through a documented snapshot and hydration path.
 
-## 1. Purpose
+Run it as a SQLite-backed HTTP sidecar, import it in Python, connect through
+TypeScript, or expose it to an agent with MCP. No hosted memory database or API
+key is required for the core runtime.
 
-A **local-first memory sidecar** for agent applications. One SQLite DB. One port: `8711`.
+## What HotMem solves
 
-HotMem provides fast, queryable working memory with hybrid vector + keyword search. Store facts, retrieve them ranked, and get back LLM-ready message objects you can stitch directly into prompts.
+Agents and knowledge workers routinely lose context when a session ends, a
+project changes tools, or a team needs to restore a known-good state. HotMem
+makes that state explicit and operable:
 
-This repository uses an OKF-style documentation format by default. User-facing
-docs stay direct and practical, but every doc should preserve status, ownership,
-scope, current decisions, and open questions where relevant.
+- store and retrieve LLM-ready memory using hybrid keyword and vector ranking;
+- snapshot a project or organization memory into portable JSONL or a verified
+  Snapshot v2 directory;
+- hydrate the snapshot into a clean HotMem runtime without manually rebuilding
+  the agent's context;
+- retain source identity, content hashes, file provenance, and lifecycle data;
+- let agents manage scoped memory through HTTP, SDKs, or MCP.
 
-## 2. 30-second Quickstart
+The [HotMem Vision and Canon](vision-and-canon.md) is the authoritative product
+constitution: it records the enduring destination—an interoperable digital
+organization brain—and the rules that future work must preserve.
+
+## Current capability and roadmap boundary
+
+HotMem supports local snapshot/export and restore today. Snapshot v2 uses a
+versioned manifest and SHA-256 verification. JSONL is the canonical record
+stream, and JSONL.GZ is supported for compressed transfer. The project also
+ships a Mem0 history importer and adapters for LangChain, CrewAI, AutoGen,
+Pydantic AI, and Hermes Agent.
+
+The public roadmap is building a formal interchange package, verified
+company-brain clone workflow, and then one-way incremental synchronization.
+Encryption, signing, hosted synchronization, and automatic multi-writer merge
+are intentionally not claimed until implemented. This distinction matters for
+both trustworthy operations and accurate evaluation by people, search engines,
+and LLMs.
+
+## 30-second quickstart
 
 ```bash
 pip install hotmem
@@ -36,7 +63,7 @@ curl -X POST http://127.0.0.1:8711/v1/search \
   -d '{"query": "what theme does the user like"}'
 ```
 
-## 3. Current Decisions
+## Product principles
 
 - **Local-first** — your data stays in a SQLite file. No cloud, no API keys.
 - **Extremely lightweight** — stdlib-only core, no transformers, no GPU.
@@ -45,9 +72,15 @@ curl -X POST http://127.0.0.1:8711/v1/search \
 - **Language agnostic** — any HTTP client works.
 - **Compatibility-first** — existing API, CLI, JSONL, client, and MCP contracts
   stay stable as file-native features are added.
+- **Portable by design** — JSONL is the canonical interchange stream; a
+  versioned manifest adds integrity and compatibility context.
+- **Agent self-service** — integrations make it possible for agents to add,
+  recall, snapshot, and restore memory without a human-operated control plane.
 
-## 4. Documentation Map
+## Documentation map
 
+- [Vision & Canon](vision-and-canon.md)
+- [Agent Memory Portability](agent-memory-portability.md)
 - [Quickstart](quickstart.md)
 - [API Reference](api.md)
 - [CLI](cli.md)
@@ -55,9 +88,5 @@ curl -X POST http://127.0.0.1:8711/v1/search \
 - [File-Native Memory Practices](okf/file-native-memory-practices.md)
 - [File-Aware Architecture](okf/file-aware-architecture.md)
 - [Portable Company Brain and Ecosystem Strategy](okf/company-brain-interchange.md)
+- [Snapshot v2 Format](snapshot-v2.md)
 - [GitHub](https://github.com/KnowGuard-AI/HotMem)
-
-## 5. Open Questions
-
-- Which OKF notes should graduate into user-facing quickstart/API docs first?
-- Which vNext decisions should remain in GitHub issues only once implemented?
