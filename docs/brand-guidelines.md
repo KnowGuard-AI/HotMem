@@ -43,8 +43,8 @@ height of the K within the icon.
 ## HotMem-only accent
 
 **HotMem Orange — `#FAB37B`** is sampled from the flame in
-[`hotmem/hotmem-banner.png`](../hotmem/hotmem-banner.png). It may be used for
+[`hotmem/hotmem-banner.png`](https://github.com/KnowGuard-AI/HotMem/blob/main/hotmem/hotmem-banner.png).
+It may be used for
 HotMem-specific warmth, activation, or product highlights. It is not part of
 the shared KnowGuard palette and must not replace Brand Green as KnowGuard's
 primary external accent.
-
