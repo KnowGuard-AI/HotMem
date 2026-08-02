@@ -22,6 +22,59 @@ This keeps the public knowledge corpus reviewable beside the code and minimizes
 the operational surface area. It is the delivery foundation for a standard that
 must be discoverable by people, search engines, agents, and LLMs.
 
+## Technology decision record
+
+**Decision date:** 2026-08-02 · **Current choice:** Material for MkDocs 9.x ·
+**Future migration candidate:** Zensical
+
+HotMem will launch its public documentation with the locked Material for MkDocs
+configuration already present in this repository. It fits the current product:
+the sources and application are Python-native, `uv` already owns dependency
+resolution, the output is static, local browser search needs no backend, and the
+strict build and GitHub Pages workflow are implemented and tested together.
+
+The choice is deliberately conservative rather than permanent. Zensical is the
+preferred future migration candidate because it is developed by the Material
+for MkDocs team, combines the generator and theme into a more vertically
+integrated Rust/Python implementation, and provides a compatibility path for
+existing Material projects and `mkdocs.yml`. As of this decision, Zensical is
+still pre-1.0 and working toward complete feature parity, so changing the build
+inside the initial deployment PR would add transition risk without improving
+the public contract.
+
+| Option | Fit for HotMem now | Decision |
+| --- | --- | --- |
+| Material for MkDocs | Already locked, Python/`uv` aligned, static, searchable, and passing strict CI | Use for the initial production service |
+| Zensical | Promising compatible successor with a leaner, performance-oriented implementation | Re-evaluate after the migration gates below |
+| VitePress or Astro Starlight | Strong static documentation products, but require a second Node/frontend toolchain | Do not add without a demonstrated requirement |
+| Docusaurus | Mature and extensible, but its React/Node application surface exceeds the current need | Reject for the minimal service |
+
+Authoritative project references:
+
+- [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/)
+- [Zensical compatibility](https://zensical.org/compatibility/)
+- [Zensical production and transition FAQ](https://zensical.org/docs/community/faqs/)
+- [VitePress](https://vitepress.dev/guide/what-is-vitepress)
+- [Astro Starlight](https://starlight.astro.build/)
+- [Docusaurus](https://docusaurus.io/docs/)
+
+### Zensical migration gates
+
+Migration is a separate reviewed change and occurs only when all of the
+following are true:
+
+1. Every feature used by HotMem is supported without a compatibility workaround.
+2. A pinned Zensical version has an acceptable maintenance and release posture.
+3. A shadow build preserves the public routes, navigation, search, `llms.txt`,
+   sitemap, Markdown rendering, and branded presentation.
+4. Strict validation and GitHub Pages deployment remain at least as reliable as
+   the current workflow.
+5. Measured build time, artifact size, and maintenance burden are no worse, with
+   a meaningful improvement in at least one of them.
+
+Until those gates pass, Zensical is a watched migration path, not a second
+generator, optional dependency, or dual-build requirement.
+
 ## Contract
 
 ### Source
