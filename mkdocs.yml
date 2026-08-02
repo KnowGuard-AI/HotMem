@@ -40,6 +40,7 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Brand Guidelines: brand-guidelines.md
   - Vision & Canon: vision-and-canon.md
   - Agent Memory Portability: agent-memory-portability.md
   - Documentation Service: documentation-service.md
