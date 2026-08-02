@@ -117,8 +117,7 @@ Actions**. The standard public paths are:
 - `/llms.txt` — compact crawler/LLM source.
 
 The deployment job verifies each of these routes against the URL returned by
-GitHub Pages. Issue #75 is closed automatically only after the deployment and
-all route checks succeed. A pull-request merge alone does not close it.
+GitHub Pages and fails visibly if the published service is incomplete.
 
 ### Minimal HotMem branding
 
