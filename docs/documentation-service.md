@@ -116,6 +116,19 @@ Actions**. The standard public paths are:
 - `/snapshot-v2/` — snapshot contract;
 - `/llms.txt` — compact crawler/LLM source.
 
+The deployment job verifies each of these routes against the URL returned by
+GitHub Pages. Issue #75 is closed automatically only after the deployment and
+all route checks succeed. A pull-request merge alone does not close it.
+
+### Minimal HotMem branding
+
+The generated site uses the KnowGuard engram as its header logo and favicon.
+A small repository-owned stylesheet applies the canonical dark navy, emerald,
+violet, and HotMem orange palette without introducing a frontend framework,
+remote theme service, or runtime dependency. Branding remains an additive
+presentation layer over portable Markdown; it cannot become a condition for
+reading or rebuilding the documentation.
+
 ## Deliberately excluded
 
 - a separate documentation server or API;

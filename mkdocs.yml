@@ -9,14 +9,18 @@ docs_dir: docs
 
 theme:
   name: material
+  logo: assets/brand/hotmem.svg
+  favicon: assets/brand/hotmem.svg
   palette:
     - scheme: default
-      primary: blue
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - scheme: slate
-      primary: blue
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -27,6 +31,9 @@ theme:
 
 plugins:
   - search
+
+extra_css:
+  - assets/stylesheets/extra.css
 
 markdown_extensions:
   - admonition

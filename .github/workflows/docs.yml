@@ -51,6 +51,7 @@ jobs:
     permissions:
       pages: write
       id-token: write
+      issues: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -58,3 +59,44 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Verify required public documentation routes
+        env:
+          PAGES_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          base_url="${PAGES_URL%/}"
+          for path in \
+            "" \
+            "vision-and-canon/" \
+            "agent-memory-portability/" \
+            "snapshot-v2/" \
+            "llms.txt"
+          do
+            verified=false
+            for attempt in {1..12}
+            do
+              if curl --fail --silent --show-error --location \
+                --retry 2 --retry-all-errors \
+                "${base_url}/${path}" > /dev/null
+              then
+                verified=true
+                break
+              fi
+              sleep 5
+            done
+            if [ "$verified" != true ]
+            then
+              echo "Failed to verify ${base_url}/${path}" >&2
+              exit 1
+            fi
+          done
+      - name: Close documentation delivery issue after verified deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if [ "$(gh issue view 75 --json state --jq .state)" = "OPEN" ]
+          then
+            gh issue close 75 --reason completed \
+              --comment "Deployed from ${GITHUB_SHA} and verified all required public documentation routes."
+          fi
