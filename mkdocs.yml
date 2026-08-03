@@ -1,5 +1,5 @@
 site_name: HotMem
-site_description: Local-first memory sidecar for agent applications
+site_description: Portable, local-first memory for AI agents and digital organizations
 site_url: https://knowguard-ai.github.io/HotMem
 repo_url: https://github.com/KnowGuard-AI/HotMem
 repo_name: KnowGuard-AI/HotMem
@@ -9,14 +9,18 @@ docs_dir: docs
 
 theme:
   name: material
+  logo: assets/brand/hotmem.svg
+  favicon: assets/brand/hotmem.svg
   palette:
     - scheme: default
-      primary: blue
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
     - scheme: slate
-      primary: blue
+      primary: custom
+      accent: custom
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
@@ -27,6 +31,9 @@ theme:
 
 plugins:
   - search
+
+extra_css:
+  - assets/stylesheets/extra.css
 
 markdown_extensions:
   - admonition
@@ -40,9 +47,16 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Brand Guidelines: brand-guidelines.md
+  - Vision & Canon: vision-and-canon.md
+  - Agent Memory Portability: agent-memory-portability.md
+  - Documentation Service: documentation-service.md
   - Quickstart: quickstart.md
   - API Reference: api.md
   - CLI: cli.md
+  - Snapshot & Portability:
+      - Snapshot v2 Format: snapshot-v2.md
+      - Company-Brain Interchange Strategy: okf/company-brain-interchange.md
   - Architecture:
       - File-Aware Architecture: okf/file-aware-architecture.md
   - OKF Notes:

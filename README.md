@@ -13,11 +13,50 @@
 
 # HotMem
 
-A local-first memory sidecar for agent applications. One SQLite DB. One port: 8711.
+**Portable, local-first memory for AI agents and digital organizations.** HotMem
+turns the facts, decisions, project context, and provenance an agent needs into
+a queryable memory store that can be snapshotted, verified, restored, and moved
+between compatible HotMem runtimes.
 
-HotMem provides fast, queryable working memory with hybrid vector + keyword search. Store facts, retrieve them ranked, and get back LLM-ready message objects you can stitch directly into prompts.
+It is the memory layer for teams building with coding agents, enterprise
+workflows, creative tools, and personal knowledge systems: one SQLite runtime,
+one local HTTP port, and a portable JSONL-based interchange path. Agents can
+write, retrieve, inspect, and manage their own scoped memory through HTTP,
+Python, TypeScript, or MCP.
 
-Supports Python 3.11, 3.12, 3.13, and 3.14.
+HotMem provides fast hybrid vector + keyword retrieval and returns LLM-ready
+message objects you can stitch directly into prompts. It supports Python 3.11,
+3.12, 3.13, and 3.14.
+
+> **What is available today:** local-first runtime memory, portable JSONL and
+> integrity-checked Snapshot v2 exports, restore/hydration, provenance,
+> lifecycle events, and framework/MCP integrations. Verified interchange
+> packages and incremental synchronization are active roadmap work; HotMem does
+> not yet claim hosted sync, encryption, signing, or automatic multi-writer
+> conflict resolution.
+
+## Why HotMem
+
+- **Move an agent's working brain.** Snapshot project or session memory and
+  hydrate it in a clean HotMem instance without rebuilding the context by hand.
+- **Keep the source of truth local.** The runtime is a SQLite mount, not a
+  required hosted vector database or proprietary control plane.
+- **Make memory agent-operable.** HTTP, Python, TypeScript, and MCP surfaces
+  let an agent add facts, recall context, create snapshots, and inspect state.
+- **Preserve provenance and integrity.** Snapshot v2 carries a versioned
+  manifest, deterministic identifiers, SHA-256 file checksums, and optional
+  file references.
+- **Avoid a migration cliff.** HotMem supports legacy JSONL/JSONL.GZ snapshots
+  and includes a one-command importer for a Mem0 SQLite history database.
+
+Read the [agent-memory portability guide](docs/agent-memory-portability.md) for
+the current contract, examples, and roadmap boundaries.
+
+The long-term direction is intentionally explicit: the
+[HotMem Vision and Canon](docs/vision-and-canon.md) records the non-negotiable
+product principles and the delivery path toward a universal memory-interchange
+standard. It distinguishes that destination from features that are available
+in the current release.
 
 ## Install
 
@@ -144,6 +183,28 @@ from and snapshot to `.jsonl.gz` for compressed archives.
 hotmem serve --mount /mnt/usb/hotmem     # portable memory on USB
 hotmem serve --mount ./data/hotmem        # local project memory
 ```
+
+## Snapshot, restore, and migration
+
+Use a directory path for an integrity-checked Snapshot v2 package, or use
+`.jsonl` / `.jsonl.gz` for the canonical portable record stream:
+
+```bash
+# Create a verified directory snapshot from one workspace.
+hotmem snapshot --db ./source/hotmem.sqlite --file ./company-brain
+
+# Restore it into a new workspace or runtime.
+hotmem hydrate --db ./target/hotmem.sqlite --file ./company-brain
+
+# Import current state from a Mem0 SQLite history database.
+hotmem import --from mem0 --db ./mem0/history.db --target ./hotmem.sqlite
+```
+
+Snapshot v2 verifies SHA-256 checksums before hydration. Replaying the same
+snapshot does not create duplicate logical memories. See the
+[Snapshot v2 format](docs/snapshot-v2.md) and the
+[interchange strategy](docs/okf/company-brain-interchange.md) for the exact
+current guarantees.
 
 ## Development
 

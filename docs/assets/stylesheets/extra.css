@@ -1,0 +1,55 @@
+:root {
+  --hotmem-void: #020617;
+  --hotmem-navy: #0a1628;
+  --hotmem-navy-light: #0f1d32;
+  --hotmem-green: #2ecc71;
+  --hotmem-violet: #8b5cf6;
+  --hotmem-orange: #fab37b;
+  --md-primary-fg-color: var(--hotmem-navy);
+  --md-primary-fg-color--light: var(--hotmem-navy-light);
+  --md-primary-fg-color--dark: var(--hotmem-void);
+  --md-accent-fg-color: var(--hotmem-green);
+}
+
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: var(--hotmem-void);
+  --md-default-bg-color--light: #07101e;
+  --md-primary-fg-color: var(--hotmem-navy);
+  --md-accent-fg-color: #36d97d;
+}
+
+.md-header,
+.md-tabs {
+  background: linear-gradient(90deg, var(--hotmem-void), var(--hotmem-navy-light));
+}
+
+.md-header {
+  border-bottom: 1px solid color-mix(in srgb, var(--hotmem-green) 42%, transparent);
+}
+
+.md-logo img,
+.md-logo svg {
+  border-radius: 0.35rem;
+}
+
+.md-typeset h1,
+.md-typeset h2 {
+  letter-spacing: -0.02em;
+}
+
+.md-typeset h1 {
+  color: var(--hotmem-navy);
+}
+
+[data-md-color-scheme="slate"] .md-typeset h1 {
+  color: #f8fafc;
+}
+
+.md-typeset a {
+  text-decoration-color: color-mix(in srgb, var(--hotmem-violet) 55%, transparent);
+  text-underline-offset: 0.15em;
+}
+
+.md-typeset code {
+  border-bottom: 1px solid color-mix(in srgb, var(--hotmem-orange) 45%, transparent);
+}

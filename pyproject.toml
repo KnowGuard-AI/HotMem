@@ -35,6 +35,9 @@ dev = [
     "pytest-cov>=6,<7",
     "ruff>=0.15,<1",
 ]
+docs = [
+    "mkdocs-material>=9,<10",
+]
 
 [project.scripts]
 hotmem = "hotmem.cli:main"
@@ -55,4 +58,3 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
