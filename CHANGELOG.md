@@ -4,6 +4,13 @@ All notable changes to HotMem will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.3] - 2026-08-07
+
+### Changed
+- Documentation canonical URLs now use the branded `docs.knowguardai.com`
+  domain.
+- Package and runtime version metadata are aligned for automated PyPI release.
+
 ## [0.2.2] - 2026-07-16
 
 ### Added — Bundle store (#52, #50)

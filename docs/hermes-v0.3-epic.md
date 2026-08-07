@@ -93,7 +93,7 @@ Build `adapters/hermes-workspace/` that mirrors the agent adapter. Workspace is 
 #### Dependencies
 
 - Hermes Workspace MemoryProvider ABC (need to confirm interface matches Agent)
-- HotMem v0.2.2+ (current)
+- HotMem v0.2.3+ (current)
 
 #### Risks
 
