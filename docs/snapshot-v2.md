@@ -1,8 +1,6 @@
 # Snapshot v2 Format
 
-This document specifies the HotMem Snapshot v2 directory format introduced in
-#39. GitHub issues own scope and acceptance criteria; this doc owns the format
-specification and rationale.
+This document specifies the HotMem Snapshot v2 directory format.
 
 ## Layout
 
@@ -67,8 +65,7 @@ determinism.
 
 One JSON object per line, sorted by `id`. Each record carries the full Memory
 Record v2 payload (`schema_version: 2`). Embeddings are stored as base64 so
-the jsonl is text-portable and can be rehydrated without re-embedding
-(stored-embedding variant, #25).
+the JSONL is text-portable and can be rehydrated without re-embedding.
 
 ```json
 {
@@ -134,7 +131,7 @@ hostname differs) may vary, and neither is checksummed.
 
 - `swap.jsonl` (plain, no stored embedding) -> re-embeds `fact_text` on hydrate
   (original v0.1 behavior).
-- `swap.jsonl` with base64 `embedding` field per record (#25) -> uses the
+- `swap.jsonl` with base64 `embedding` field per record -> uses the
   stored embedding directly.
 - `.jsonl.gz` -> gzip-compressed legacy JSONL.
 - The legacy writer now emits v2 columns + base64 embeddings, so legacy

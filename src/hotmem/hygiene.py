@@ -35,7 +35,7 @@ from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("hygiene")
 
-# Heuristic thresholds (OKF-recommended).
+# Heuristic thresholds for advisory local health checks.
 LARGE_INLINE_THRESHOLD = 128 * 1024  # 128 KB
 STORE_COUNT_INFO = 1000  # info at 1000 memories
 STORE_INLINE_BYTES_WARN = 10 * 1024 * 1024  # warn at 10 MB inline text

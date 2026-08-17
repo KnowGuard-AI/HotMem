@@ -3,15 +3,14 @@
 Purpose:
     Abstract file/object access behind a single interface so HotMem can
     reference large data (file ranges) without duplicating it. HotMem only
-    understands the abstraction; EMOS owns distributed storage.
+    understands the abstraction; the built-in adapter is local-only.
 
 Interface:
     StorageAdapter (Protocol): read, read_range, exists, metadata, checksum
 
 Extension:
     Add new adapters (S3, HDFS, Azure, GCS) by registering a scheme in the
-    ADAPTERS registry below. Distributed/object storage is owned by EMOS,
-    not HotMem.
+    ADAPTERS registry below. Remote and distributed storage are not built-in.
 """
 
 from __future__ import annotations
@@ -31,8 +30,8 @@ __all__ = [
 class UnsupportedSchemeError(ValueError):
     """Raised when a URI scheme is not handled by any HotMem adapter.
 
-    Distributed/object storage (s3://, hdfs://, abfs://, gcs://, ...) is
-    owned by EMOS, not HotMem.
+    Remote and distributed URI schemes are not supported by the built-in
+    local adapter.
     """
 
 
@@ -46,14 +45,14 @@ def get_adapter(uri: str) -> StorageAdapter:
     """Return the adapter for a URI's scheme, or raise UnsupportedSchemeError.
 
     Bare paths and file:// URIs resolve to the local filesystem adapter.
-    Unknown schemes raise an explicit error pointing to EMOS ownership.
+    Unknown schemes raise an explicit error instead of being fetched silently.
     """
     scheme = _scheme(uri)
     adapter = ADAPTERS.get(scheme)
     if adapter is None:
         raise UnsupportedSchemeError(
             f"unsupported URI scheme {scheme!r} for {uri!r}; "
-            "distributed/object storage is owned by EMOS, not HotMem"
+            "only local filesystem storage is supported by the built-in adapter"
         )
     return adapter
 

@@ -1,9 +1,4 @@
-# OKF: CLI Reference
-
-Status: Accepted
-Owner: HotMem maintainers
-Last updated: 2026-07-06
-Scope: Stable command-line interface reference
+# CLI Reference
 
 ## 1. Purpose
 
@@ -78,8 +73,3 @@ Export the OpenAPI specification.
 |---|---|---|
 | `--output` / `-o` | stdout | Output file path |
 | `--format` | json | Output format (json or yaml) |
-
-## 5. Open Questions
-
-- Should future file-native health hints appear under `status`, a new
-  `inspect`, or both?

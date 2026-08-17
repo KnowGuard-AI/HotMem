@@ -1,10 +1,6 @@
 # HotMem Vision and Canon
 
-**Status:** Canonical product direction · **Owner:** HotMem maintainers ·
-**Adopted:** 2026-08-02
-
-Scope: Every HotMem runtime, interchange format, integration, service, and public
-product claim.
+HotMem's product direction and public-claims boundary.
 
 ## Purpose
 
@@ -156,11 +152,9 @@ adapter documentation, reproducible examples, operational runbooks, and
 honest comparison material.
 
 Documentation is a product surface. It must be easy for a person, search
-engine, agent, and LLM to find the authoritative answer to: what HotMem is,
-what it can do now, how to snapshot and hydrate a brain, which interoperability
-paths are verified, and what is still a north-star commitment. The canonical
-documentation service contract is recorded in
-[Documentation Service](documentation-service.md).
+engine, agent, and LLM to find the authoritative answer to what HotMem is, what
+it can do now, how to snapshot and hydrate memory, which interoperability paths
+are verified, and what remains a north-star commitment.
 
 ## What must remain true as the product evolves
 
@@ -193,10 +187,10 @@ standard without creating unsafe claims or migration cliffs.
 | Stage | Canonical outcome | Current status |
 | --- | --- | --- |
 | Foundation | Local HotMem runtime, JSONL records, snapshots, hydration, provenance, APIs, MCP, adapters | Shipped in part |
-| Verified clone | Versioned interchange package, manifest verification, deterministic identity, idempotent clean restore | In active roadmap ([#67](https://github.com/KnowGuard-AI/HotMem/issues/67), [#69](https://github.com/KnowGuard-AI/HotMem/issues/69)) |
-| Universal ingestion | Supported importers for workspaces, knowledge formats, and platform exports | Starts with OKF/living-wiki import ([#68](https://github.com/KnowGuard-AI/HotMem/issues/68)); platform adapters require explicit contracts |
-| Ecosystem proof | Reproducible native integrations and demonstrations across agent systems | Hermes showcase planned ([#70](https://github.com/KnowGuard-AI/HotMem/issues/70)); OpenClaw boundary first ([#71](https://github.com/KnowGuard-AI/HotMem/issues/71)) |
-| Safe sync | One-way delta synchronization with ordering, idempotency, conflict reporting, and recovery | Planned after verified clone ([#73](https://github.com/KnowGuard-AI/HotMem/issues/73)) |
+| Verified clone | Versioned interchange package, manifest verification, deterministic identity, idempotent clean restore | Future work |
+| Universal ingestion | Supported importers for workspaces, knowledge formats, and platform exports | Adapter-specific work; announce only when reproducible |
+| Ecosystem proof | Reproducible integrations and demonstrations across agent systems | Grows with verified integrations |
+| Safe sync | One-way delta synchronization with ordering, idempotency, conflict reporting, and recovery | Future work |
 | Trusted universal transport | Encryption, signing, identity, policy, cloud/mobile transport, and deliberate multi-writer semantics | Canonical destination; requires separate security and protocol work |
 | Standard knowledge corpus | A discoverable public body of protocol specs, guides, adapters, examples, and operational documentation | Canon and initial docs are present; demonstrations and platform guides grow with verified support |
 
@@ -241,14 +235,9 @@ Use the following qualification whenever needed:
 > packages, platform migration adapters, secure transport, and incremental sync
 > follow the published delivery path.
 
-## Governance
+## Keeping claims current
 
-This canon can evolve only by an explicit decision recorded in the repository.
-New features, adapters, and public claims must be checked against the
-invariants above. Roadmap sequencing may change; the commitment to portable,
-agent-operable, trustworthy memory must not silently disappear.
-
-Implementation contracts and issue acceptance criteria remain the source of
-truth for what has shipped. See the [agent-memory portability guide](agent-memory-portability.md)
-for current capabilities and the [company-brain interchange strategy](okf/company-brain-interchange.md)
-for the active implementation sequence.
+The [agent-memory portability guide](agent-memory-portability.md),
+[Snapshot v2 format](snapshot-v2.md), API reference, and CLI reference describe
+current behavior. Planned or aspirational capabilities are labeled as such and
+should not be presented as shipped features.

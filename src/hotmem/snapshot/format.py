@@ -40,7 +40,7 @@ FORMAT = "hotmem-snapshot-v2"
 SCHEMA_VERSION = 2
 
 # Heuristic threshold for copying a file-backed byte range into attachments/.
-# Inline text is fine up to ~8 KB (OKF heuristic); ranges above this stay referenced.
+# Inline text is fine up to ~8 KB; ranges above this stay referenced.
 ATTACH_THRESHOLD = 8 * 1024
 
 # Files written by every snapshot (attachments/ is dynamic).

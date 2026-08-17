@@ -88,8 +88,8 @@ def resolve_adapter(uri: str) -> tuple[StorageAdapter, StorageMetadata]:
     """Return (adapter, metadata) for ``uri``, failing fast on remote schemes.
 
     Reuses hotmem.storage so unsupported remote schemes (s3://, hdfs://, ...)
-    raise the existing EMOS-boundary UnsupportedSchemeError before any
-    inspector runs.
+    raise the existing local-only UnsupportedSchemeError before any inspector
+    runs.
     """
     adapter = get_adapter(uri)
     meta = adapter.metadata(uri)

@@ -1,6 +1,6 @@
 """Parquet inspector — metadata-only footer reader, no query engine (issue #53).
 
-Scope (#53 + file-aware-architecture.md §4):
+Scope: lightweight metadata inspection for local Parquet files:
     - Validate PAR1 magic at head and tail.
     - Read the Thrift-Compact ``FileMetaData`` footer and extract: version,
       num_rows, schema (column names + physical types), row_group count.

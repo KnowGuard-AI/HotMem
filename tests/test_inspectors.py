@@ -208,12 +208,12 @@ def test_thrift_read_list_with_15_plus_elements():
 def test_inspect_file_unknown_format_raises(tmp_path):
     path = tmp_path / "data.xlsx"
     path.write_bytes(b"PK\x03\x04not really")
-    with pytest.raises(UnsupportedFormatError, match="EMOS"):
+    with pytest.raises(UnsupportedFormatError, match="not supported"):
         inspect_file(str(path))
 
 
 def test_inspect_file_remote_scheme_raises(tmp_path):
-    with pytest.raises(UnsupportedSchemeError, match="EMOS"):
+    with pytest.raises(UnsupportedSchemeError, match="only local filesystem"):
         inspect_file("s3://bucket/key.csv")
 
 

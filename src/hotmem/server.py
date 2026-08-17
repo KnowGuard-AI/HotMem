@@ -183,8 +183,8 @@ class DiscoverRequest(BaseModel):
 class PromoteRequest(BaseModel):
     """Body for POST /v1/memory/{id}/promote — apply one lifecycle transition.
 
-    HotMem stores state and emits signals; EMOS owns policy. Only forward-only
-    transitions in HOT -> READY -> PROMOTED -> ARCHIVED are accepted; any other
+    HotMem stores state and emits signals; policy remains outside the runtime.
+    Only forward-only transitions in HOT -> READY -> PROMOTED -> ARCHIVED are accepted; any other
     transition returns 409 invalid_transition without mutating state.
     """
 
@@ -326,7 +326,7 @@ def create_app(
                             "scheme": err.args[0] if err.args else "unknown",
                             "message": (
                                 "only local schemes are supported (file://, "
-                                "absolute, relative); remote schemes remain EMOS-owned"
+                                "absolute, relative); remote schemes are not supported"
                             ),
                         },
                     )
@@ -729,7 +729,8 @@ def create_app(
         db: MemoryDB = _state["db"]
         report = await asyncio.to_thread(check_hygiene, db, base_dir=_state.get("base_dir"))
         # Record a summary event plus one event per error-severity warning so
-        # EMOS can detect store decay from the log without polling /v1/hygiene.
+        # Consumers can detect store decay from the log without polling
+        # /v1/hygiene.
         counts = {
             "warning_count": len(report.warnings),
             "error_count": sum(1 for w in report.warnings if w.severity == "error"),
@@ -811,8 +812,8 @@ def create_app(
     async def promote_memory(memory_id: str, req: PromoteRequest):
         """Apply one forward-only promotion transition.
 
-        HotMem stores state and emits a ``memory.promotion`` event; EMOS owns
-        policy. Returns 409 ``invalid_transition`` (without mutating state) for
+        HotMem stores state and emits a ``memory.promotion`` event; policy is
+        external to the runtime. Returns 409 ``invalid_transition`` (without mutating state) for
         any transition not in HOT -> READY -> PROMOTED -> ARCHIVED.
         """
         db: MemoryDB = _state["db"]

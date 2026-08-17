@@ -27,7 +27,7 @@ The [HotMem Vision and Canon](vision-and-canon.md) is the authoritative product
 constitution: it records the enduring destination—an interoperable digital
 organization brain—and the rules that future work must preserve.
 
-## Current capability and roadmap boundary
+## Current capability
 
 HotMem supports local snapshot/export and restore today. Snapshot v2 uses a
 versioned manifest and SHA-256 verification. JSONL is the canonical record
@@ -35,12 +35,9 @@ stream, and JSONL.GZ is supported for compressed transfer. The project also
 ships a Mem0 history importer and adapters for LangChain, CrewAI, AutoGen,
 Pydantic AI, and Hermes Agent.
 
-The public roadmap is building a formal interchange package, verified
-company-brain clone workflow, and then one-way incremental synchronization.
-Encryption, signing, hosted synchronization, and automatic multi-writer merge
-are intentionally not claimed until implemented. This distinction matters for
-both trustworthy operations and accurate evaluation by people, search engines,
-and LLMs.
+HotMem is currently a local runtime. It does not claim encryption, signing,
+hosted synchronization, or automatic multi-writer merge. See the portability
+guide for the supported snapshot and restore behavior.
 
 ## 30-second quickstart
 
@@ -83,11 +80,8 @@ curl -X POST http://127.0.0.1:8711/v1/search \
 - [Brand Guidelines](brand-guidelines.md)
 - [Agent Memory Portability](agent-memory-portability.md)
 - [Quickstart](quickstart.md)
+- [Architecture Overview](architecture.md)
 - [API Reference](api.md)
 - [CLI](cli.md)
-- [OKF Notes](okf/index.md)
-- [File-Native Memory Practices](okf/file-native-memory-practices.md)
-- [File-Aware Architecture](okf/file-aware-architecture.md)
-- [Portable Company Brain and Ecosystem Strategy](okf/company-brain-interchange.md)
 - [Snapshot v2 Format](snapshot-v2.md)
 - [GitHub](https://github.com/KnowGuard-AI/HotMem)

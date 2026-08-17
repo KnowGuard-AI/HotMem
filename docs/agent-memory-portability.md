@@ -83,10 +83,10 @@ supported importer or adapter. Those integrations should be announced only
 with a reproducible import/export path and compatibility tests.
 
 Likewise, HotMem should not be described today as encrypted, unbreakable,
-cloud-synchronized, or conflict-free multi-writer memory. The published
-roadmap sequences the work responsibly: define the interchange contract,
-verify whole-brain dump and restore, then design one-way incremental sync with
-explicit conflict handling. See the [portable company-brain strategy](okf/company-brain-interchange.md).
+cloud-synchronized, or conflict-free multi-writer memory. Snapshot integrity
+checks and local restore are the current portability guarantees; stronger
+transport and synchronization features require separate implementation and
+verification.
 
 ## FAQ
 

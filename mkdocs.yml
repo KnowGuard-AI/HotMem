@@ -50,20 +50,8 @@ nav:
   - Brand Guidelines: brand-guidelines.md
   - Vision & Canon: vision-and-canon.md
   - Agent Memory Portability: agent-memory-portability.md
-  - Documentation Service: documentation-service.md
   - Quickstart: quickstart.md
+  - Architecture Overview: architecture.md
   - API Reference: api.md
   - CLI: cli.md
-  - Snapshot & Portability:
-      - Snapshot v2 Format: snapshot-v2.md
-      - Company-Brain Interchange Strategy: okf/company-brain-interchange.md
-  - Architecture:
-      - File-Aware Architecture: okf/file-aware-architecture.md
-  - OKF Notes:
-      - Overview: okf/index.md
-      - Format and Maintenance: okf/format-and-maintenance.md
-      - File-Aware Architecture: okf/file-aware-architecture.md
-      - File-Native Memory Epic: okf/file-native-epic.md
-      - File-Native Memory Practices: okf/file-native-memory-practices.md
-  - History:
-      - Coding Agent Session Trace: yc_coding_session_trace.md
+  - Snapshot v2 Format: snapshot-v2.md

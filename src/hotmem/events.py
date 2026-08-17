@@ -7,8 +7,8 @@ Purpose:
      event infrastructure, no distributed log, and no public write endpoint:
      events are appended as side effects of HotMem actions.
 
-     EMOS owns policy, workflows, approvals, remote storage, and
-     orchestration. HotMem only records local, append-only facts.
+     External policy, workflow, approval, storage, and orchestration systems
+     can consume these local facts. HotMem does not apply those policies.
 
 Interface:
      EventType — string constants for the canonical event types.

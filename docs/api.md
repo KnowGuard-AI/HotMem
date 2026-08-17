@@ -1,9 +1,4 @@
-# OKF: API Reference
-
-Status: Accepted
-Owner: HotMem maintainers
-Last updated: 2026-07-06
-Scope: Stable HTTP API reference
+# API Reference
 
 ## 1. Purpose
 
@@ -96,10 +91,3 @@ hotmem openapi --output openapi.yaml --format yaml
 ```
 
 Or fetch it from a running server: `GET /openapi.json`
-
-## 9. Open Questions
-
-- Which vNext endpoints should graduate from GitHub issues into this reference
-  first?
-- Should file-native API examples live here or in a separate guide once
-  implemented?

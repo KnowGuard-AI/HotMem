@@ -16,4 +16,8 @@ swap.jsonl
 .coverage
 coverage.xml
 dev_roadmap.md
+
+# Generated local mount manifests contain machine-specific paths.
+/hotmem/manifest.json
+/data/hotmem/manifest.json
 planned-evolution.md

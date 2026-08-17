@@ -222,13 +222,13 @@ def test_inspect_unsupported_format_errors(tmp_path: Path):
     path.write_text("just prose\n")
     result = CliRunner().invoke(main, ["inspect", str(path)])
     assert result.exit_code != 0
-    assert "EMOS" in result.output
+    assert "not supported by HotMem" in result.output
 
 
 def test_inspect_remote_scheme_errors():
     result = CliRunner().invoke(main, ["inspect", "s3://bucket/key.csv"])
     assert result.exit_code != 0
-    assert "EMOS" in result.output
+    assert "only local filesystem" in result.output
 
 
 # ── renderer delegation sanity ──────────────────────────────────────────

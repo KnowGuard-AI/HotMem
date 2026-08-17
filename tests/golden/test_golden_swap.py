@@ -1,6 +1,6 @@
 """Golden swap-file compatibility tests — lock JSONL & JSONL.GZ round trips.
 
-Guards the compatibility promise in file-native-memory-practices.md §10:
+Guards the compatibility promise for the public snapshot contract:
 "Legacy .jsonl and .jsonl.gz remain readable. JSONL export remains available."
 """
 

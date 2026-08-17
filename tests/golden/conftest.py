@@ -1,8 +1,8 @@
 """Compatibility golden tests for HotMem's file-native evolution (issue #54).
 
 Purpose:
-    Make the non-breaking contract from docs/okf/file-aware-architecture.md
-    executable. These tests lock down the *current* public behavior of the API,
+    Make the non-breaking public API contract executable. These tests lock down
+    the *current* public behavior of the API,
     swap files, Python client, and MCP server so that file/bundle/snapshot
     work landing in #38-#43 cannot silently drift the existing surface.
 
