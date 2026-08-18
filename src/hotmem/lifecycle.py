@@ -4,16 +4,16 @@ Purpose:
      Add a local, explicit lifecycle state and promotion candidate signals
      without turning HotMem into a policy engine. HotMem stores state,
      transition metadata, and candidate signals, and emits promotion events
-     through the #41 event log. EMOS owns policy — whether, when, and where
-     promotion happens — and HotMem performs no automatic remote migration,
-     deletion, scheduling, approvals, or hierarchy protocol.
+     through the local event log. External systems may own policy—whether,
+     when, and where promotion happens—and HotMem performs no automatic remote
+     migration, deletion, scheduling, approvals, or hierarchy protocol.
 
 State model:
      HOT -> READY -> PROMOTED -> ARCHIVED
 
      Transitions are strict forward-only linear. Any other transition
      (including ARCHIVED -> HOT reheat, and same-state "transitions") raises
-     ``InvalidTransitionError`` and does not mutate state. EMOS may re-add a
+     ``InvalidTransitionError`` and does not mutate state. A caller may add a
      new memory at HOT if it needs to revive an archived one — HotMem will not
      rewind state on an existing record.
 

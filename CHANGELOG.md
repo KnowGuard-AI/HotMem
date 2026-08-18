@@ -145,7 +145,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - Only local schemes are supported for file refs (`file://`, absolute,
   relative paths resolved against the mount dir). Remote schemes
   (`s3://`, `hdfs://`, `abfs://`, `gs://`) are rejected at the add
-  boundary with HTTP 400 `unsupported_scheme` (EMOS-owned).
+  boundary with HTTP 400 `unsupported_scheme`.
 - Cosine UDF returns `0.0` for NULL embeddings (file-backed without
   summary) so they are excluded from ranked search but still retrievable
   via the metadata endpoint.

@@ -1,9 +1,4 @@
-# OKF: Quickstart
-
-Status: Accepted
-Owner: HotMem maintainers
-Last updated: 2026-07-06
-Scope: First-run HotMem setup and basic usage
+# Quickstart
 
 ## 1. Purpose
 
@@ -54,8 +49,8 @@ hotmem snapshot --file swap.jsonl --db ./hotmem/hotmem.sqlite
 hotmem hydrate --file swap.jsonl --db ./my.sqlite
 ```
 
-JSONL remains a stable compatibility format. Future directory snapshots are
-additive and must not remove this path.
+JSONL remains a stable compatibility format. Snapshot v2 directories are
+available when a manifest and integrity checks are useful.
 
 ## 6. Use the Python Client
 
@@ -75,14 +70,9 @@ docker run -p 8711:8711 -v ./data:/data knowguard/hotmem
 
 See [CLI](cli.md) for the full command reference and [API Reference](api.md) for endpoints.
 
-## 8. Compatibility Rules
+## Compatibility rules
 
 - `/v1/add` accepts `identifier` and `fact`.
 - `/v1/search` returns LLM-ready message objects by default.
 - JSONL hydrate/snapshot remains supported.
 - File-native features must be additive.
-
-## 9. Open Questions
-
-- Should the quickstart include a file-backed memory example once that feature
-  lands?

@@ -46,8 +46,8 @@ class UnsupportedFormatError(ValueError):
     """Raised when a backing file's format has no HotMem inspector.
 
     Mirrors hotmem.storage.UnsupportedSchemeError so the two failure modes
-    feel symmetrical to callers. Analytical execution (DuckDB/Polars/Arrow
-    query) is owned by EMOS, not HotMem.
+    feel symmetrical to callers. Analytical execution is outside the scope of
+    the built-in inspectors.
     """
 
 
@@ -55,8 +55,7 @@ def get_inspector(uri: str) -> FileInspector:
     """Return the inspector for ``uri``'s format, or raise.
 
     Resolves the storage adapter first so remote/unsupported schemes fail fast
-    with the existing EMOS-boundary UnsupportedSchemeError before we look at
-    format.
+    with the local-only UnsupportedSchemeError before we look at format.
     """
     _, meta = resolve_adapter(uri)
     inspector = _inspector_for_format(meta["format"])
@@ -69,7 +68,7 @@ def _inspector_for_format(fmt: str) -> FileInspector:
     if inspector is None:
         raise UnsupportedFormatError(
             f"no inspector for format {fmt!r}; "
-            "analytical execution (DuckDB/Polars/Arrow) is owned by EMOS, not HotMem"
+            "analytical execution is not supported by HotMem's built-in inspectors"
         )
     return inspector
 

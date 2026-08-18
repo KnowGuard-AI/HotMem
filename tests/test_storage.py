@@ -88,7 +88,7 @@ def test_get_adapter_resolves_local_schemes(data_file):
 
 
 def test_get_adapter_rejects_unsupported_scheme():
-    with pytest.raises(UnsupportedSchemeError, match="EMOS"):
+    with pytest.raises(UnsupportedSchemeError, match="only local filesystem"):
         get_adapter("s3://bucket/key")
 
 

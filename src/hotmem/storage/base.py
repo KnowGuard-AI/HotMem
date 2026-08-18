@@ -3,7 +3,7 @@
 HotMem references large data (URI + offset + length + checksum) instead of
 duplicating it. This protocol is the seam between HotMem and any backing
 store. The local filesystem adapter is the only built-in implementation;
-distributed/object adapters are owned by EMOS.
+remote adapters are outside the default runtime.
 """
 
 from __future__ import annotations

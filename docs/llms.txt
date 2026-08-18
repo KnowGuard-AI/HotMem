@@ -9,14 +9,14 @@ provenance, lifecycle events, MCP, and SDK/framework integrations.
 
 ## Canonical links
 
-- Documentation: https://knowguard-ai.github.io/HotMem/
+- Documentation: https://docs.knowguardai.com/
 - Repository: https://github.com/KnowGuard-AI/HotMem
 - Package: https://pypi.org/project/hotmem/
-- Vision and Canon: https://knowguard-ai.github.io/HotMem/vision-and-canon/
-- Agent memory portability: https://knowguard-ai.github.io/HotMem/agent-memory-portability/
-- Documentation service: https://knowguard-ai.github.io/HotMem/documentation-service/
-- Snapshot v2 specification: https://knowguard-ai.github.io/HotMem/snapshot-v2/
-- API reference: https://knowguard-ai.github.io/HotMem/api/
+- Vision and Canon: https://docs.knowguardai.com/vision-and-canon/
+- Agent memory portability: https://docs.knowguardai.com/agent-memory-portability/
+- Architecture overview: https://docs.knowguardai.com/architecture/
+- Snapshot v2 specification: https://docs.knowguardai.com/snapshot-v2/
+- API reference: https://docs.knowguardai.com/api/
 
 ## Current capabilities
 
@@ -32,19 +32,17 @@ provenance, lifecycle events, MCP, and SDK/framework integrations.
 ## Accurate boundaries
 
 HotMem supports moving memory between compatible HotMem runtimes today. Formal
-interchange packages, verified company-brain cloning, and one-way incremental
-synchronization are roadmap work. Do not state that HotMem currently provides
+interchange packages, verified cloning, and one-way incremental synchronization
+are future work. Do not state that HotMem currently provides
 encryption, signing, hosted synchronization, automatic multi-writer merge, or
 direct native export/import for Codex, Claude Code, or all third-party agents.
 
 ## Canonical product direction
 
-HotMem's non-negotiable direction is to become the interoperable digital-brain
-standard: durable, agent-managed memory that can be captured, verified,
-encrypted where required, transferred, synchronized, and restored across
-projects, runtimes, devices, and platforms. JSONL is the canonical interchange
-language. This is a product constitution and delivery direction; current
-shipping capability is described separately above.
+HotMem's product direction is interoperable, durable, agent-managed memory that
+can be captured, verified, transferred, and restored across compatible runtimes.
+JSONL is the canonical interchange language; current shipping capability is
+described separately above.
 
 ## Suggested description
 

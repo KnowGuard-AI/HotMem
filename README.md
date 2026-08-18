@@ -202,9 +202,7 @@ hotmem import --from mem0 --db ./mem0/history.db --target ./hotmem.sqlite
 
 Snapshot v2 verifies SHA-256 checksums before hydration. Replaying the same
 snapshot does not create duplicate logical memories. See the
-[Snapshot v2 format](docs/snapshot-v2.md) and the
-[interchange strategy](docs/okf/company-brain-interchange.md) for the exact
-current guarantees.
+[Snapshot v2 format](docs/snapshot-v2.md) for the exact current guarantees.
 
 ## Development
 
@@ -218,7 +216,8 @@ uv build                         # build wheel
 
 ## Architecture
 
-Each source module is self-contained with a docstring header describing its purpose and interface:
+HotMem keeps runtime state in SQLite and uses small, explicit modules for
+storage, ranking, portability, the HTTP server, and client integrations:
 
 | Module | Purpose |
 |--------|---------|
@@ -231,12 +230,6 @@ Each source module is self-contained with a docstring header describing its purp
 | `server.py` | FastAPI endpoints |
 | `cli.py` | Click CLI |
 | `client.py` | Python SDK (httpx) |
-
-Every operation emits structured JSON traces to stderr with component tags:
-
-```bash
-hotmem serve --mount ./data 2>&1 | grep '"component": "search"'
-```
 
 ## Contributing
 

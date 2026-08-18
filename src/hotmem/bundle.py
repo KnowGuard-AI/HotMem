@@ -4,8 +4,8 @@ Purpose:
      Read a permissive, human-authored local memory bundle into HotMem.
      Bundles make filesystem-native memory inspectable without forcing a
      strict schema too early. The reader accepts simple local authoring
-     patterns first; stricter validation is deferred (OKF progressive
-     strictness).
+     patterns first; stricter validation is deferred through progressive
+     strictness.
 
 Bundle layout (all optional except a memory body file)::
 
