@@ -4,6 +4,34 @@ All notable changes to HotMem will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added — Optional derived vector index (#49)
+- Pluggable vector index for search acceleration: `VectorIndex` protocol with
+  a no-op `NullVectorIndex` (default — HotMem runs with zero vector
+  dependencies) and an optional `ChromaVectorIndex` backend
+  (`uv pip install 'hotmem[vector]'`, lazily imported; degrades to the null
+  backend with a warning when chromadb is not installed).
+- The index is disposable and rebuildable: SQLite, files, bundles, and
+  manifests remain canonical storage. Index loss never loses memory —
+  search falls back to the deterministic SQLite cosine+FTS scan whenever
+  the index is absent or stale.
+- Ranking contract preserved: the index only supplies oversampled candidate
+  ids which are re-scored in SQLite with the identical hybrid formula
+  (cosine + FTS + importance), so `/v1/search` responses are identical with
+  or without acceleration (stores larger than the oversample window are
+  approximate by design; the fallback remains the correctness floor).
+- Rebuild reads only SQLite rows (embeddings reused, never recomputed) —
+  backing files are never read; file-backed memories are indexed from
+  eligible inline summaries/metadata only, preserving lazy content reads.
+- Rebuild marker records the store fingerprint (count, max rowid, max event
+  seq) for cheap staleness detection; staleness, missing dependencies, and
+  rebuild state are observable via `GET /v1/vector-index/status`.
+- New admin endpoints: `POST /v1/vector-index/rebuild` (emits an
+  `index.rebuilt` event), `GET /v1/vector-index/status`, and
+  `DELETE /v1/vector-index` (clear). `/v1/search` response shape unchanged.
+- `hotmem serve --vector-index {none,chroma}` CLI flag (default `none`).
+
 ## [0.2.3] - 2026-08-07
 
 ### Changed

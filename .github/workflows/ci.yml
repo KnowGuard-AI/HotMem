@@ -30,6 +30,24 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+  vector:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v4
+      - run: uv venv
+      - run: uv pip install -e ".[dev,vector]"
+      - run: uv run ruff check src/ tests/
+      - run: uv run ruff format --check src/ tests/
+      - name: Run tests (exercises the Chroma vector index path)
+        run: uv run --extra vector pytest -q
+
   adapters:
     runs-on: ubuntu-latest
     strategy:

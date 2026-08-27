@@ -38,7 +38,15 @@ def main():
 @click.option("--mount", default=None, type=click.Path(), help="Mount directory path.")
 @click.option("--db", "db_path", default=None, type=click.Path(), help="Explicit database path.")
 @click.option("--host", default="127.0.0.1", help="Host to bind to.")
-def serve(port: int, mount: str | None, db_path: str | None, host: str):
+@click.option(
+    "--vector-index",
+    "vector_backend",
+    default="none",
+    type=click.Choice(["none", "chroma"]),
+    help="Optional derived vector index backend (default: none). The index is "
+    "disposable and rebuildable; SQLite remains canonical storage.",
+)
+def serve(port: int, mount: str | None, db_path: str | None, host: str, vector_backend: str):
     """Start the HotMem sidecar server."""
     import uvicorn
 
@@ -59,7 +67,12 @@ def serve(port: int, mount: str | None, db_path: str | None, host: str):
             detail={"path": db_path},
         )
 
-    app = create_app(db_path=db_path, swap_path=swap_path, port=port)
+    app = create_app(
+        db_path=db_path,
+        swap_path=swap_path,
+        port=port,
+        vector_backend=vector_backend,
+    )
 
     _trace.info(
         "serve",

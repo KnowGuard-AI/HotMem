@@ -34,6 +34,13 @@ HotMem combines deterministic text embeddings, keyword overlap, and importance
 to rank local memories. Read-only inspectors provide lightweight metadata for
 CSV, JSONL, and Parquet files without turning the runtime into a query engine.
 
+An optional derived vector index can accelerate candidate retrieval. The index
+is disposable and rebuildable from SQLite, sits in front of the canonical
+hybrid ranker rather than replacing it, and search falls back to the
+deterministic SQLite scan whenever the index is absent or stale. SQLite, files,
+bundles, and manifests remain canonical storage; the index is never a source
+of truth.
+
 ## Portability
 
 JSONL and JSONL.GZ are supported portable record formats. Snapshot v2 adds a

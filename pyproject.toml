@@ -38,6 +38,9 @@ dev = [
 docs = [
     "mkdocs-material>=9,<10",
 ]
+vector = [
+    "chromadb>=1.0,<2",
+]
 
 [project.scripts]
 hotmem = "hotmem.cli:main"

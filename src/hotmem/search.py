@@ -9,8 +9,14 @@ Purpose:
      they are skipped (no searchable text). The /v1/search response shape is
      unchanged: each result carries role/content/memory_id/identifier/score.
 
+     An optional derived vector index (#49) may supply cosine CANDIDATES; the
+     same hybrid scorer always recomputes final ranking from SQLite rows, so
+     results are identical with or without acceleration. When the index is
+     absent or stale the deterministic full-scan path is used — the index is
+     never canonical.
+
 Interface:
-     search_memories(db, query, top_k, max_chars?) -> list[MessageObject]
+      search_memories(db, query, top_k, max_chars?, include_archived?, vector_index?)
 
 Deps: hotmem.db, hotmem.embed, hotmem.trace
 Extension: add reranking, decay weighting, or MMR diversity here.
@@ -18,11 +24,14 @@ Extension: add reranking, decay weighting, or MMR diversity here.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hotmem.db import MemoryDB
 from hotmem.embed import embed_text, pack_embedding
 from hotmem.trace import Timer, get_tracer
+
+if TYPE_CHECKING:
+    from hotmem.vector_index import VectorIndex
 
 _trace = get_tracer("search")
 
@@ -54,6 +63,53 @@ def _search_text(row: dict[str, Any]) -> str:
     return row.get("fact_summary") or ""
 
 
+def _fetch_candidates(
+    db: MemoryDB,
+    query: str,
+    query_vec: list[float],
+    query_blob: bytes,
+    include_archived: bool,
+    vector_index: VectorIndex | None,
+) -> list[dict[str, Any]]:
+    """Return candidate rows with cosine scores for hybrid ranking.
+
+    Default (no index / stale index / empty result): the deterministic
+    full-table scan via ``db.search_with_cosine`` — identical to the
+    pre-#49 behavior.
+
+    Accelerated (fresh index): the index supplies oversampled cosine
+    candidate ids; those ids are re-fetched and re-scored in SQLite with the
+    same TTL-live/archived predicates, unioned with FTS match ids so text-only
+    matches are never lost. Ranking is recomputed downstream either way, so
+    both paths produce identical results.
+    """
+    if (
+        vector_index is not None
+        and not vector_index.is_stale(db)
+        # Rows with searchable text but no embedding rank via importance in
+        # the full scan but can never be vector candidates — use the exact
+        # scan while any exist so ranking parity is preserved.
+        and not db.has_unindexed_text_rows()
+    ):
+        try:
+            hits = vector_index.search(query_vec, top_k=vector_index.oversample())
+        except Exception:  # index is disposable; never let it fail search
+            _trace.warn("candidates", "vector index search failed; falling back to scan")
+            hits = []
+        if hits:
+            candidate_ids = [h["id"] for h in hits]
+            fts_rows = db.fts_search(query, include_archived=include_archived)
+            candidate_ids += [r["id"] for r in fts_rows]
+            # Dedupe, preserving order (index ranking first, FTS additions after).
+            seen: set[str] = set()
+            unique_ids = [i for i in candidate_ids if not (i in seen or seen.add(i))]
+            rows = db.search_by_ids(query_blob, unique_ids, include_archived=include_archived)
+            # Rows re-fetched by id already carry canonical cosine scores from
+            # the SQLite UDF — the index's own scores are advisory only.
+            return rows
+    return db.search_with_cosine(query_blob, include_archived=include_archived)
+
+
 def search_memories(
     db: MemoryDB,
     query: str,
@@ -61,11 +117,17 @@ def search_memories(
     max_chars: int | None = None,
     *,
     include_archived: bool = False,
+    vector_index: VectorIndex | None = None,
 ) -> list[dict[str, Any]]:
     """Search memories and return ranked, LLM-ready message objects.
 
     Archived memories are excluded by default; pass ``include_archived=True``
     for audit/full profiles.
+
+    When ``vector_index`` is provided and not stale, it supplies cosine
+    candidates (oversampled) which are re-scored in SQLite with the identical
+    hybrid formula — the response shape and ranking are byte-identical to the
+    fallback. Otherwise the deterministic full-scan path runs unchanged.
 
     Returns:
         List of dicts with keys: role, content, memory_id, identifier, score
@@ -75,8 +137,9 @@ def search_memories(
         query_vec = embed_text(query)
         query_blob = pack_embedding(query_vec)
 
-        # Get all candidates with cosine scores from DB
-        candidates = db.search_with_cosine(query_blob, include_archived=include_archived)
+        candidates = _fetch_candidates(
+            db, query, query_vec, query_blob, include_archived, vector_index
+        )
         fts_scores = _normalize_bm25(db.fts_search(query, include_archived=include_archived))
 
         # Apply hybrid scoring

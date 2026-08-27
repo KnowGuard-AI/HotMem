@@ -51,6 +51,14 @@ from hotmem.snapshot import snapshot as snapshot_write
 from hotmem.storage import UnsupportedSchemeError
 from hotmem.swap import compute_content_hash
 from hotmem.trace import Timer, get_tracer, new_trace_id
+from hotmem.vector_index import (
+    VALID_BACKENDS,
+    NullVectorIndex,
+    VectorIndex,
+    VectorIndexConfig,
+    get_vector_index,
+    rebuild_vector_index,
+)
 
 _trace = get_tracer("server")
 
@@ -213,6 +221,16 @@ async def lifespan(app: FastAPI):
     _state["db"] = db
     _state["start_time"] = time.time()
 
+    # Optional derived vector index (#49): disposable acceleration only —
+    # constructed after the DB, closed before it. Never canonical.
+    if _state.get("vector_index_injected") is None:
+        _state["vector_index"] = get_vector_index(
+            VectorIndexConfig(backend=_state.get("vector_backend", "none")),
+            base_dir=_state.get("base_dir"),
+        )
+    else:
+        _state["vector_index"] = _state["vector_index_injected"]
+
     # Auto-hydrate if swap file exists
     if swap_path and Path(swap_path).exists():
         result = snapshot_hydrate(db, swap_path)
@@ -234,6 +252,7 @@ async def lifespan(app: FastAPI):
         detail={"db_path": str(db_path), "port": _state.get("port", 8711)},
     )
     yield
+    _state["vector_index"].close()
     db.close()
 
 
@@ -245,15 +264,32 @@ def create_app(
     swap_path: str | Path | None = None,
     port: int = 8711,
     base_dir: str | Path | None = None,
+    vector_backend: str = "none",
+    vector_index: VectorIndex | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
     ``base_dir`` resolves relative file_ref URIs. Defaults to the parent
     directory of ``db_path`` (i.e. the mount dir).
+
+    ``vector_backend`` selects the optional derived vector index (#49):
+    "none" (default — zero vector dependencies) or "chroma" (requires the
+    optional ``hotmem[vector]`` extra; degrades to none with a warning when
+    chromadb is not installed). The index is disposable and rebuildable —
+    SQLite/files/bundles remain canonical storage.
+
+    ``vector_index`` injects a prebuilt index instance (test seam); it takes
+    precedence over ``vector_backend``.
     """
+    if vector_backend not in VALID_BACKENDS:
+        raise ValueError(
+            f"unknown vector_backend {vector_backend!r}; expected one of {VALID_BACKENDS}"
+        )
     _state["db_path"] = str(db_path)
     _state["swap_path"] = str(swap_path) if swap_path else None
     _state["port"] = port
+    _state["vector_backend"] = vector_backend
+    _state["vector_index_injected"] = vector_index
     if base_dir is None:
         base_dir = str(Path(db_path).resolve().parent)
     _state["base_dir"] = str(base_dir)
@@ -390,9 +426,14 @@ def create_app(
     @app.post("/v1/search")
     async def search(req: SearchRequest):
         db: MemoryDB = _state["db"]
+        vector_index: VectorIndex = _state["vector_index"]
         with Timer() as t:
             messages = search_memories(
-                db, query=req.query, top_k=req.top_k, max_chars=req.max_chars
+                db,
+                query=req.query,
+                top_k=req.top_k,
+                max_chars=req.max_chars,
+                vector_index=vector_index,
             )
         return {
             "memories": messages,
@@ -912,6 +953,93 @@ def create_app(
         return {
             "memories": summaries,
             "count": len(summaries),
+            "trace_ms": round(t.ms, 2),
+        }
+
+    # ── Vector index endpoints (#49 — optional, derived, disposable) ────
+
+    @app.post("/v1/vector-index/rebuild")
+    async def rebuild_index():
+        """Full rebuild of the derived vector index from canonical storage.
+
+        Reads only SQLite rows (metadata + embeddings) — never touches a
+        backing file.         Returns 400 ``vector_index_disabled`` when no backend
+        is configured (the default). This is an admin operation, never on
+        the search hot path; stale indexes fall back to the SQLite scan.
+        """
+        import asyncio
+
+        db: MemoryDB = _state["db"]
+        vector_index: VectorIndex = _state["vector_index"]
+        if isinstance(vector_index, NullVectorIndex):
+            if vector_index.requested_backend == "none":
+                error = {
+                    "error": "vector_index_disabled",
+                    "message": (
+                        "no vector index backend is configured; start with "
+                        "--vector-index chroma to enable the derived index"
+                    ),
+                }
+            else:
+                error = {
+                    "error": "vector_dependency_missing",
+                    "requested_backend": vector_index.requested_backend,
+                    "message": (
+                        f"backend {vector_index.requested_backend!r} was requested but its "
+                        "package is not installed; install with: "
+                        "uv pip install 'hotmem[vector]'"
+                    ),
+                }
+            return JSONResponse(status_code=400, content=error)
+        result = await asyncio.to_thread(
+            rebuild_vector_index,
+            db,
+            vector_index,
+            embedding_model=EMBEDDING_MODEL,
+            embedding_dim=EMBEDDING_DIM,
+        )
+        append_event(
+            db,
+            event_type=EventType.INDEX_REBUILT,
+            payload={
+                "backend": vector_index.status(db)["backend"],
+                "indexed_count": result["indexed_count"],
+                "db_count": result["db_count"],
+                "skipped_no_embedding": result["skipped_no_embedding"],
+            },
+        )
+        return result
+
+    @app.get("/v1/vector-index/status")
+    async def vector_index_status():
+        """Observability for the derived index: backend, counts, staleness.
+
+        ``stale: true`` means search is currently served by the deterministic
+        SQLite fallback (the index is never required for correctness).
+        """
+        db: MemoryDB = _state["db"]
+        vector_index: VectorIndex = _state["vector_index"]
+        with Timer() as t:
+            status = vector_index.status(db)
+        status["trace_ms"] = round(t.ms, 2)
+        return status
+
+    @app.delete("/v1/vector-index")
+    async def clear_index():
+        """Clear the derived index (entries + rebuild marker).
+
+        The index is disposable: clearing it never loses memory — canonical
+        storage is untouched and search falls back to the SQLite scan until
+        the next rebuild.
+        """
+        db: MemoryDB = _state["db"]
+        vector_index: VectorIndex = _state["vector_index"]
+        with Timer() as t:
+            vector_index.clear()
+            cleared_count = db.count()  # canonical store is the survivor
+        return {
+            "cleared": True,
+            "db_count": cleared_count,
             "trace_ms": round(t.ms, 2),
         }
 
