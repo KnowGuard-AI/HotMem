@@ -21,3 +21,8 @@ dev_roadmap.md
 /hotmem/manifest.json
 /data/hotmem/manifest.json
 planned-evolution.md
+
+# native helper spike (#48) — generated corpus and build artifacts
+bench/native_spike/corpus/
+bench/native_spike/**/*.so
+bench/native_spike/**/*.o
