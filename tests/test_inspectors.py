@@ -121,6 +121,34 @@ def test_jsonl_malformed_line_reported_not_raised(tmp_path):
     assert "line 1" in insp.unsupported_reason
 
 
+def test_jsonl_chunk_spanning_line_offsets_are_exact(tmp_path):
+    """#86: offsets of lines following a chunk-spanning line must be exact.
+
+    ``_stream`` previously computed line_start in (carry+chunk) coordinates,
+    overstating file offsets by the carry length whenever an earlier line
+    spanned the 1 MiB read-chunk boundary.
+    """
+    path = tmp_path / "span.jsonl"
+    line0 = json.dumps({"i": 0, "pad": "x" * (1 << 20)}).encode() + b"\n"  # spans chunk 1
+    bad = b'{"broken"\n'
+    lines = [line0, bad] + [json.dumps({"i": i}).encode() + b"\n" for i in (2, 3, 4)]
+    with open(path, "wb") as f:
+        f.write(b"".join(lines))
+
+    offsets = []
+    pos = 0
+    for ln in lines:
+        offsets.append(pos)
+        pos += len(ln)
+
+    insp = inspect_file(str(path), count_rows=True, sample_size=5)
+    assert insp.row_count == 5
+    assert insp.unsupported_reason is not None
+    assert insp.unsupported_reason.startswith(f"line 1 (offset {offsets[1]}): ")
+    expected = [(offsets[0], len(line0))] + [(offsets[i], len(lines[i])) for i in (2, 3, 4)]
+    assert insp.byte_ranges == expected
+
+
 def test_jsonl_handles_no_trailing_newline(tmp_path):
     path = tmp_path / "notrail.jsonl"
     path.write_text('{"a": 1}\n{"a": 2}')  # no trailing newline

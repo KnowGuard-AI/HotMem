@@ -32,6 +32,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   `DELETE /v1/vector-index` (clear). `/v1/search` response shape unchanged.
 - `hotmem serve --vector-index {none,chroma}` CLI flag (default `none`).
 
+### Fixed — JSONL inspector line offsets (#86)
+- `JSONLInspector._stream` computed line offsets in (carry+chunk) coordinates,
+  overstating `unsupported_reason` offsets and `byte_ranges` by the carried
+  byte count whenever an earlier line spanned the 1 MiB read-chunk boundary.
+  Offsets are now exact file coordinates (regression test included; discovered
+  by the native helper spike, #48/#84).
+
 ## [0.2.3] - 2026-08-07
 
 ### Changed

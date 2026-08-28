@@ -106,6 +106,7 @@ def _stream(
 
             data = carry + chunk
             chunk_end = offset + len(chunk)
+            base = offset - len(carry)  # file offset of data[0] (carry precedes chunk)
             pos = 0
             nl = data.find(b"\n", pos)
             while nl != -1:
@@ -126,7 +127,7 @@ def _stream(
                 )
                 line_index += 1
                 pos = nl + 1
-                line_start = offset + pos
+                line_start = base + pos
                 nl = data.find(b"\n", pos)
             carry = data[pos:]
             offset = chunk_end
