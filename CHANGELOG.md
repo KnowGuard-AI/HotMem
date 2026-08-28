@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed — embed_text trigram hashing (#90)
+- Trigram hashing now runs through a bounded per-gram cache
+  (`lru_cache`, 65 536 entries) replacing per-call md5 + hex parsing;
+  vectors are **bit-identical** to the previous `hotmem-hash-v1` output
+  (golden equivalence test over ASCII/unicode/random corpora). Measured
+  ~5.9x faster per embedding on realistic text — directly attacks the
+  37–78% of `parse_bundle` time the spike attributed to `embed_text`.
+
 ### Changed — derived vector index polish (#92)
 - `search_by_ids` binds candidate ids in chunks of 900, so any configured
   `oversample` stays under SQLite's legacy 999-variable cap; chunk results
