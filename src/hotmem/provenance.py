@@ -30,6 +30,11 @@ from hotmem.trace import get_tracer
 
 _trace = get_tracer("provenance")
 
+# Ranges above this size are verified via chunked streaming (O(chunk) memory)
+# when the adapter exposes read_range_chunked; smaller ranges keep the simple
+# single-read path (#88). 8 MiB = 8x the inspector/embed read chunk.
+STREAM_VERIFY_THRESHOLD = 8 << 20
+
 Reason = Literal["checksum_mismatch", "missing_file", "truncated"]
 
 
@@ -116,8 +121,18 @@ def verify_range(
     The checksum is computed as SHA-256 of the byte RANGE [offset, offset+length),
     NOT the whole file (main's adapter.checksum computes whole-file SHA-256,
     so we compute the range checksum ourselves via read_range + sha256).
+
+    Ranges above ``STREAM_VERIFY_THRESHOLD`` are hashed while streaming
+    through ``adapter.read_range_chunked`` (an optional adapter capability —
+    absent on other adapters or smaller ranges, the whole-range read runs
+    unchanged). The digest and every error are identical either way (#88).
     """
     if expected_checksum is None:
+        return
+
+    chunked = getattr(adapter, "read_range_chunked", None)
+    if length > STREAM_VERIFY_THRESHOLD and callable(chunked):
+        _verify_streaming(source_uri, chunked, offset, length, expected_checksum)
         return
 
     try:
@@ -135,3 +150,44 @@ def verify_range(
         raise ProvenanceError("truncated", source_uri, expected=expected_checksum)
 
     verify_bytes(source_uri, data, expected_checksum)
+
+
+def _verify_streaming(
+    source_uri: str,
+    chunked: Any,
+    offset: int,
+    length: int,
+    expected_checksum: str,
+) -> None:
+    """Stream-hash a large range with O(chunk) memory; identical errors (#88)."""
+    h = hashlib.sha256()
+    received = 0
+    try:
+        stream = chunked(source_uri, offset, length)
+    except FileNotFoundError as err:
+        _trace.warn("verify", "missing backing file", detail={"source_uri": source_uri})
+        raise BackingFileMissingError(source_uri) from err
+    try:
+        for chunk in stream:
+            h.update(chunk)
+            received += len(chunk)
+    except FileNotFoundError as err:
+        _trace.warn("verify", "missing backing file", detail={"source_uri": source_uri})
+        raise BackingFileMissingError(source_uri) from err
+
+    if received < length:
+        _trace.warn(
+            "verify",
+            "truncated backing file",
+            detail={"source_uri": source_uri, "expected": length, "got": received},
+        )
+        raise ProvenanceError("truncated", source_uri, expected=expected_checksum)
+
+    actual = h.hexdigest()
+    if actual != expected_checksum:
+        _trace.warn(
+            "verify",
+            "checksum mismatch",
+            detail={"source_uri": source_uri, "expected": expected_checksum, "actual": actual},
+        )
+        raise ChecksumMismatchError(source_uri, expected=expected_checksum, actual=actual)

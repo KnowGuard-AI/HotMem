@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed — streaming verification for large ranges (#88)
+- `provenance.verify_range` hashes ranges above `STREAM_VERIFY_THRESHOLD`
+  (8 MiB) while streaming through the new optional adapter capability
+  `LocalFilesystemAdapter.read_range_chunked` — O(chunk) memory instead of
+  O(range), identical digest and `ProvenanceError` semantics. Adapters
+  without the capability and ranges at/below the threshold keep the simple
+  single-read path.
+
 ### Changed — single-read verified hydration (#87)
 - Verified hydration now hashes the bytes it already read instead of
   re-reading the range through `provenance.verify_range` — one read per

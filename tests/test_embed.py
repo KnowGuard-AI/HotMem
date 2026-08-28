@@ -87,8 +87,7 @@ def test_embed_text_bit_exact_against_reference():
     cases += ["".join(rng.choice(alphabet) for _ in range(rng.randint(0, 300))) for _ in range(100)]
     unicode_alphabet = "aäöü日本語🎉éè "
     cases += [
-        "".join(rng.choice(unicode_alphabet) for _ in range(rng.randint(0, 120)))
-        for _ in range(50)
+        "".join(rng.choice(unicode_alphabet) for _ in range(rng.randint(0, 120))) for _ in range(50)
     ]
     for text in cases:
         assert embed_text(text) == _reference_embed(text), f"vector drifted for {text!r}"

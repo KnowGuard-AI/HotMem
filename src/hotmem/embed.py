@@ -30,6 +30,7 @@ _trace = get_tracer("embed")
 EMBEDDING_DIM = 64
 EMBEDDING_MODEL = "hotmem-hash-v1"
 
+
 # Bounded cache of trigram -> (bucket, sign). Text reuses a small vocabulary
 # of character trigrams heavily (bundle corpora share word pools), so the
 # cache removes nearly all md5 calls while keeping vectors bit-identical:
