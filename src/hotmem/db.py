@@ -785,11 +785,11 @@ class MemoryDB:
         archived_clause = "" if include_archived else " AND promotion_state != 'ARCHIVED'"
         rows = self._conn.execute(
             f"""SELECT id, identifier, fact_text, fact_summary, importance,
-                      metadata_json, source, created_at,
-                      cosine_sim(embedding, ?) AS cosine_score
+                       metadata_json, source, created_at,
+                       cosine_sim(embedding, ?) AS cosine_score
                 FROM memories
                 WHERE {_ttl_live()}{archived_clause}
-                ORDER BY cosine_score DESC""",
+                ORDER BY cosine_score DESC, id ASC""",
             (query_embedding,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -821,6 +821,72 @@ class MemoryDB:
         """Return total number of stored memories."""
         row = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()
         return row[0]
+
+    def fingerprint(self) -> tuple[int, int, int]:
+        """Return a cheap store fingerprint: (COUNT, MAX(rowid), MAX(event seq)).
+
+        Used by the optional derived vector index (#49) to detect staleness
+        against its rebuild marker. The rowid component catches INSERT OR
+        REPLACE rewrites that a plain count comparison would miss; the event
+        seq component catches server-mediated mutations whose count/rowid
+        happen to be unchanged (rowid reuse). ``index.rebuilt`` events are
+        excluded — the rebuild endpoint appends its own event AFTER
+        snapshotting the fingerprint, and that event must not invalidate the
+        marker it just wrote. Pure SQL — no file I/O.
+        """
+        row = self._conn.execute(
+            """SELECT (SELECT COUNT(*) FROM memories),
+                      COALESCE((SELECT MAX(rowid) FROM memories), 0),
+                      COALESCE(
+                          (SELECT MAX(seq) FROM events WHERE event_type != 'index.rebuilt'),
+                          0)"""
+        ).fetchone()
+        return (int(row[0]), int(row[1]), int(row[2]))
+
+    def has_unindexed_text_rows(self) -> bool:
+        """True when any row has searchable text but no embedding.
+
+        Such rows (legacy imports with empty embeddings) rank via importance
+        in the full-scan path but cannot appear in vector-index candidates.
+        The accelerated search path (#49) checks this and uses the exact
+        full scan when such rows exist, preserving ranking parity.
+        """
+        row = self._conn.execute(
+            """SELECT EXISTS(SELECT 1 FROM memories
+                WHERE (embedding IS NULL OR length(embedding) = 0)
+                  AND (COALESCE(fact_text, '') != '' OR COALESCE(fact_summary, '') != ''))"""
+        ).fetchone()
+        return bool(row[0])
+
+    def search_by_ids(
+        self,
+        query_embedding: bytes,
+        memory_ids: list[str],
+        *,
+        include_archived: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return the given memories with cosine scores — same predicates as search.
+
+        Applies the identical TTL-live and archived filters as
+        ``search_with_cosine``, so ids that expired, were archived, or were
+        deleted since indexing are filtered out here. Used by the accelerated
+        search path (#49) to re-score vector-index candidates in SQLite.
+        """
+        if not memory_ids:
+            return []
+        archived_clause = "" if include_archived else " AND promotion_state != 'ARCHIVED'"
+        placeholders = ", ".join("?" for _ in memory_ids)
+        rows = self._conn.execute(
+            f"""SELECT id, identifier, fact_text, fact_summary, importance,
+                       metadata_json, source, created_at,
+                       cosine_sim(embedding, ?) AS cosine_score
+                FROM memories
+                WHERE id IN ({placeholders})
+                  AND {_ttl_live()}{archived_clause}
+                ORDER BY cosine_score DESC, id ASC""",
+            (query_embedding, *memory_ids),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def all_rows(self, *, include_embedding: bool = False) -> list[dict[str, Any]]:
         """Return all memory rows as dicts (for snapshot export)."""

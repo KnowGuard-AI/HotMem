@@ -62,6 +62,7 @@ class EventType:
     BUNDLE_DISCOVERED = "bundle.discovered"
     HYGIENE_CHECKED = "hygiene.checked"
     HYGIENE_WARNING = "hygiene.warning"
+    INDEX_REBUILT = "index.rebuilt"
 
 
 def _utc_now_iso() -> str:

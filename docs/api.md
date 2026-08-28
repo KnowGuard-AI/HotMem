@@ -81,7 +81,46 @@ Content-Type: application/json
 
 Exports all memories to a JSONL or JSONL.GZ swap file.
 
-## 8. OpenAPI Spec
+## 8. Vector Index (optional, derived)
+
+The vector index is an **optional acceleration layer** — it is disposable,
+rebuildable, and **never canonical storage**. SQLite, files, bundles, and
+manifests remain the source of truth. Losing or deleting the index never
+loses memory: search transparently falls back to the deterministic SQLite
+cosine scan, and the index can be fully rebuilt from canonical storage.
+
+Enable it at server start (`hotmem serve --vector-index chroma`, requires the
+optional `hotmem[vector]` extra). The index only supplies candidate ids; final
+ranking is always recomputed with the canonical hybrid scorer, so the
+`/v1/search` response shape and ranking are identical with or without
+acceleration.
+
+```http
+POST /v1/vector-index/rebuild
+```
+
+Rebuilds the index from SQLite rows (embeddings are reused, never recomputed).
+Reads no backing files. Returns `indexed_count`, `db_count`,
+`skipped_no_embedding`, `rebuilt_at`, and `trace_ms`. Returns
+`400 vector_index_disabled` when no backend is configured, or
+`400 vector_dependency_missing` when the backend package is not installed.
+Emits an `index.rebuilt` event.
+
+```http
+GET /v1/vector-index/status
+```
+
+Returns `backend`, `requested_backend`, `dependency_available`,
+`indexed_count`, `db_count`, `stale`, `rebuilt_at`, `path`, and `trace_ms`.
+`stale: true` means search is currently served by the deterministic fallback.
+
+```http
+DELETE /v1/vector-index
+```
+
+Clears the index (entries + rebuild marker). Canonical storage is untouched.
+
+## 9. OpenAPI Spec
 
 Export the machine-readable spec:
 

@@ -118,3 +118,50 @@ def test_v2_provenance_columns_are_optional_and_defaulted(client, tmp_path):
     assert first["byte_length"] is None
     assert first["tier"] == "hot"
     assert first["schema_version"] == 1
+
+
+def test_search_identical_with_and_without_vector_acceleration(tmp_path):
+    """#49: enabling the derived vector index must not change search results.
+
+    The same store is searched through the default app (null index —
+    deterministic SQLite scan) and through an accelerated app whose index was
+    rebuilt from canonical storage. Ids, ordering, scores, and the response
+    shape must be exactly equal: the index accelerates candidate retrieval,
+    it is not an alternate ranking contract.
+    """
+    from test_vector_index import FakeVectorIndex
+
+    facts = [
+        "duplicate invoice risk for vendor x",
+        "payment terms are net 30 days",
+        "invoice validation requires a PO number",
+    ]
+    query = {"query": "invoice", "top_k": 3}
+
+    # Baseline: default app, no vector backend (the pre-#49 behavior).
+    baseline_app = create_app(db_path=tmp_path / "plain.sqlite")
+    with TestClient(baseline_app) as c:
+        for i, fact in enumerate(facts):
+            c.post("/v1/add", json={"identifier": "v", "fact": fact, "importance": 0.5 + i / 10})
+        baseline = c.post("/v1/search", json=query).json()
+
+    # Accelerated: same seed, rebuilt derived index.
+    index = FakeVectorIndex()
+    accelerated_app = create_app(
+        db_path=tmp_path / "accel.sqlite", vector_backend="chroma", vector_index=index
+    )
+    with TestClient(accelerated_app) as c:
+        for i, fact in enumerate(facts):
+            c.post("/v1/add", json={"identifier": "v", "fact": fact, "importance": 0.5 + i / 10})
+        rebuilt = c.post("/v1/vector-index/rebuild").json()
+        assert rebuilt["indexed_count"] == len(facts)
+        assert c.get("/v1/vector-index/status").json()["stale"] is False
+        accelerated = c.post("/v1/search", json=query).json()
+
+    # Shape is the locked golden search shape; ranking is exactly equal.
+    # (memory_ids are per-store UUIDs, so compare scores/content/order.)
+    assert mask(accelerated) == mask(baseline)
+    assert [(m["score"], m["content"]) for m in accelerated["memories"]] == [
+        (m["score"], m["content"]) for m in baseline["memories"]
+    ]
+    assert accelerated["count"] == baseline["count"] == len(facts)

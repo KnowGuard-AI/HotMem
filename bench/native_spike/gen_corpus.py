@@ -166,9 +166,10 @@ def gen_jsonl_files(out: Path) -> list[dict]:
                 if not bad_written and written >= target * 0.6:
                     bad_line_offset = written
                     bad_line_index = rows
-                    f.write(b'{"id": "broken", "fact_text": "truncated')
+                    bad_line = b'{"id": "broken", "fact_text": "truncated'
+                    f.write(bad_line)
                     f.write(b"\n")
-                    written += 38
+                    written += len(bad_line) + 1
                     rows += 1
                     bad_written = True
                     continue

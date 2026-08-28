@@ -48,15 +48,29 @@ B4_ARMS = ["py_hashlib", "c_pread"]
 CACHE_MODES = ["warm", "cold"]
 
 
-def spawn(bench: str, arm: str, *, path: str = "", offset: int = 0, length: int = 0,
-          runs: int, cache: str, env: dict | None = None, timeout: int = 1800) -> dict:
+def spawn(
+    bench: str,
+    arm: str,
+    *,
+    path: str = "",
+    offset: int = 0,
+    length: int = 0,
+    runs: int,
+    cache: str,
+    env: dict | None = None,
+    timeout: int = 1800,
+) -> dict:
     cmd = [
         sys.executable,
         str(SPIKE_DIR / "bench_worker.py"),
-        "--bench", bench,
-        "--arm", arm,
-        "--runs", str(runs),
-        "--cache", cache,
+        "--bench",
+        bench,
+        "--arm",
+        arm,
+        "--runs",
+        str(runs),
+        "--cache",
+        cache,
     ]
     if path:
         cmd += ["--path", path, "--offset", str(offset), "--length", str(length)]
@@ -87,6 +101,7 @@ def _ctx() -> dict:
 # --------------------------------------------------------------------- #
 # b1 — range checksum                                                    #
 # --------------------------------------------------------------------- #
+
 
 def run_b1(manifest: dict, runs: int, quick: bool) -> dict:
     cases = []
@@ -122,6 +137,7 @@ def run_b1(manifest: dict, runs: int, quick: bool) -> dict:
 # --------------------------------------------------------------------- #
 # b2 — JSONL scanning                                                    #
 # --------------------------------------------------------------------- #
+
 
 def run_b2(manifest: dict, runs: int, quick: bool) -> dict:
     files = [e["name"] for e in manifest["jsonl_files"]]
@@ -172,6 +188,7 @@ def run_b2(manifest: dict, runs: int, quick: bool) -> dict:
 # b3 — bundle parse profile                                              #
 # --------------------------------------------------------------------- #
 
+
 def run_b3(manifest: dict, runs: int, quick: bool) -> dict:
     trees = [t["name"] for t in manifest["bundle_trees"]]
     if quick:
@@ -192,6 +209,7 @@ def run_b3(manifest: dict, runs: int, quick: bool) -> dict:
 # --------------------------------------------------------------------- #
 # b4 — manifest verification                                             #
 # --------------------------------------------------------------------- #
+
 
 def run_b4(runs: int, quick: bool) -> dict:
     print("  [b4] manifest verification …", flush=True)
@@ -214,6 +232,7 @@ def run_b4(runs: int, quick: bool) -> dict:
 # optional-boundary check (graceful degradation)                         #
 # --------------------------------------------------------------------- #
 
+
 def run_boundary_check() -> dict:
     """Prove helpers degrade gracefully: run a c arm and a wasm arm with
     HOTMEM_SPIKE_DISABLE_NATIVE=1; both must report skipped=helper_unavailable
@@ -222,19 +241,18 @@ def run_boundary_check() -> dict:
     env = {"HOTMEM_SPIKE_DISABLE_NATIVE": "1"}
     binf = benchlib.CORPUS_DIR / "bin_1mb.bin"
     jf = benchlib.CORPUS_DIR / "events_10mb.jsonl"
-    c1 = spawn("b1", "c_pread", path=str(binf), length=binf.stat().st_size,
-               runs=1, cache="warm", env=env)
-    c2 = spawn("b2", "wasm_scan", path=str(jf), runs=1, cache="warm", env=env)
-    ok = (
-        c1.get("skipped") == "helper_unavailable"
-        and c2.get("skipped") == "helper_unavailable"
+    c1 = spawn(
+        "b1", "c_pread", path=str(binf), length=binf.stat().st_size, runs=1, cache="warm", env=env
     )
+    c2 = spawn("b2", "wasm_scan", path=str(jf), runs=1, cache="warm", env=env)
+    ok = c1.get("skipped") == "helper_unavailable" and c2.get("skipped") == "helper_unavailable"
     return {"ok": ok, "c_pread_disabled": c1, "wasm_scan_disabled": c2}
 
 
 # --------------------------------------------------------------------- #
 # report                                                                 #
 # --------------------------------------------------------------------- #
+
 
 def _fmt_ms(v) -> str:
     return "—" if v is None else f"{v:.1f}"
@@ -262,18 +280,24 @@ def report(results: dict) -> str:
     lines: list[str] = []
 
     host = results.get("host", {})
-    lines.append(f"Host: {host.get('cpu', '?')} | sha_ni={host.get('sha_ni')} | "
-                 f"kernel {host.get('kernel', '?')} | Python {host.get('python', '?')}")
-    lines.append(f"Profile: {results.get('profile')} | runs={results.get('config', {}).get('runs')}"
-                 f" | corpus seed={results.get('corpus_seed')}")
+    lines.append(
+        f"Host: {host.get('cpu', '?')} | sha_ni={host.get('sha_ni')} | "
+        f"kernel {host.get('kernel', '?')} | Python {host.get('python', '?')}"
+    )
+    lines.append(
+        f"Profile: {results.get('profile')} | runs={results.get('config', {}).get('runs')}"
+        f" | corpus seed={results.get('corpus_seed')}"
+    )
     lines.append("")
 
     # ---- B1 ----
     b1 = results.get("b1_range_checksum", {})
     lines.append("## B1 — Range SHA-256 checksum (median ms, warm / cold; peak RSS MB in parens)")
     lines.append("")
-    header = ("| file (range) | py double-read | py single | py stream | c pread | c mmap "
-              "| py-single gains | c_mmap vs py_single |")
+    header = (
+        "| file (range) | py double-read | py single | py stream | c pread | c mmap "
+        "| py-single gains | c_mmap vs py_single |"
+    )
     lines.append(header)
     lines.append("|" + "---|" * 8)
     for case in b1.get("cases", []):
@@ -312,7 +336,11 @@ def report(results: dict) -> str:
         for arm in B2_ARMS:
             vals.append(f"{_fmt_ms(_med(cell, arm, 'warm'))} / {_fmt_ms(_med(cell, arm, 'cold'))}")
         rows = next(
-            (_arm_cell(cell, a, "warm").get("output", {}).get("rows") for a in B2_ARMS),
+            (
+                out
+                for a in B2_ARMS
+                if (out := _arm_cell(cell, a, "warm").get("output", {}).get("rows")) is not None
+            ),
             None,
         )
         lines.append(f"| {cell['file']} | " + " | ".join(vals) + f" | {rows} |")
@@ -354,8 +382,9 @@ def report(results: dict) -> str:
     # ---- boundary ----
     bc = results.get("optional_boundary_check", {})
     if bc:
-        lines.append("## Optional-boundary check (HOTMEM_SPIKE_DISABLE_NATIVE=1): "
-                     f"**{bc.get('ok')}**")
+        lines.append(
+            f"## Optional-boundary check (HOTMEM_SPIKE_DISABLE_NATIVE=1): **{bc.get('ok')}**"
+        )
         lines.append("")
 
     return "\n".join(lines)
@@ -363,14 +392,15 @@ def report(results: dict) -> str:
 
 # --------------------------------------------------------------------- #
 
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--profile", choices=["reduced", "full"], default="reduced")
-    ap.add_argument("--quick", action="store_true",
-                    help="smoke the harness: 1 run, small inputs")
+    ap.add_argument("--quick", action="store_true", help="smoke the harness: 1 run, small inputs")
     ap.add_argument("--out", default="results.json")
-    ap.add_argument("--report", action="store_true",
-                    help="print markdown report from --out and exit")
+    ap.add_argument(
+        "--report", action="store_true", help="print markdown report from --out and exit"
+    )
     args = ap.parse_args()
 
     out_path = SPIKE_DIR / args.out
