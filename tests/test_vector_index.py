@@ -267,6 +267,29 @@ def test_rebuild_on_null_index_is_noop(tmp_db: MemoryDB, tmp_path: Path):
     assert result["db_count"] == 1
 
 
+def test_concurrent_insert_during_rebuild_marks_index_stale(
+    tmp_db: MemoryDB, monkeypatch: pytest.MonkeyPatch
+):
+    """A row inserted between the fingerprint snapshot and the row read must
+    leave the marker stale — never silently unindexed-and-fresh (#49 review).
+
+    The fingerprint is snapshotted BEFORE the row read, so a mutation landing
+    mid-rebuild changes the live fingerprint and the index reads stale (the
+    deterministic fallback serves search until the next rebuild).
+    """
+    original_all_rows = tmp_db.all_rows
+
+    def all_rows_with_insert(*args: Any, **kwargs: Any):
+        _add_fact(tmp_db, "late-row", "inserted while the rebuild is running")
+        return original_all_rows(*args, **kwargs)
+
+    monkeypatch.setattr(tmp_db, "all_rows", all_rows_with_insert)
+    index = FakeVectorIndex()
+    rebuild_vector_index(tmp_db, index)
+
+    assert index.is_stale(tmp_db) is True
+
+
 # ── 3. Stale index -> fallback ───────────────────────────────────────────────
 
 

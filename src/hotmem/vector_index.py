@@ -414,8 +414,10 @@ def rebuild_vector_index(
     they are excluded from cosine search by design and remain fully retrievable
     via get/hydrate and (for those with text) FTS.
 
-    The rebuild marker records the store fingerprint at rebuild time so
-    staleness is a cheap comparison, not a per-row checksum.
+    The rebuild marker records the store fingerprint snapshotted BEFORE the
+    row read, so any concurrent mutation makes the marker read stale and
+    search falls back deterministically — an index can be stale-fresh, never
+    silently incomplete.
     """
     import datetime as _dt
 
@@ -432,6 +434,12 @@ def rebuild_vector_index(
             }
 
         index.clear()
+        # Snapshot the fingerprint BEFORE reading rows. Any mutation landing
+        # after this point changes the live fingerprint, so the marker reads
+        # stale and search takes the deterministic fallback until the next
+        # rebuild — the safe direction. Snapshotting after the read would
+        # instead bless an index that may miss rows inserted mid-rebuild.
+        fingerprint = db_fingerprint(db)
         rows = db.all_rows(include_embedding=True)
         records = []
         indexed = 0
@@ -460,7 +468,6 @@ def rebuild_vector_index(
         if records:
             index.upsert(records)
 
-        fingerprint = db_fingerprint(db)
         marker = {
             "db_count": fingerprint[0],
             "max_rowid": fingerprint[1],
