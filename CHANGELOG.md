@@ -4,7 +4,7 @@ All notable changes to HotMem will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased]
+## [0.2.4] - 2026-08-28
 
 ### Added — Optional derived vector index (#49)
 - Pluggable vector index for search acceleration: `VectorIndex` protocol with
