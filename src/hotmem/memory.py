@@ -39,7 +39,7 @@ from hotmem.provenance import (
     BackingFileMissingError,
     ChecksumMismatchError,
     ProvenanceError,
-    verify_range,
+    verify_bytes,
 )
 from hotmem.storage import get_adapter
 from hotmem.trace import Timer, get_tracer
@@ -267,8 +267,10 @@ def hydrate_memory_detailed(
             raise ProvenanceError("truncated", source_uri, expected=expected_checksum)
 
         # On-demand checksum verification (skipped if no checksum stored or verify=False).
+        # Single-read verification (#87): hash the bytes already read — the
+        # digest and error semantics are identical to verify_range's re-read.
         if expected_checksum and verify:
-            verify_range(adapter, resolved_uri, offset, length, expected_checksum)
+            verify_bytes(source_uri, data, expected_checksum)
             verified = True
 
     _trace.info(

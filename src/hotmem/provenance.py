@@ -14,6 +14,7 @@ Interface:
          .actual: str | None
      ChecksumMismatchError(ProvenanceError)
      BackingFileMissingError(ProvenanceError)
+     verify_bytes(source_uri, data, expected_checksum) -> None
      verify_range(adapter, source_uri, offset, length, expected_checksum) -> None
 
 Deps: none (stdlib only)
@@ -76,6 +77,26 @@ class BackingFileMissingError(ProvenanceError):
         super().__init__("missing_file", source_uri)
 
 
+def verify_bytes(source_uri: str, data: bytes, expected_checksum: str) -> None:
+    """Verify already-read bytes against the expected range SHA-256 (#87).
+
+    Raises ChecksumMismatchError on mismatch. Missing-file and truncated
+    conditions belong to the caller — it owns the read and can produce the
+    precise reason from read results.
+
+    The digest semantics are identical to ``verify_range``: SHA-256 over the
+    byte RANGE the caller materialized, never the whole file.
+    """
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != expected_checksum:
+        _trace.warn(
+            "verify",
+            "checksum mismatch",
+            detail={"source_uri": source_uri, "expected": expected_checksum, "actual": actual},
+        )
+        raise ChecksumMismatchError(source_uri, expected=expected_checksum, actual=actual)
+
+
 def verify_range(
     adapter: Any,
     source_uri: str,
@@ -113,11 +134,4 @@ def verify_range(
         )
         raise ProvenanceError("truncated", source_uri, expected=expected_checksum)
 
-    actual = hashlib.sha256(data).hexdigest()
-    if actual != expected_checksum:
-        _trace.warn(
-            "verify",
-            "checksum mismatch",
-            detail={"source_uri": source_uri, "expected": expected_checksum, "actual": actual},
-        )
-        raise ChecksumMismatchError(source_uri, expected=expected_checksum, actual=actual)
+    verify_bytes(source_uri, data, expected_checksum)

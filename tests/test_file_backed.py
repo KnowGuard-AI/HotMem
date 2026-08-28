@@ -148,6 +148,34 @@ def test_missing_file_raises_http_409(app_client: TestClient):
 # ── 3. metadata access performs no file read (spy on adapter) ────────────────
 
 
+def test_verified_hydrate_reads_range_once(tmp_db: MemoryDB, fixture_file: Path):
+    """#87: verified hydration reads the range exactly once — the checksum is
+    computed over the already-read bytes instead of a second read."""
+    from spy import SpyAdapter
+
+    spy = SpyAdapter(LocalFilesystemAdapter())
+    import hotmem.memory as mem_mod
+
+    orig = mem_mod.get_adapter
+    mem_mod.get_adapter = lambda uri: spy
+    try:
+        expected = hashlib.sha256(fixture_file.read_bytes()[10:30]).hexdigest()
+        ref = FileRef(
+            source_uri=str(fixture_file),
+            byte_offset=10,
+            byte_length=20,
+            source_format="bin",
+            source_checksum=expected,
+        )
+        mid, _ = add_file_backed(tmp_db, identifier="ds", file_ref=ref, summary="v")
+
+        content = hydrate_memory(tmp_db, mid)
+        assert content == fixture_file.read_bytes()[10:30]
+        assert spy.read_range_calls == 1, "verified hydration must not re-read the range"
+    finally:
+        mem_mod.get_adapter = orig
+
+
 def test_metadata_access_no_file_read(tmp_db: MemoryDB, fixture_file: Path):
     from spy import SpyAdapter
 

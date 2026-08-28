@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed — single-read verified hydration (#87)
+- Verified hydration now hashes the bytes it already read instead of
+  re-reading the range through `provenance.verify_range` — one read per
+  range (spike B1: ~+16% at 100 MB). Digest and `ProvenanceError`
+  semantics are unchanged; new internal `provenance.verify_bytes` helper
+  carries the identical checksum contract.
+
 ### Changed — embed_text trigram hashing (#90)
 - Trigram hashing now runs through a bounded per-gram cache
   (`lru_cache`, 65 536 entries) replacing per-call md5 + hex parsing;
