@@ -1,0 +1,4205 @@
+{
+  "spike": "#48 native helper spike",
+  "profile": "reduced",
+  "quick": false,
+  "corpus_seed": 48,
+  "host": {
+    "cpu": "Intel(R) Core(TM) i7-10610U CPU @ 1.80GHz",
+    "sha_ni": false,
+    "kernel": "6.18.33.1-microsoft-standard-WSL2",
+    "python": "3.12.3",
+    "gcc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+    "wasmtime": "unknown",
+    "loadavg": "3.77 3.09 2.22 4/409 11309",
+    "mem_available_mb": 580,
+    "timestamp": "2026-08-27T06:50:39Z"
+  },
+  "config": {
+    "runs": 5,
+    "cache_modes": [
+      "warm",
+      "cold"
+    ]
+  },
+  "b1_range_checksum": {
+    "cases": [
+      {
+        "file": "bin_1kb.bin",
+        "offset": 0,
+        "length": 1024,
+        "context": {
+          "loadavg": "3.77 3.09 2.22 4/409 11309",
+          "mem_available_mb": 580,
+          "ts": "07:50:39"
+        },
+        "arms": {
+          "py_current_double_read": {
+            "warm": {
+              "runs_ms": [
+                0.294,
+                0.445,
+                0.279,
+                0.187,
+                0.245
+              ],
+              "median_ms": 0.279,
+              "p95_ms": 0.445,
+              "rss_baseline_kb": 18556,
+              "rss_peak_kb": 20060,
+              "hwm_reset": true,
+              "output": {
+                "digest": "13b413ae99f0\u2026"
+              },
+              "mem_available_mb": 569,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1kb.bin",
+              "offset": 0,
+              "length": 1024,
+              "cache": "warm",
+              "loadavg": "3.77 3.09 2.22 4/410 11310",
+              "spawn_s": 0.2
+            },
+            "cold": {
+              "runs_ms": [
+                38.527,
+                0.635,
+                0.562,
+                0.58,
+                0.467
+              ],
+              "median_ms": 0.58,
+              "p95_ms": 38.527,
+              "rss_baseline_kb": 18552,
+              "rss_peak_kb": 20052,
+              "hwm_reset": true,
+              "output": {
+                "digest": "13b413ae99f0\u2026"
+              },
+              "mem_available_mb": 565,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1kb.bin",
+              "offset": 0,
+              "length": 1024,
+              "cache": "cold",
+              "loadavg": "3.77 3.09 2.22 4/410 11311",
+              "spawn_s": 0.2
+            }
+          },
+          "py_single_read": {
+            "warm": {
+              "runs_ms": [
+                0.112,
+                0.09,
+                0.096,
+                0.095,
+                0.114
+              ],
+              "median_ms": 0.096,
+              "p95_ms": 0.114,
+              "rss_baseline_kb": 18564,
+              "rss_peak_kb": 19300,
+              "hwm_reset": true,
+              "output": {
+                "digest": "13b413ae99f0\u2026"
+              },
+              "mem_available_mb": 552,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1kb.bin",
+              "offset": 0,
+              "length": 1024,
+              "cache": "warm",
+              "loadavg": "3.77 3.09 2.22 5/410 11312",
+              "spawn_s": 0.2
+            },
+            "cold": {
+              "runs_ms": [
+                12.842,
+                0.44,
+                4.983,
+                0.48,
+                0.433
+              ],
+              "median_ms": 0.48,
+              "p95_ms": 12.842,
+              "rss_baseline_kb": 18564,
+              "rss_peak_kb": 19300,
+              "hwm_reset": true,
+              "output": {
+                "digest": "13b413ae99f0\u2026"
+              },
+              "mem_available_mb": 612,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1kb.bin",
+              "offset": 0,
+              "length": 1024,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 3/408 11316",
+              "spawn_s": 0.2
+            }
+          },
+          "py_streaming": {
+            "warm": {
+              "runs_ms": [
+                0.041,
+                0.033,
+                0.028,
+                0.028,
+                0.027
+              ],
+              "median_ms": 0.028,
+              "p95_ms": 0.041,
+              "rss_baseline_kb": 18576,
+              "rss_peak_kb": 18576,
+              "hwm_reset": true,
+              "output": {
+                "digest": "13b413ae99f0\u2026"
+              },
+              "mem_available_mb": 611,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1kb.bin",
+              "offset": 0,
+              "length": 1024,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 1/410 11319",
+              "spawn_s": 0.1
+            },
+            "cold": {
+              "runs_ms": [
+                0.57,
+                0.453,
+                0.399,
+                0.392,
+                0.39
+              ],
+              "median_ms": 0.399,
+              "p95_ms": 0.57,
+              "rss_baseline_kb": 18568,
+              "rss_peak_kb": 18568,
+              "hwm_reset": true,
+              "output": {
+                "digest": "13b413ae99f0\u2026"
+              },
+              "mem_available_mb": 600,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1kb.bin",
+              "offset": 0,
+              "length": 1024,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 2/411 11331",
+              "spawn_s": 0.1
+            }
+          },
+          "c_pread": {
+            "warm": {
+              "runs_ms": [
+                0.027,
+                0.022,
+                0.02,
+                0.02,
+                0.019
+              ],
+              "median_ms": 0.02,
+              "p95_ms": 0.027,
+              "rss_baseline_kb": 18600,
+              "rss_peak_kb": 18668,
+              "hwm_reset": true,
+              "output": {
+                "digest": "13b413ae99f0\u2026"
+              },
+              "mem_available_mb": 600,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1kb.bin",
+              "offset": 0,
+              "length": 1024,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 2/411 11332",
+              "spawn_s": 0.1
+            },
+            "cold": {
+              "runs_ms": [
+                3.704,
+                0.625,
+                1.464,
+                8.486,
+                3.765
+              ],
+              "median_ms": 3.704,
+              "p95_ms": 8.486,
+              "rss_baseline_kb": 18620,
+              "rss_peak_kb": 18688,
+              "hwm_reset": true,
+              "output": {
+                "digest": "13b413ae99f0\u2026"
+              },
+              "mem_available_mb": 594,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1kb.bin",
+              "offset": 0,
+              "length": 1024,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 3/413 11335",
+              "spawn_s": 0.1
+            }
+          },
+          "c_mmap": {
+            "warm": {
+              "runs_ms": [
+                0.053,
+                0.048,
+                0.045,
+                0.045,
+                0.044
+              ],
+              "median_ms": 0.045,
+              "p95_ms": 0.053,
+              "rss_baseline_kb": 18600,
+              "rss_peak_kb": 18604,
+              "hwm_reset": true,
+              "output": {
+                "digest": "13b413ae99f0\u2026"
+              },
+              "mem_available_mb": 581,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1kb.bin",
+              "offset": 0,
+              "length": 1024,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 3/413 11336",
+              "spawn_s": 0.1
+            },
+            "cold": {
+              "runs_ms": [
+                13.662,
+                7.151,
+                1.017,
+                7.292,
+                5.105
+              ],
+              "median_ms": 7.151,
+              "p95_ms": 13.662,
+              "rss_baseline_kb": 18592,
+              "rss_peak_kb": 18596,
+              "hwm_reset": true,
+              "output": {
+                "digest": "13b413ae99f0\u2026"
+              },
+              "mem_available_mb": 568,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1kb.bin",
+              "offset": 0,
+              "length": 1024,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 4/413 11337",
+              "spawn_s": 0.2
+            }
+          }
+        },
+        "parity_all_arms_agree": true
+      },
+      {
+        "file": "bin_100kb.bin",
+        "offset": 0,
+        "length": 102400,
+        "context": {
+          "loadavg": "3.95 3.14 2.24 4/412 11337",
+          "mem_available_mb": 565,
+          "ts": "07:50:41"
+        },
+        "arms": {
+          "py_current_double_read": {
+            "warm": {
+              "runs_ms": [
+                0.629,
+                0.7,
+                0.736,
+                0.749,
+                0.821
+              ],
+              "median_ms": 0.736,
+              "p95_ms": 0.821,
+              "rss_baseline_kb": 18664,
+              "rss_peak_kb": 20252,
+              "hwm_reset": true,
+              "output": {
+                "digest": "407f241da530\u2026"
+              },
+              "mem_available_mb": 572,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100kb.bin",
+              "offset": 0,
+              "length": 102400,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 5/414 11341",
+              "spawn_s": 0.2
+            },
+            "cold": {
+              "runs_ms": [
+                33.7,
+                1.466,
+                1.311,
+                1.678,
+                1.832
+              ],
+              "median_ms": 1.678,
+              "p95_ms": 33.7,
+              "rss_baseline_kb": 18656,
+              "rss_peak_kb": 20248,
+              "hwm_reset": true,
+              "output": {
+                "digest": "407f241da530\u2026"
+              },
+              "mem_available_mb": 573,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100kb.bin",
+              "offset": 0,
+              "length": 102400,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 4/413 11346",
+              "spawn_s": 0.2
+            }
+          },
+          "py_single_read": {
+            "warm": {
+              "runs_ms": [
+                0.53,
+                0.619,
+                0.55,
+                0.507,
+                0.527
+              ],
+              "median_ms": 0.53,
+              "p95_ms": 0.619,
+              "rss_baseline_kb": 18776,
+              "rss_peak_kb": 19504,
+              "hwm_reset": true,
+              "output": {
+                "digest": "407f241da530\u2026"
+              },
+              "mem_available_mb": 570,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100kb.bin",
+              "offset": 0,
+              "length": 102400,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 2/410 11355",
+              "spawn_s": 0.1
+            },
+            "cold": {
+              "runs_ms": [
+                16.058,
+                1.323,
+                1.256,
+                1.149,
+                1.181
+              ],
+              "median_ms": 1.256,
+              "p95_ms": 16.058,
+              "rss_baseline_kb": 18620,
+              "rss_peak_kb": 19344,
+              "hwm_reset": true,
+              "output": {
+                "digest": "407f241da530\u2026"
+              },
+              "mem_available_mb": 567,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100kb.bin",
+              "offset": 0,
+              "length": 102400,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 2/410 11356",
+              "spawn_s": 0.2
+            }
+          },
+          "py_streaming": {
+            "warm": {
+              "runs_ms": [
+                0.837,
+                0.787,
+                0.791,
+                0.871,
+                0.766
+              ],
+              "median_ms": 0.791,
+              "p95_ms": 0.871,
+              "rss_baseline_kb": 18776,
+              "rss_peak_kb": 18776,
+              "hwm_reset": true,
+              "output": {
+                "digest": "407f241da530\u2026"
+              },
+              "mem_available_mb": 559,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100kb.bin",
+              "offset": 0,
+              "length": 102400,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 3/410 11357",
+              "spawn_s": 0.1
+            },
+            "cold": {
+              "runs_ms": [
+                1.579,
+                1.551,
+                1.175,
+                1.466,
+                1.589
+              ],
+              "median_ms": 1.551,
+              "p95_ms": 1.589,
+              "rss_baseline_kb": 18680,
+              "rss_peak_kb": 18692,
+              "hwm_reset": true,
+              "output": {
+                "digest": "407f241da530\u2026"
+              },
+              "mem_available_mb": 555,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100kb.bin",
+              "offset": 0,
+              "length": 102400,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 2/407 11358",
+              "spawn_s": 0.2
+            }
+          },
+          "c_pread": {
+            "warm": {
+              "runs_ms": [
+                1.072,
+                1.15,
+                1.326,
+                1.38,
+                2.013
+              ],
+              "median_ms": 1.326,
+              "p95_ms": 2.013,
+              "rss_baseline_kb": 18684,
+              "rss_peak_kb": 18852,
+              "hwm_reset": true,
+              "output": {
+                "digest": "407f241da530\u2026"
+              },
+              "mem_available_mb": 555,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100kb.bin",
+              "offset": 0,
+              "length": 102400,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 3/407 11359",
+              "spawn_s": 0.1
+            },
+            "cold": {
+              "runs_ms": [
+                2.795,
+                1.946,
+                2.472,
+                1.663,
+                1.855
+              ],
+              "median_ms": 1.946,
+              "p95_ms": 2.795,
+              "rss_baseline_kb": 18680,
+              "rss_peak_kb": 18848,
+              "hwm_reset": true,
+              "output": {
+                "digest": "407f241da530\u2026"
+              },
+              "mem_available_mb": 583,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100kb.bin",
+              "offset": 0,
+              "length": 102400,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 2/407 11363",
+              "spawn_s": 0.2
+            }
+          },
+          "c_mmap": {
+            "warm": {
+              "runs_ms": [
+                1.391,
+                1.442,
+                1.064,
+                1.08,
+                1.106
+              ],
+              "median_ms": 1.106,
+              "p95_ms": 1.442,
+              "rss_baseline_kb": 18688,
+              "rss_peak_kb": 18692,
+              "hwm_reset": true,
+              "output": {
+                "digest": "407f241da530\u2026"
+              },
+              "mem_available_mb": 577,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100kb.bin",
+              "offset": 0,
+              "length": 102400,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 2/407 11364",
+              "spawn_s": 0.1
+            },
+            "cold": {
+              "runs_ms": [
+                1.84,
+                1.91,
+                1.835,
+                1.834,
+                2.028
+              ],
+              "median_ms": 1.84,
+              "p95_ms": 2.028,
+              "rss_baseline_kb": 18692,
+              "rss_peak_kb": 18696,
+              "hwm_reset": true,
+              "output": {
+                "digest": "407f241da530\u2026"
+              },
+              "mem_available_mb": 573,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100kb.bin",
+              "offset": 0,
+              "length": 102400,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 4/407 11365",
+              "spawn_s": 0.2
+            }
+          }
+        },
+        "parity_all_arms_agree": true
+      },
+      {
+        "file": "bin_1mb.bin",
+        "offset": 0,
+        "length": 1048576,
+        "context": {
+          "loadavg": "3.95 3.14 2.24 4/406 11365",
+          "mem_available_mb": 573,
+          "ts": "07:50:43"
+        },
+        "arms": {
+          "py_current_double_read": {
+            "warm": {
+              "runs_ms": [
+                10.011,
+                10.47,
+                8.393,
+                9.55,
+                12.347
+              ],
+              "median_ms": 10.011,
+              "p95_ms": 12.347,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 22076,
+              "hwm_reset": true,
+              "output": {
+                "digest": "da992adb41e2\u2026"
+              },
+              "mem_available_mb": 561,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+              "offset": 0,
+              "length": 1048576,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 5/409 11368",
+              "spawn_s": 0.2
+            },
+            "cold": {
+              "runs_ms": [
+                58.693,
+                11.939,
+                15.502,
+                13.412,
+                13.297
+              ],
+              "median_ms": 13.412,
+              "p95_ms": 58.693,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 22096,
+              "hwm_reset": true,
+              "output": {
+                "digest": "da992adb41e2\u2026"
+              },
+              "mem_available_mb": 558,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+              "offset": 0,
+              "length": 1048576,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 6/409 11369",
+              "spawn_s": 0.3
+            }
+          },
+          "py_single_read": {
+            "warm": {
+              "runs_ms": [
+                7.583,
+                6.053,
+                5.183,
+                5.854,
+                7.089
+              ],
+              "median_ms": 6.053,
+              "p95_ms": 7.583,
+              "rss_baseline_kb": 18568,
+              "rss_peak_kb": 20316,
+              "hwm_reset": true,
+              "output": {
+                "digest": "da992adb41e2\u2026"
+              },
+              "mem_available_mb": 563,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+              "offset": 0,
+              "length": 1048576,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 3/409 11370",
+              "spawn_s": 0.2
+            },
+            "cold": {
+              "runs_ms": [
+                21.009,
+                7.009,
+                6.805,
+                7.398,
+                7.141
+              ],
+              "median_ms": 7.141,
+              "p95_ms": 21.009,
+              "rss_baseline_kb": 18608,
+              "rss_peak_kb": 20356,
+              "hwm_reset": true,
+              "output": {
+                "digest": "da992adb41e2\u2026"
+              },
+              "mem_available_mb": 551,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+              "offset": 0,
+              "length": 1048576,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 2/409 11374",
+              "spawn_s": 0.2
+            }
+          },
+          "py_streaming": {
+            "warm": {
+              "runs_ms": [
+                5.943,
+                6.162,
+                7.541,
+                5.604,
+                5.164
+              ],
+              "median_ms": 5.943,
+              "p95_ms": 7.541,
+              "rss_baseline_kb": 18556,
+              "rss_peak_kb": 19576,
+              "hwm_reset": true,
+              "output": {
+                "digest": "da992adb41e2\u2026"
+              },
+              "mem_available_mb": 552,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+              "offset": 0,
+              "length": 1048576,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 3/409 11375",
+              "spawn_s": 0.2
+            },
+            "cold": {
+              "runs_ms": [
+                8.23,
+                7.048,
+                7.313,
+                8.226,
+                7.916
+              ],
+              "median_ms": 7.916,
+              "p95_ms": 8.23,
+              "rss_baseline_kb": 18584,
+              "rss_peak_kb": 19604,
+              "hwm_reset": true,
+              "output": {
+                "digest": "da992adb41e2\u2026"
+              },
+              "mem_available_mb": 551,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+              "offset": 0,
+              "length": 1048576,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 3/409 11376",
+              "spawn_s": 0.2
+            }
+          },
+          "c_pread": {
+            "warm": {
+              "runs_ms": [
+                13.372,
+                11.948,
+                11.965,
+                12.181,
+                12.506
+              ],
+              "median_ms": 12.181,
+              "p95_ms": 13.372,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 19672,
+              "hwm_reset": true,
+              "output": {
+                "digest": "da992adb41e2\u2026"
+              },
+              "mem_available_mb": 547,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+              "offset": 0,
+              "length": 1048576,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 3/407 11377",
+              "spawn_s": 0.2
+            },
+            "cold": {
+              "runs_ms": [
+                16.008,
+                13.952,
+                15.166,
+                13.242,
+                14.379
+              ],
+              "median_ms": 14.379,
+              "p95_ms": 16.008,
+              "rss_baseline_kb": 18576,
+              "rss_peak_kb": 19668,
+              "hwm_reset": true,
+              "output": {
+                "digest": "da992adb41e2\u2026"
+              },
+              "mem_available_mb": 582,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+              "offset": 0,
+              "length": 1048576,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 4/407 11378",
+              "spawn_s": 0.2
+            }
+          },
+          "c_mmap": {
+            "warm": {
+              "runs_ms": [
+                13.806,
+                11.119,
+                13.914,
+                13.172,
+                12.186
+              ],
+              "median_ms": 13.172,
+              "p95_ms": 13.914,
+              "rss_baseline_kb": 18596,
+              "rss_peak_kb": 19508,
+              "hwm_reset": true,
+              "output": {
+                "digest": "da992adb41e2\u2026"
+              },
+              "mem_available_mb": 584,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+              "offset": 0,
+              "length": 1048576,
+              "cache": "warm",
+              "loadavg": "3.95 3.14 2.24 2/407 11382",
+              "spawn_s": 0.2
+            },
+            "cold": {
+              "runs_ms": [
+                16.781,
+                15.202,
+                13.333,
+                14.974,
+                13.23
+              ],
+              "median_ms": 14.974,
+              "p95_ms": 16.781,
+              "rss_baseline_kb": 18596,
+              "rss_peak_kb": 19508,
+              "hwm_reset": true,
+              "output": {
+                "digest": "da992adb41e2\u2026"
+              },
+              "mem_available_mb": 590,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+              "offset": 0,
+              "length": 1048576,
+              "cache": "cold",
+              "loadavg": "3.95 3.14 2.24 4/409 11385",
+              "spawn_s": 0.2
+            }
+          }
+        },
+        "parity_all_arms_agree": true
+      },
+      {
+        "file": "bin_10mb.bin",
+        "offset": 0,
+        "length": 10485760,
+        "context": {
+          "loadavg": "3.95 3.14 2.24 4/408 11385",
+          "mem_available_mb": 585,
+          "ts": "07:50:45"
+        },
+        "arms": {
+          "py_current_double_read": {
+            "warm": {
+              "runs_ms": [
+                99.668,
+                90.692,
+                90.572,
+                93.882,
+                96.478
+              ],
+              "median_ms": 93.882,
+              "p95_ms": 99.668,
+              "rss_baseline_kb": 18552,
+              "rss_peak_kb": 40492,
+              "hwm_reset": true,
+              "output": {
+                "digest": "931ff5c54c2c\u2026"
+              },
+              "mem_available_mb": 562,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 0,
+              "length": 10485760,
+              "cache": "warm",
+              "loadavg": "3.87 3.13 2.24 4/413 11401",
+              "spawn_s": 0.8
+            },
+            "cold": {
+              "runs_ms": [
+                134.785,
+                99.74,
+                90.012,
+                90.518,
+                79.692
+              ],
+              "median_ms": 90.518,
+              "p95_ms": 134.785,
+              "rss_baseline_kb": 18564,
+              "rss_peak_kb": 40388,
+              "hwm_reset": true,
+              "output": {
+                "digest": "931ff5c54c2c\u2026"
+              },
+              "mem_available_mb": 562,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 0,
+              "length": 10485760,
+              "cache": "cold",
+              "loadavg": "3.87 3.13 2.24 1/410 11404",
+              "spawn_s": 0.7
+            }
+          },
+          "py_single_read": {
+            "warm": {
+              "runs_ms": [
+                55.479,
+                60.87,
+                62.215,
+                60.931,
+                59.78
+              ],
+              "median_ms": 60.87,
+              "p95_ms": 62.215,
+              "rss_baseline_kb": 18656,
+              "rss_peak_kb": 29616,
+              "hwm_reset": true,
+              "output": {
+                "digest": "931ff5c54c2c\u2026"
+              },
+              "mem_available_mb": 550,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 0,
+              "length": 10485760,
+              "cache": "warm",
+              "loadavg": "3.87 3.13 2.24 4/409 11422",
+              "spawn_s": 0.6
+            },
+            "cold": {
+              "runs_ms": [
+                118.938,
+                95.781,
+                88.855,
+                107.275,
+                90.705
+              ],
+              "median_ms": 95.781,
+              "p95_ms": 118.938,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 29540,
+              "hwm_reset": true,
+              "output": {
+                "digest": "931ff5c54c2c\u2026"
+              },
+              "mem_available_mb": 593,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 0,
+              "length": 10485760,
+              "cache": "cold",
+              "loadavg": "3.87 3.13 2.24 5/409 11429",
+              "spawn_s": 0.7
+            }
+          },
+          "py_streaming": {
+            "warm": {
+              "runs_ms": [
+                89.498,
+                98.977,
+                84.645,
+                78.68,
+                88.438
+              ],
+              "median_ms": 88.438,
+              "p95_ms": 98.977,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 20624,
+              "hwm_reset": true,
+              "output": {
+                "digest": "931ff5c54c2c\u2026"
+              },
+              "mem_available_mb": 552,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 0,
+              "length": 10485760,
+              "cache": "warm",
+              "loadavg": "3.87 3.13 2.24 2/407 11433",
+              "spawn_s": 0.8
+            },
+            "cold": {
+              "runs_ms": [
+                127.991,
+                149.291,
+                110.86,
+                75.711,
+                73.113
+              ],
+              "median_ms": 110.86,
+              "p95_ms": 149.291,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 20624,
+              "hwm_reset": true,
+              "output": {
+                "digest": "931ff5c54c2c\u2026"
+              },
+              "mem_available_mb": 605,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 0,
+              "length": 10485760,
+              "cache": "cold",
+              "loadavg": "3.87 3.13 2.24 4/406 11439",
+              "spawn_s": 0.8
+            }
+          },
+          "c_pread": {
+            "warm": {
+              "runs_ms": [
+                145.078,
+                141.439,
+                156.413,
+                179.584,
+                141.848
+              ],
+              "median_ms": 145.078,
+              "p95_ms": 179.584,
+              "rss_baseline_kb": 18572,
+              "rss_peak_kb": 19664,
+              "hwm_reset": true,
+              "output": {
+                "digest": "931ff5c54c2c\u2026"
+              },
+              "mem_available_mb": 578,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 0,
+              "length": 10485760,
+              "cache": "warm",
+              "loadavg": "4.44 3.26 2.29 4/406 11443",
+              "spawn_s": 1.1
+            },
+            "cold": {
+              "runs_ms": [
+                170.917,
+                159.767,
+                153.184,
+                147.358,
+                193.756
+              ],
+              "median_ms": 159.767,
+              "p95_ms": 193.756,
+              "rss_baseline_kb": 18584,
+              "rss_peak_kb": 19676,
+              "hwm_reset": true,
+              "output": {
+                "digest": "931ff5c54c2c\u2026"
+              },
+              "mem_available_mb": 632,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 0,
+              "length": 10485760,
+              "cache": "cold",
+              "loadavg": "4.44 3.26 2.29 2/409 11463",
+              "spawn_s": 1.0
+            }
+          },
+          "c_mmap": {
+            "warm": {
+              "runs_ms": [
+                156.408,
+                139.362,
+                130.552,
+                128.523,
+                131.394
+              ],
+              "median_ms": 131.394,
+              "p95_ms": 156.408,
+              "rss_baseline_kb": 18572,
+              "rss_peak_kb": 28808,
+              "hwm_reset": true,
+              "output": {
+                "digest": "931ff5c54c2c\u2026"
+              },
+              "mem_available_mb": 601,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 0,
+              "length": 10485760,
+              "cache": "warm",
+              "loadavg": "4.44 3.26 2.29 3/405 11480",
+              "spawn_s": 1.1
+            },
+            "cold": {
+              "runs_ms": [
+                137.676,
+                146.008,
+                168.373,
+                156.672,
+                136.687
+              ],
+              "median_ms": 146.008,
+              "p95_ms": 168.373,
+              "rss_baseline_kb": 18576,
+              "rss_peak_kb": 28812,
+              "hwm_reset": true,
+              "output": {
+                "digest": "931ff5c54c2c\u2026"
+              },
+              "mem_available_mb": 669,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 0,
+              "length": 10485760,
+              "cache": "cold",
+              "loadavg": "4.44 3.26 2.29 3/406 11502",
+              "spawn_s": 1.0
+            }
+          }
+        },
+        "parity_all_arms_agree": true
+      },
+      {
+        "file": "bin_10mb.bin",
+        "offset": 5243003,
+        "length": 2621440,
+        "context": {
+          "loadavg": "4.44 3.26 2.29 4/405 11502",
+          "mem_available_mb": 654,
+          "ts": "07:50:53"
+        },
+        "arms": {
+          "py_current_double_read": {
+            "warm": {
+              "runs_ms": [
+                21.342,
+                23.661,
+                20.168,
+                23.032,
+                25.976
+              ],
+              "median_ms": 23.032,
+              "p95_ms": 25.976,
+              "rss_baseline_kb": 18576,
+              "rss_peak_kb": 25160,
+              "hwm_reset": true,
+              "output": {
+                "digest": "80094fad4cb1\u2026"
+              },
+              "mem_available_mb": 654,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 5243003,
+              "length": 2621440,
+              "cache": "warm",
+              "loadavg": "4.44 3.26 2.29 8/406 11506",
+              "spawn_s": 0.4
+            },
+            "cold": {
+              "runs_ms": [
+                62.291,
+                22.345,
+                25.187,
+                23.736,
+                26.56
+              ],
+              "median_ms": 25.187,
+              "p95_ms": 62.291,
+              "rss_baseline_kb": 18612,
+              "rss_peak_kb": 25200,
+              "hwm_reset": true,
+              "output": {
+                "digest": "80094fad4cb1\u2026"
+              },
+              "mem_available_mb": 638,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 5243003,
+              "length": 2621440,
+              "cache": "cold",
+              "loadavg": "4.44 3.26 2.29 7/406 11507",
+              "spawn_s": 0.3
+            }
+          },
+          "py_single_read": {
+            "warm": {
+              "runs_ms": [
+                16.052,
+                14.263,
+                18.239,
+                18.365,
+                14.992
+              ],
+              "median_ms": 16.052,
+              "p95_ms": 18.365,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 21864,
+              "hwm_reset": true,
+              "output": {
+                "digest": "80094fad4cb1\u2026"
+              },
+              "mem_available_mb": 652,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 5243003,
+              "length": 2621440,
+              "cache": "warm",
+              "loadavg": "4.44 3.26 2.29 2/404 11508",
+              "spawn_s": 0.3
+            },
+            "cold": {
+              "runs_ms": [
+                34.61,
+                18.371,
+                19.464,
+                20.033,
+                18.126
+              ],
+              "median_ms": 19.464,
+              "p95_ms": 34.61,
+              "rss_baseline_kb": 18564,
+              "rss_peak_kb": 21848,
+              "hwm_reset": true,
+              "output": {
+                "digest": "80094fad4cb1\u2026"
+              },
+              "mem_available_mb": 652,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 5243003,
+              "length": 2621440,
+              "cache": "cold",
+              "loadavg": "4.44 3.26 2.29 4/404 11512",
+              "spawn_s": 0.3
+            }
+          },
+          "py_streaming": {
+            "warm": {
+              "runs_ms": [
+                19.132,
+                19.15,
+                17.044,
+                15.399,
+                17.579
+              ],
+              "median_ms": 17.579,
+              "p95_ms": 19.15,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 20624,
+              "hwm_reset": true,
+              "output": {
+                "digest": "80094fad4cb1\u2026"
+              },
+              "mem_available_mb": 651,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 5243003,
+              "length": 2621440,
+              "cache": "warm",
+              "loadavg": "4.44 3.26 2.29 3/406 11515",
+              "spawn_s": 0.3
+            },
+            "cold": {
+              "runs_ms": [
+                21.918,
+                21.413,
+                24.627,
+                24.329,
+                19.384
+              ],
+              "median_ms": 21.918,
+              "p95_ms": 24.627,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 20624,
+              "hwm_reset": true,
+              "output": {
+                "digest": "80094fad4cb1\u2026"
+              },
+              "mem_available_mb": 640,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 5243003,
+              "length": 2621440,
+              "cache": "cold",
+              "loadavg": "4.44 3.26 2.29 7/406 11516",
+              "spawn_s": 0.3
+            }
+          },
+          "c_pread": {
+            "warm": {
+              "runs_ms": [
+                36.623,
+                42.756,
+                38.556,
+                30.69,
+                33.649
+              ],
+              "median_ms": 36.623,
+              "p95_ms": 42.756,
+              "rss_baseline_kb": 18628,
+              "rss_peak_kb": 19720,
+              "hwm_reset": true,
+              "output": {
+                "digest": "80094fad4cb1\u2026"
+              },
+              "mem_available_mb": 651,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 5243003,
+              "length": 2621440,
+              "cache": "warm",
+              "loadavg": "4.33 3.26 2.29 3/409 11530",
+              "spawn_s": 0.4
+            },
+            "cold": {
+              "runs_ms": [
+                34.026,
+                39.515,
+                47.226,
+                48.17,
+                50.182
+              ],
+              "median_ms": 47.226,
+              "p95_ms": 50.182,
+              "rss_baseline_kb": 18628,
+              "rss_peak_kb": 19720,
+              "hwm_reset": true,
+              "output": {
+                "digest": "80094fad4cb1\u2026"
+              },
+              "mem_available_mb": 656,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 5243003,
+              "length": 2621440,
+              "cache": "cold",
+              "loadavg": "4.33 3.26 2.29 3/409 11534",
+              "spawn_s": 0.4
+            }
+          },
+          "c_mmap": {
+            "warm": {
+              "runs_ms": [
+                31.494,
+                30.678,
+                31.272,
+                29.971,
+                31.192
+              ],
+              "median_ms": 31.192,
+              "p95_ms": 31.494,
+              "rss_baseline_kb": 18596,
+              "rss_peak_kb": 21060,
+              "hwm_reset": true,
+              "output": {
+                "digest": "80094fad4cb1\u2026"
+              },
+              "mem_available_mb": 634,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 5243003,
+              "length": 2621440,
+              "cache": "warm",
+              "loadavg": "4.33 3.26 2.29 6/407 11535",
+              "spawn_s": 0.3
+            },
+            "cold": {
+              "runs_ms": [
+                43.727,
+                47.774,
+                42.626,
+                43.942,
+                40.783
+              ],
+              "median_ms": 43.727,
+              "p95_ms": 47.774,
+              "rss_baseline_kb": 18592,
+              "rss_peak_kb": 21148,
+              "hwm_reset": true,
+              "output": {
+                "digest": "80094fad4cb1\u2026"
+              },
+              "mem_available_mb": 656,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_10mb.bin",
+              "offset": 5243003,
+              "length": 2621440,
+              "cache": "cold",
+              "loadavg": "4.33 3.26 2.29 2/404 11547",
+              "spawn_s": 0.4
+            }
+          }
+        },
+        "parity_all_arms_agree": true
+      },
+      {
+        "file": "bin_100mb.bin",
+        "offset": 0,
+        "length": 104857600,
+        "context": {
+          "loadavg": "4.33 3.26 2.29 1/403 11547",
+          "mem_available_mb": 651,
+          "ts": "07:50:57"
+        },
+        "arms": {
+          "py_current_double_read": {
+            "warm": {
+              "runs_ms": [
+                825.94,
+                850.238,
+                864.238,
+                865.248,
+                757.353
+              ],
+              "median_ms": 850.238,
+              "p95_ms": 865.248,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 224564,
+              "hwm_reset": true,
+              "output": {
+                "digest": "124c78b11c25\u2026"
+              },
+              "mem_available_mb": 714,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 0,
+              "length": 104857600,
+              "cache": "warm",
+              "loadavg": "4.66 3.37 2.34 3/406 11633",
+              "spawn_s": 9.9
+            },
+            "cold": {
+              "runs_ms": [
+                1066.366,
+                864.362,
+                848.142,
+                1074.401,
+                985.812
+              ],
+              "median_ms": 985.812,
+              "p95_ms": 1074.401,
+              "rss_baseline_kb": 18688,
+              "rss_peak_kb": 224864,
+              "hwm_reset": true,
+              "output": {
+                "digest": "124c78b11c25\u2026"
+              },
+              "mem_available_mb": 688,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 0,
+              "length": 104857600,
+              "cache": "cold",
+              "loadavg": "4.45 3.34 2.34 4/406 11675",
+              "spawn_s": 5.7
+            }
+          },
+          "py_single_read": {
+            "warm": {
+              "runs_ms": [
+                757.101,
+                658.07,
+                757.508,
+                705.885,
+                735.785
+              ],
+              "median_ms": 735.785,
+              "p95_ms": 757.508,
+              "rss_baseline_kb": 18608,
+              "rss_peak_kb": 121692,
+              "hwm_reset": true,
+              "output": {
+                "digest": "124c78b11c25\u2026"
+              },
+              "mem_available_mb": 766,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 0,
+              "length": 104857600,
+              "cache": "warm",
+              "loadavg": "4.25 3.32 2.33 5/406 11722",
+              "spawn_s": 5.2
+            },
+            "cold": {
+              "runs_ms": [
+                874.851,
+                771.273,
+                787.703,
+                741.416,
+                708.523
+              ],
+              "median_ms": 771.273,
+              "p95_ms": 874.851,
+              "rss_baseline_kb": 18572,
+              "rss_peak_kb": 121684,
+              "hwm_reset": true,
+              "output": {
+                "digest": "124c78b11c25\u2026"
+              },
+              "mem_available_mb": 679,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 0,
+              "length": 104857600,
+              "cache": "cold",
+              "loadavg": "4.15 3.32 2.34 2/406 11769",
+              "spawn_s": 4.8
+            }
+          },
+          "py_streaming": {
+            "warm": {
+              "runs_ms": [
+                676.248,
+                629.999,
+                649.502,
+                673.198,
+                733.593
+              ],
+              "median_ms": 673.198,
+              "p95_ms": 733.593,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 20604,
+              "hwm_reset": true,
+              "output": {
+                "digest": "124c78b11c25\u2026"
+              },
+              "mem_available_mb": 735,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 0,
+              "length": 104857600,
+              "cache": "warm",
+              "loadavg": "3.90 3.28 2.33 3/403 11813",
+              "spawn_s": 4.9
+            },
+            "cold": {
+              "runs_ms": [
+                719.566,
+                835.057,
+                1034.632,
+                869.96,
+                820.248
+              ],
+              "median_ms": 835.057,
+              "p95_ms": 1034.632,
+              "rss_baseline_kb": 18564,
+              "rss_peak_kb": 20624,
+              "hwm_reset": true,
+              "output": {
+                "digest": "124c78b11c25\u2026"
+              },
+              "mem_available_mb": 691,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 0,
+              "length": 104857600,
+              "cache": "cold",
+              "loadavg": "3.83 3.27 2.34 5/406 11869",
+              "spawn_s": 5.2
+            }
+          },
+          "c_pread": {
+            "warm": {
+              "runs_ms": [
+                1554.383,
+                2028.179,
+                1691.747,
+                1743.623,
+                1760.749
+              ],
+              "median_ms": 1743.623,
+              "p95_ms": 2028.179,
+              "rss_baseline_kb": 18528,
+              "rss_peak_kb": 19620,
+              "hwm_reset": true,
+              "output": {
+                "digest": "124c78b11c25\u2026"
+              },
+              "mem_available_mb": 729,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 0,
+              "length": 104857600,
+              "cache": "warm",
+              "loadavg": "3.62 3.25 2.34 3/408 11964",
+              "spawn_s": 11.8
+            },
+            "cold": {
+              "runs_ms": [
+                1640.432,
+                1504.216,
+                1792.041,
+                1790.018,
+                1715.502
+              ],
+              "median_ms": 1715.502,
+              "p95_ms": 1792.041,
+              "rss_baseline_kb": 18600,
+              "rss_peak_kb": 19692,
+              "hwm_reset": true,
+              "output": {
+                "digest": "124c78b11c25\u2026"
+              },
+              "mem_available_mb": 776,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 0,
+              "length": 104857600,
+              "cache": "cold",
+              "loadavg": "4.42 3.44 2.41 3/407 12059",
+              "spawn_s": 9.6
+            }
+          },
+          "c_mmap": {
+            "warm": {
+              "runs_ms": [
+                1624.465,
+                1784.645,
+                1371.871,
+                1422.173,
+                1669.946
+              ],
+              "median_ms": 1624.465,
+              "p95_ms": 1784.645,
+              "rss_baseline_kb": 18596,
+              "rss_peak_kb": 120968,
+              "hwm_reset": true,
+              "output": {
+                "digest": "124c78b11c25\u2026"
+              },
+              "mem_available_mb": 706,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 0,
+              "length": 104857600,
+              "cache": "warm",
+              "loadavg": "4.36 3.45 2.43 4/405 12148",
+              "spawn_s": 10.7
+            },
+            "cold": {
+              "runs_ms": [
+                1783.063,
+                1814.961,
+                1781.894,
+                1646.384,
+                1979.154
+              ],
+              "median_ms": 1783.063,
+              "p95_ms": 1979.154,
+              "rss_baseline_kb": 18592,
+              "rss_peak_kb": 120964,
+              "hwm_reset": true,
+              "output": {
+                "digest": "124c78b11c25\u2026"
+              },
+              "mem_available_mb": 710,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 0,
+              "length": 104857600,
+              "cache": "cold",
+              "loadavg": "4.31 3.47 2.44 4/406 12238",
+              "spawn_s": 10.1
+            }
+          }
+        },
+        "parity_all_arms_agree": true
+      },
+      {
+        "file": "bin_100mb.bin",
+        "offset": 52428923,
+        "length": 26214400,
+        "context": {
+          "loadavg": "4.31 3.47 2.44 4/407 12240",
+          "mem_available_mb": 717,
+          "ts": "07:52:14"
+        },
+        "arms": {
+          "py_current_double_read": {
+            "warm": {
+              "runs_ms": [
+                329.638,
+                219.537,
+                238.602,
+                213.939,
+                196.271
+              ],
+              "median_ms": 219.537,
+              "p95_ms": 329.638,
+              "rss_baseline_kb": 18604,
+              "rss_peak_kb": 71272,
+              "hwm_reset": true,
+              "output": {
+                "digest": "0e08f73acfac\u2026"
+              },
+              "mem_available_mb": 686,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 52428923,
+              "length": 26214400,
+              "cache": "warm",
+              "loadavg": "4.37 3.50 2.46 6/405 12279",
+              "spawn_s": 2.4
+            },
+            "cold": {
+              "runs_ms": [
+                278.553,
+                235.919,
+                224.186,
+                230.722,
+                254.206
+              ],
+              "median_ms": 235.919,
+              "p95_ms": 278.553,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 71244,
+              "hwm_reset": true,
+              "output": {
+                "digest": "0e08f73acfac\u2026"
+              },
+              "mem_available_mb": 643,
+              "bench": "b1",
+              "arm": "py_current_double_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 52428923,
+              "length": 26214400,
+              "cache": "cold",
+              "loadavg": "4.37 3.50 2.46 3/405 12288",
+              "spawn_s": 1.6
+            }
+          },
+          "py_single_read": {
+            "warm": {
+              "runs_ms": [
+                152.306,
+                157.558,
+                169.132,
+                157.038,
+                146.355
+              ],
+              "median_ms": 157.038,
+              "p95_ms": 169.132,
+              "rss_baseline_kb": 18556,
+              "rss_peak_kb": 44876,
+              "hwm_reset": true,
+              "output": {
+                "digest": "0e08f73acfac\u2026"
+              },
+              "mem_available_mb": 687,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 52428923,
+              "length": 26214400,
+              "cache": "warm",
+              "loadavg": "4.37 3.50 2.46 4/403 12292",
+              "spawn_s": 1.3
+            },
+            "cold": {
+              "runs_ms": [
+                217.599,
+                232.446,
+                237.3,
+                248.373,
+                220.077
+              ],
+              "median_ms": 232.446,
+              "p95_ms": 248.373,
+              "rss_baseline_kb": 18576,
+              "rss_peak_kb": 44896,
+              "hwm_reset": true,
+              "output": {
+                "digest": "0e08f73acfac\u2026"
+              },
+              "mem_available_mb": 701,
+              "bench": "b1",
+              "arm": "py_single_read",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 52428923,
+              "length": 26214400,
+              "cache": "cold",
+              "loadavg": "4.34 3.51 2.47 4/407 12312",
+              "spawn_s": 1.5
+            }
+          },
+          "py_streaming": {
+            "warm": {
+              "runs_ms": [
+                145.578,
+                146.757,
+                138.387,
+                181.37,
+                335.665
+              ],
+              "median_ms": 146.757,
+              "p95_ms": 335.665,
+              "rss_baseline_kb": 18568,
+              "rss_peak_kb": 20612,
+              "hwm_reset": true,
+              "output": {
+                "digest": "0e08f73acfac\u2026"
+              },
+              "mem_available_mb": 647,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 52428923,
+              "length": 26214400,
+              "cache": "warm",
+              "loadavg": "4.34 3.51 2.47 3/405 12333",
+              "spawn_s": 1.5
+            },
+            "cold": {
+              "runs_ms": [
+                190.61,
+                184.736,
+                180.44,
+                179.82,
+                169.044
+              ],
+              "median_ms": 180.44,
+              "p95_ms": 190.61,
+              "rss_baseline_kb": 18568,
+              "rss_peak_kb": 20612,
+              "hwm_reset": true,
+              "output": {
+                "digest": "0e08f73acfac\u2026"
+              },
+              "mem_available_mb": 635,
+              "bench": "b1",
+              "arm": "py_streaming",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 52428923,
+              "length": 26214400,
+              "cache": "cold",
+              "loadavg": "4.34 3.51 2.47 5/402 12337",
+              "spawn_s": 1.2
+            }
+          },
+          "c_pread": {
+            "warm": {
+              "runs_ms": [
+                449.592,
+                324.69,
+                401.974,
+                356.331,
+                345.504
+              ],
+              "median_ms": 356.331,
+              "p95_ms": 449.592,
+              "rss_baseline_kb": 18592,
+              "rss_peak_kb": 19684,
+              "hwm_reset": true,
+              "output": {
+                "digest": "0e08f73acfac\u2026"
+              },
+              "mem_available_mb": 669,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 52428923,
+              "length": 26214400,
+              "cache": "warm",
+              "loadavg": "4.31 3.52 2.47 4/407 12374",
+              "spawn_s": 2.6
+            },
+            "cold": {
+              "runs_ms": [
+                410.924,
+                389.582,
+                353.353,
+                346.969,
+                383.154
+              ],
+              "median_ms": 383.154,
+              "p95_ms": 410.924,
+              "rss_baseline_kb": 18552,
+              "rss_peak_kb": 19644,
+              "hwm_reset": true,
+              "output": {
+                "digest": "0e08f73acfac\u2026"
+              },
+              "mem_available_mb": 669,
+              "bench": "b1",
+              "arm": "c_pread",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 52428923,
+              "length": 26214400,
+              "cache": "cold",
+              "loadavg": "4.31 3.52 2.47 7/405 12385",
+              "spawn_s": 2.3
+            }
+          },
+          "c_mmap": {
+            "warm": {
+              "runs_ms": [
+                371.84,
+                423.919,
+                394.926,
+                503.12,
+                359.835
+              ],
+              "median_ms": 394.926,
+              "p95_ms": 503.12,
+              "rss_baseline_kb": 18596,
+              "rss_peak_kb": 44176,
+              "hwm_reset": true,
+              "output": {
+                "digest": "0e08f73acfac\u2026"
+              },
+              "mem_available_mb": 657,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 52428923,
+              "length": 26214400,
+              "cache": "warm",
+              "loadavg": "4.44 3.56 2.49 3/406 12419",
+              "spawn_s": 2.7
+            },
+            "cold": {
+              "runs_ms": [
+                436.556,
+                453.656,
+                428.2,
+                474.656,
+                432.742
+              ],
+              "median_ms": 436.556,
+              "p95_ms": 474.656,
+              "rss_baseline_kb": 18584,
+              "rss_peak_kb": 44160,
+              "hwm_reset": true,
+              "output": {
+                "digest": "0e08f73acfac\u2026"
+              },
+              "mem_available_mb": 660,
+              "bench": "b1",
+              "arm": "c_mmap",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_100mb.bin",
+              "offset": 52428923,
+              "length": 26214400,
+              "cache": "cold",
+              "loadavg": "4.44 3.56 2.49 2/403 12430",
+              "spawn_s": 2.8
+            }
+          }
+        },
+        "parity_all_arms_agree": true
+      }
+    ],
+    "parity": {
+      "all_arms_agree": true
+    }
+  },
+  "b2_jsonl_scan": {
+    "files": [
+      {
+        "file": "events_10mb.jsonl",
+        "context": {
+          "loadavg": "4.44 3.56 2.49 1/402 12430",
+          "mem_available_mb": 716,
+          "ts": "07:52:34"
+        },
+        "arms": {
+          "py_stream_real": {
+            "warm": {
+              "runs_ms": [
+                204.002,
+                122.199,
+                146.909,
+                116.543,
+                117.641
+              ],
+              "median_ms": 122.199,
+              "p95_ms": 204.002,
+              "rss_baseline_kb": 18576,
+              "rss_peak_kb": 25792,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": 5339,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ]
+              },
+              "mem_available_mb": 715,
+              "bench": "b2",
+              "arm": "py_stream_real",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.25 3.53 2.49 2/405 12436",
+              "spawn_s": 1.3
+            },
+            "cold": {
+              "runs_ms": [
+                188.112,
+                118.23,
+                128.735,
+                122.726,
+                122.718
+              ],
+              "median_ms": 122.726,
+              "p95_ms": 188.112,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 25792,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": 5339,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ]
+              },
+              "mem_available_mb": 740,
+              "bench": "b2",
+              "arm": "py_stream_real",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "4.25 3.53 2.49 2/404 12447",
+              "spawn_s": 0.8
+            }
+          },
+          "py_inspect_full": {
+            "warm": {
+              "runs_ms": [
+                176.446,
+                190.875,
+                178.629,
+                185.046,
+                175.437
+              ],
+              "median_ms": 178.629,
+              "p95_ms": 190.875,
+              "rss_baseline_kb": 20752,
+              "rss_peak_kb": 25788,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": 5339,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ],
+                "checksum": "2b540649918a\u2026"
+              },
+              "mem_available_mb": 729,
+              "bench": "b2",
+              "arm": "py_inspect_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.25 3.53 2.49 1/403 12452",
+              "spawn_s": 1.3
+            },
+            "cold": {
+              "runs_ms": [
+                178.77,
+                176.908,
+                187.25,
+                180.545,
+                180.861
+              ],
+              "median_ms": 180.545,
+              "p95_ms": 187.25,
+              "rss_baseline_kb": 20756,
+              "rss_peak_kb": 25792,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": 5339,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ],
+                "checksum": "2b540649918a\u2026"
+              },
+              "mem_available_mb": 691,
+              "bench": "b2",
+              "arm": "py_inspect_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "4.25 3.53 2.49 2/405 12458",
+              "spawn_s": 1.1
+            }
+          },
+          "py_scan_only": {
+            "warm": {
+              "runs_ms": [
+                22.577,
+                24.419,
+                22.224,
+                22.563,
+                23.447
+              ],
+              "median_ms": 22.577,
+              "p95_ms": 24.419,
+              "rss_baseline_kb": 18560,
+              "rss_peak_kb": 23692,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ]
+              },
+              "mem_available_mb": 676,
+              "bench": "b2",
+              "arm": "py_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.25 3.53 2.49 2/405 12459",
+              "spawn_s": 0.3
+            },
+            "cold": {
+              "runs_ms": [
+                34.37,
+                32.466,
+                32.324,
+                29.156,
+                29.175
+              ],
+              "median_ms": 32.324,
+              "p95_ms": 34.37,
+              "rss_baseline_kb": 18584,
+              "rss_peak_kb": 23716,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ]
+              },
+              "mem_available_mb": 657,
+              "bench": "b2",
+              "arm": "py_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "4.25 3.53 2.49 2/406 12461",
+              "spawn_s": 0.3
+            }
+          },
+          "c_scan_full": {
+            "warm": {
+              "runs_ms": [
+                33.828,
+                34.059,
+                33.597,
+                33.003,
+                33.778
+              ],
+              "median_ms": 33.778,
+              "p95_ms": 34.059,
+              "rss_baseline_kb": 18560,
+              "rss_peak_kb": 19608,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": 5339,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ]
+              },
+              "mem_available_mb": 648,
+              "bench": "b2",
+              "arm": "c_scan_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.25 3.53 2.49 1/403 12464",
+              "spawn_s": 0.3
+            },
+            "cold": {
+              "runs_ms": [
+                40.454,
+                39.659,
+                39.304,
+                40.441,
+                39.166
+              ],
+              "median_ms": 39.659,
+              "p95_ms": 40.454,
+              "rss_baseline_kb": 18576,
+              "rss_peak_kb": 19624,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": 5339,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ]
+              },
+              "mem_available_mb": 659,
+              "bench": "b2",
+              "arm": "c_scan_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "4.25 3.53 2.49 1/403 12465",
+              "spawn_s": 0.3
+            }
+          },
+          "c_scan_only": {
+            "warm": {
+              "runs_ms": [
+                2.947,
+                2.711,
+                2.641,
+                2.66,
+                2.831
+              ],
+              "median_ms": 2.711,
+              "p95_ms": 2.947,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 19624,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ]
+              },
+              "mem_available_mb": 656,
+              "bench": "b2",
+              "arm": "c_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.25 3.53 2.49 1/403 12466",
+              "spawn_s": 0.1
+            },
+            "cold": {
+              "runs_ms": [
+                18.03,
+                16.81,
+                17.358,
+                16.809,
+                17.282
+              ],
+              "median_ms": 17.282,
+              "p95_ms": 18.03,
+              "rss_baseline_kb": 18560,
+              "rss_peak_kb": 19604,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ]
+              },
+              "mem_available_mb": 656,
+              "bench": "b2",
+              "arm": "c_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "4.25 3.53 2.49 1/403 12467",
+              "spawn_s": 0.2
+            }
+          },
+          "wasm_scan": {
+            "warm": {
+              "runs_ms": [
+                100.991,
+                96.695,
+                112.885,
+                118.804,
+                136.818
+              ],
+              "median_ms": 112.885,
+              "p95_ms": 136.818,
+              "rss_baseline_kb": 37056,
+              "rss_peak_kb": 42828,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ]
+              },
+              "mem_available_mb": 692,
+              "bench": "b2",
+              "arm": "wasm_scan",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "3.99 3.49 2.48 2/413 12481",
+              "spawn_s": 0.9
+            },
+            "cold": {
+              "runs_ms": [
+                178.657,
+                103.778,
+                100.88,
+                99.346,
+                99.332
+              ],
+              "median_ms": 100.88,
+              "p95_ms": 178.657,
+              "rss_baseline_kb": 37172,
+              "rss_peak_kb": 44416,
+              "hwm_reset": true,
+              "output": {
+                "rows": 8894,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1183
+                  ],
+                  [
+                    1183,
+                    1132
+                  ],
+                  [
+                    2315,
+                    1141
+                  ],
+                  [
+                    3456,
+                    1122
+                  ],
+                  [
+                    4578,
+                    1179
+                  ]
+                ]
+              },
+              "mem_available_mb": 688,
+              "bench": "b2",
+              "arm": "wasm_scan",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "3.99 3.49 2.48 1/410 12493",
+              "spawn_s": 0.8
+            }
+          }
+        },
+        "parity_rows_all_arms": true,
+        "parity_first_bad_index": true,
+        "parity_scan_samples": true
+      },
+      {
+        "file": "events_50mb.jsonl",
+        "context": {
+          "loadavg": "3.99 3.49 2.48 1/401 12493",
+          "mem_available_mb": 711,
+          "ts": "07:52:42"
+        },
+        "arms": {
+          "py_stream_real": {
+            "warm": {
+              "runs_ms": [
+                907.678,
+                1137.77,
+                1508.824,
+                1184.668,
+                1208.806
+              ],
+              "median_ms": 1184.668,
+              "p95_ms": 1508.824,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 25800,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": 26678,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ]
+              },
+              "mem_available_mb": 704,
+              "bench": "b2",
+              "arm": "py_stream_real",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.23 3.55 2.51 7/404 12518",
+              "spawn_s": 6.8
+            },
+            "cold": {
+              "runs_ms": [
+                1189.921,
+                792.446,
+                1137.25,
+                702.261,
+                745.154
+              ],
+              "median_ms": 792.446,
+              "p95_ms": 1189.921,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 25680,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": 26678,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ]
+              },
+              "mem_available_mb": 670,
+              "bench": "b2",
+              "arm": "py_stream_real",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "4.05 3.52 2.50 2/404 12527",
+              "spawn_s": 4.8
+            }
+          },
+          "py_inspect_full": {
+            "warm": {
+              "runs_ms": [
+                885.535,
+                902.179,
+                833.517,
+                1038.728,
+                860.167
+              ],
+              "median_ms": 885.535,
+              "p95_ms": 1038.728,
+              "rss_baseline_kb": 20740,
+              "rss_peak_kb": 25784,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": 26678,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ],
+                "checksum": "8d6b43def019\u2026"
+              },
+              "mem_available_mb": 707,
+              "bench": "b2",
+              "arm": "py_inspect_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "3.97 3.51 2.51 2/404 12555",
+              "spawn_s": 5.6
+            },
+            "cold": {
+              "runs_ms": [
+                928.868,
+                970.601,
+                1067.055,
+                921.061,
+                1669.372
+              ],
+              "median_ms": 970.601,
+              "p95_ms": 1669.372,
+              "rss_baseline_kb": 20788,
+              "rss_peak_kb": 25832,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": 26678,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ],
+                "checksum": "8d6b43def019\u2026"
+              },
+              "mem_available_mb": 662,
+              "bench": "b2",
+              "arm": "py_inspect_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "3.81 3.49 2.50 8/407 12589",
+              "spawn_s": 5.7
+            }
+          },
+          "py_scan_only": {
+            "warm": {
+              "runs_ms": [
+                195.428,
+                240.277,
+                158.955,
+                154.615,
+                207.345
+              ],
+              "median_ms": 195.428,
+              "p95_ms": 240.277,
+              "rss_baseline_kb": 18564,
+              "rss_peak_kb": 23696,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ]
+              },
+              "mem_available_mb": 672,
+              "bench": "b2",
+              "arm": "py_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "3.66 3.46 2.50 2/404 12607",
+              "spawn_s": 1.2
+            },
+            "cold": {
+              "runs_ms": [
+                192.962,
+                146.879,
+                143.983,
+                145.0,
+                176.288
+              ],
+              "median_ms": 146.879,
+              "p95_ms": 192.962,
+              "rss_baseline_kb": 18572,
+              "rss_peak_kb": 23704,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ]
+              },
+              "mem_available_mb": 680,
+              "bench": "b2",
+              "arm": "py_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "3.66 3.46 2.50 2/402 12611",
+              "spawn_s": 1.0
+            }
+          },
+          "c_scan_full": {
+            "warm": {
+              "runs_ms": [
+                262.416,
+                278.607,
+                205.247,
+                251.008,
+                318.527
+              ],
+              "median_ms": 262.416,
+              "p95_ms": 318.527,
+              "rss_baseline_kb": 18588,
+              "rss_peak_kb": 19636,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": 26678,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ]
+              },
+              "mem_available_mb": 691,
+              "bench": "b2",
+              "arm": "c_scan_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "3.66 3.46 2.50 3/405 12621",
+              "spawn_s": 1.7
+            },
+            "cold": {
+              "runs_ms": [
+                209.38,
+                250.31,
+                303.174,
+                243.406,
+                218.201
+              ],
+              "median_ms": 243.406,
+              "p95_ms": 303.174,
+              "rss_baseline_kb": 18684,
+              "rss_peak_kb": 19732,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": 26678,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ]
+              },
+              "mem_available_mb": 719,
+              "bench": "b2",
+              "arm": "c_scan_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "3.66 3.46 2.50 2/408 12641",
+              "spawn_s": 1.4
+            }
+          },
+          "c_scan_only": {
+            "warm": {
+              "runs_ms": [
+                17.219,
+                21.456,
+                15.767,
+                30.011,
+                35.814
+              ],
+              "median_ms": 21.456,
+              "p95_ms": 35.814,
+              "rss_baseline_kb": 18568,
+              "rss_peak_kb": 19612,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ]
+              },
+              "mem_available_mb": 699,
+              "bench": "b2",
+              "arm": "c_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "3.53 3.44 2.50 9/405 12654",
+              "spawn_s": 0.3
+            },
+            "cold": {
+              "runs_ms": [
+                64.499,
+                58.761,
+                53.875,
+                57.688,
+                74.934
+              ],
+              "median_ms": 58.761,
+              "p95_ms": 74.934,
+              "rss_baseline_kb": 18684,
+              "rss_peak_kb": 19728,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ]
+              },
+              "mem_available_mb": 688,
+              "bench": "b2",
+              "arm": "c_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "3.53 3.44 2.50 3/405 12656",
+              "spawn_s": 0.5
+            }
+          },
+          "wasm_scan": {
+            "warm": {
+              "runs_ms": [
+                664.09,
+                678.488,
+                748.93,
+                671.955,
+                615.295
+              ],
+              "median_ms": 671.955,
+              "p95_ms": 748.93,
+              "rss_baseline_kb": 36848,
+              "rss_peak_kb": 45340,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ]
+              },
+              "mem_available_mb": 710,
+              "bench": "b2",
+              "arm": "wasm_scan",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "3.41 3.41 2.50 3/414 12709",
+              "spawn_s": 4.5
+            },
+            "cold": {
+              "runs_ms": [
+                669.809,
+                628.638,
+                655.347,
+                761.348,
+                666.808
+              ],
+              "median_ms": 666.808,
+              "p95_ms": 761.348,
+              "rss_baseline_kb": 36976,
+              "rss_peak_kb": 46268,
+              "hwm_reset": true,
+              "output": {
+                "rows": 44464,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1139
+                  ],
+                  [
+                    1139,
+                    1184
+                  ],
+                  [
+                    2323,
+                    1164
+                  ],
+                  [
+                    3487,
+                    1175
+                  ],
+                  [
+                    4662,
+                    1200
+                  ]
+                ]
+              },
+              "mem_available_mb": 671,
+              "bench": "b2",
+              "arm": "wasm_scan",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_50mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "3.41 3.41 2.50 1/411 12735",
+              "spawn_s": 3.7
+            }
+          }
+        },
+        "parity_rows_all_arms": true,
+        "parity_first_bad_index": true,
+        "parity_scan_samples": true
+      },
+      {
+        "file": "events_100mb.jsonl",
+        "context": {
+          "loadavg": "3.41 3.41 2.50 1/402 12735",
+          "mem_available_mb": 671,
+          "ts": "07:53:19"
+        },
+        "arms": {
+          "py_stream_real": {
+            "warm": {
+              "runs_ms": [
+                1694.74,
+                1749.287,
+                1737.561,
+                1752.181,
+                1739.853
+              ],
+              "median_ms": 1739.853,
+              "p95_ms": 1752.181,
+              "rss_baseline_kb": 18556,
+              "rss_peak_kb": 25772,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": 53346,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ]
+              },
+              "mem_available_mb": 672,
+              "bench": "b2",
+              "arm": "py_stream_real",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "3.34 3.40 2.50 3/408 12842",
+              "spawn_s": 10.8
+            },
+            "cold": {
+              "runs_ms": [
+                2686.488,
+                1647.186,
+                1630.501,
+                2258.604,
+                3490.135
+              ],
+              "median_ms": 2258.604,
+              "p95_ms": 3490.135,
+              "rss_baseline_kb": 18540,
+              "rss_peak_kb": 25756,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": 53346,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ]
+              },
+              "mem_available_mb": 654,
+              "bench": "b2",
+              "arm": "py_stream_real",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "3.18 3.36 2.50 3/405 12900",
+              "spawn_s": 11.9
+            }
+          },
+          "py_inspect_full": {
+            "warm": {
+              "runs_ms": [
+                2644.5,
+                2501.683,
+                1965.872,
+                1924.581,
+                2118.742
+              ],
+              "median_ms": 2118.742,
+              "p95_ms": 2644.5,
+              "rss_baseline_kb": 20792,
+              "rss_peak_kb": 25828,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": 53346,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ],
+                "checksum": "15565bfdb04c\u2026"
+              },
+              "mem_available_mb": 699,
+              "bench": "b2",
+              "arm": "py_inspect_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "2.85 3.28 2.49 1/403 12952",
+              "spawn_s": 14.3
+            },
+            "cold": {
+              "runs_ms": [
+                2550.029,
+                2338.268,
+                3783.562,
+                2716.934,
+                2695.347
+              ],
+              "median_ms": 2695.347,
+              "p95_ms": 3783.562,
+              "rss_baseline_kb": 20792,
+              "rss_peak_kb": 25828,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": 53346,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ],
+                "checksum": "15565bfdb04c\u2026"
+              },
+              "mem_available_mb": 697,
+              "bench": "b2",
+              "arm": "py_inspect_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "2.81 3.25 2.49 1/404 13065",
+              "spawn_s": 14.3
+            }
+          },
+          "py_scan_only": {
+            "warm": {
+              "runs_ms": [
+                362.855,
+                366.743,
+                304.244,
+                318.567,
+                299.821
+              ],
+              "median_ms": 318.567,
+              "p95_ms": 366.743,
+              "rss_baseline_kb": 18516,
+              "rss_peak_kb": 23644,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ]
+              },
+              "mem_available_mb": 681,
+              "bench": "b2",
+              "arm": "py_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "2.81 3.25 2.49 3/405 13075",
+              "spawn_s": 2.2
+            },
+            "cold": {
+              "runs_ms": [
+                394.692,
+                459.312,
+                464.979,
+                391.477,
+                377.139
+              ],
+              "median_ms": 394.692,
+              "p95_ms": 464.979,
+              "rss_baseline_kb": 18568,
+              "rss_peak_kb": 23696,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ]
+              },
+              "mem_available_mb": 701,
+              "bench": "b2",
+              "arm": "py_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "2.81 3.25 2.49 3/409 13099",
+              "spawn_s": 2.3
+            }
+          },
+          "c_scan_full": {
+            "warm": {
+              "runs_ms": [
+                678.138,
+                464.114,
+                538.163,
+                482.132,
+                489.469
+              ],
+              "median_ms": 489.469,
+              "p95_ms": 678.138,
+              "rss_baseline_kb": 18580,
+              "rss_peak_kb": 19628,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": 53346,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ]
+              },
+              "mem_available_mb": 740,
+              "bench": "b2",
+              "arm": "c_scan_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "3.39 3.36 2.53 3/406 13123",
+              "spawn_s": 3.3
+            },
+            "cold": {
+              "runs_ms": [
+                843.813,
+                567.419,
+                524.18,
+                784.323,
+                542.218
+              ],
+              "median_ms": 567.419,
+              "p95_ms": 843.813,
+              "rss_baseline_kb": 18560,
+              "rss_peak_kb": 19608,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": 53346,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ]
+              },
+              "mem_available_mb": 715,
+              "bench": "b2",
+              "arm": "c_scan_full",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "4.00 3.49 2.58 9/405 13160",
+              "spawn_s": 3.4
+            }
+          },
+          "c_scan_only": {
+            "warm": {
+              "runs_ms": [
+                33.242,
+                36.328,
+                31.62,
+                37.842,
+                35.977
+              ],
+              "median_ms": 35.977,
+              "p95_ms": 37.842,
+              "rss_baseline_kb": 18536,
+              "rss_peak_kb": 19580,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ]
+              },
+              "mem_available_mb": 767,
+              "bench": "b2",
+              "arm": "c_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.00 3.49 2.58 9/406 13165",
+              "spawn_s": 0.4
+            },
+            "cold": {
+              "runs_ms": [
+                168.698,
+                224.36,
+                150.506,
+                143.081,
+                176.543
+              ],
+              "median_ms": 168.698,
+              "p95_ms": 224.36,
+              "rss_baseline_kb": 18688,
+              "rss_peak_kb": 19732,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ]
+              },
+              "mem_available_mb": 743,
+              "bench": "b2",
+              "arm": "c_scan_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "4.00 3.49 2.58 4/409 13172",
+              "spawn_s": 1.0
+            }
+          },
+          "wasm_scan": {
+            "warm": {
+              "runs_ms": [
+                1325.031,
+                1247.178,
+                1959.962,
+                1944.966,
+                1667.011
+              ],
+              "median_ms": 1667.011,
+              "p95_ms": 1959.962,
+              "rss_baseline_kb": 36992,
+              "rss_peak_kb": 45408,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ]
+              },
+              "mem_available_mb": 709,
+              "bench": "b2",
+              "arm": "wasm_scan",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.53 3.62 2.63 2/414 13264",
+              "spawn_s": 10.1
+            },
+            "cold": {
+              "runs_ms": [
+                1146.075,
+                1111.321,
+                1089.311,
+                1118.918,
+                1502.447
+              ],
+              "median_ms": 1118.918,
+              "p95_ms": 1502.447,
+              "rss_baseline_kb": 37136,
+              "rss_peak_kb": 46528,
+              "hwm_reset": true,
+              "output": {
+                "rows": 88914,
+                "first_bad_index": null,
+                "first_n": [
+                  [
+                    0,
+                    1160
+                  ],
+                  [
+                    1160,
+                    1183
+                  ],
+                  [
+                    2343,
+                    1121
+                  ],
+                  [
+                    3464,
+                    1228
+                  ],
+                  [
+                    4692,
+                    1236
+                  ]
+                ]
+              },
+              "mem_available_mb": 673,
+              "bench": "b2",
+              "arm": "wasm_scan",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_100mb.jsonl",
+              "offset": 0,
+              "length": 0,
+              "cache": "cold",
+              "loadavg": "4.25 3.58 2.62 2/414 13321",
+              "spawn_s": 6.2
+            }
+          }
+        },
+        "parity_rows_all_arms": true,
+        "parity_first_bad_index": true,
+        "parity_scan_samples": true
+      }
+    ],
+    "parity": {
+      "rows_all_arms": true,
+      "first_bad_index": true,
+      "scan_samples": true
+    }
+  },
+  "b3_bundle_profile": {
+    "trees": [
+      {
+        "tree": "bundles_100",
+        "context": {
+          "loadavg": "4.25 3.58 2.62 3/405 13321",
+          "mem_available_mb": 652,
+          "ts": "07:54:39"
+        },
+        "arms": {
+          "parse_e2e": {
+            "warm": {
+              "runs_ms": [
+                1174.006,
+                1011.766
+              ],
+              "median_ms": 1092.886,
+              "p95_ms": 1174.006,
+              "rss_baseline_kb": 22764,
+              "rss_peak_kb": 22884,
+              "hwm_reset": true,
+              "output": {
+                "records": 1100,
+                "warnings": 0,
+                "bundles": 100
+              },
+              "mem_available_mb": 664,
+              "bench": "b3",
+              "arm": "parse_e2e",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bundles_100",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.23 3.58 2.63 6/405 13336",
+              "spawn_s": 5.3
+            }
+          },
+          "embed_only": {
+            "warm": {
+              "runs_ms": [
+                908.965,
+                803.417
+              ],
+              "median_ms": 856.191,
+              "p95_ms": 908.965,
+              "rss_baseline_kb": 19736,
+              "rss_peak_kb": 19828,
+              "hwm_reset": true,
+              "output": {
+                "vectors": 57600,
+                "texts": 900
+              },
+              "mem_available_mb": 682,
+              "bench": "b3",
+              "arm": "embed_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bundles_100",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.37 3.62 2.65 2/406 13351",
+              "spawn_s": 2.6
+            }
+          }
+        }
+      },
+      {
+        "tree": "bundles_1000",
+        "context": {
+          "loadavg": "4.37 3.62 2.65 2/405 13351",
+          "mem_available_mb": 688,
+          "ts": "07:54:47"
+        },
+        "arms": {
+          "parse_e2e": {
+            "warm": {
+              "runs_ms": [
+                23439.647,
+                16637.06
+              ],
+              "median_ms": 20038.353,
+              "p95_ms": 23439.647,
+              "rss_baseline_kb": 23820,
+              "rss_peak_kb": 24080,
+              "hwm_reset": true,
+              "output": {
+                "records": 11000,
+                "warnings": 0,
+                "bundles": 1000
+              },
+              "mem_available_mb": 691,
+              "bench": "b3",
+              "arm": "parse_e2e",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bundles_1000",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.43 3.82 2.80 5/406 14064",
+              "spawn_s": 80.9
+            }
+          },
+          "embed_only": {
+            "warm": {
+              "runs_ms": [
+                10555.024,
+                9260.901
+              ],
+              "median_ms": 9907.962,
+              "p95_ms": 10555.024,
+              "rss_baseline_kb": 22576,
+              "rss_peak_kb": 22672,
+              "hwm_reset": true,
+              "output": {
+                "vectors": 576000,
+                "texts": 9000
+              },
+              "mem_available_mb": 662,
+              "bench": "b3",
+              "arm": "embed_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bundles_1000",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "5.92 4.25 2.98 7/408 14421",
+              "spawn_s": 30.0
+            }
+          }
+        }
+      },
+      {
+        "tree": "bundles_2500",
+        "context": {
+          "loadavg": "5.92 4.25 2.98 10/407 14421",
+          "mem_available_mb": 672,
+          "ts": "07:56:38"
+        },
+        "arms": {
+          "parse_e2e": {
+            "warm": {
+              "runs_ms": [
+                36231.033,
+                38817.077
+              ],
+              "median_ms": 37524.055,
+              "p95_ms": 38817.077,
+              "rss_baseline_kb": 25616,
+              "rss_peak_kb": 26280,
+              "hwm_reset": true,
+              "output": {
+                "records": 27500,
+                "warnings": 0,
+                "bundles": 2500
+              },
+              "mem_available_mb": 683,
+              "bench": "b3",
+              "arm": "parse_e2e",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bundles_2500",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "4.77 4.50 3.28 6/403 15840",
+              "spawn_s": 156.1
+            }
+          },
+          "embed_only": {
+            "warm": {
+              "runs_ms": [
+                14050.829,
+                13979.705
+              ],
+              "median_ms": 14015.267,
+              "p95_ms": 14050.829,
+              "rss_baseline_kb": 27504,
+              "rss_peak_kb": 27596,
+              "hwm_reset": true,
+              "output": {
+                "vectors": 1440000,
+                "texts": 22500
+              },
+              "mem_available_mb": 686,
+              "bench": "b3",
+              "arm": "embed_only",
+              "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bundles_2500",
+              "offset": 0,
+              "length": 0,
+              "cache": "warm",
+              "loadavg": "3.33 4.15 3.22 5/404 16166",
+              "spawn_s": 49.2
+            }
+          }
+        }
+      }
+    ]
+  },
+  "b4_manifest_verify": {
+    "arms": {
+      "py_hashlib": {
+        "warm": {
+          "runs_ms": [
+            1965.489,
+            2003.521,
+            1906.243,
+            1867.164,
+            2010.8
+          ],
+          "median_ms": 1965.489,
+          "p95_ms": 2010.8,
+          "rss_baseline_kb": 18572,
+          "rss_peak_kb": 18700,
+          "hwm_reset": true,
+          "output": {
+            "files_verified": 8
+          },
+          "mem_available_mb": 681,
+          "bench": "b4",
+          "arm": "py_hashlib",
+          "path": "",
+          "offset": 0,
+          "length": 0,
+          "cache": "warm",
+          "loadavg": "4.31 4.31 3.29 10/407 16371",
+          "spawn_s": 20.9
+        },
+        "cold": {
+          "runs_ms": [
+            9563.411,
+            5660.383,
+            3149.601,
+            3496.666,
+            2566.368
+          ],
+          "median_ms": 3496.666,
+          "p95_ms": 9563.411,
+          "rss_baseline_kb": 18564,
+          "rss_peak_kb": 18520,
+          "hwm_reset": true,
+          "output": {
+            "files_verified": 8
+          },
+          "mem_available_mb": 708,
+          "bench": "b4",
+          "arm": "py_hashlib",
+          "path": "",
+          "offset": 0,
+          "length": 0,
+          "cache": "cold",
+          "loadavg": "4.99 4.48 3.38 3/405 16508",
+          "spawn_s": 24.8
+        }
+      },
+      "c_pread": {
+        "warm": {
+          "runs_ms": [
+            3255.805,
+            3018.624,
+            3277.69,
+            3938.122,
+            4311.656
+          ],
+          "median_ms": 3277.69,
+          "p95_ms": 4311.656,
+          "rss_baseline_kb": 18604,
+          "rss_peak_kb": 19696,
+          "hwm_reset": true,
+          "output": {
+            "files_verified": 8
+          },
+          "mem_available_mb": 789,
+          "bench": "b4",
+          "arm": "c_pread",
+          "path": "",
+          "offset": 0,
+          "length": 0,
+          "cache": "warm",
+          "loadavg": "4.96 4.49 3.41 6/405 16648",
+          "spawn_s": 21.7
+        },
+        "cold": {
+          "runs_ms": [
+            4727.602,
+            4652.961,
+            4519.944,
+            4153.205,
+            4218.029
+          ],
+          "median_ms": 4519.944,
+          "p95_ms": 4727.602,
+          "rss_baseline_kb": 18580,
+          "rss_peak_kb": 19672,
+          "hwm_reset": true,
+          "output": {
+            "files_verified": 8
+          },
+          "mem_available_mb": 704,
+          "bench": "b4",
+          "arm": "c_pread",
+          "path": "",
+          "offset": 0,
+          "length": 0,
+          "cache": "cold",
+          "loadavg": "5.00 4.53 3.44 2/408 16855",
+          "spawn_s": 22.5
+        }
+      }
+    },
+    "parity_files_verified": true
+  },
+  "optional_boundary_check": {
+    "ok": true,
+    "c_pread_disabled": {
+      "skipped": "helper_unavailable",
+      "detail": "native helpers disabled (HOTMEM_SPIKE_DISABLE_NATIVE=1)",
+      "bench": "b1",
+      "arm": "c_pread",
+      "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/bin_1mb.bin",
+      "offset": 0,
+      "length": 1048576,
+      "cache": "warm",
+      "loadavg": "5.00 4.53 3.44 1/408 16856",
+      "spawn_s": 0.1
+    },
+    "wasm_scan_disabled": {
+      "skipped": "helper_unavailable",
+      "detail": "native helpers disabled (HOTMEM_SPIKE_DISABLE_NATIVE=1)",
+      "bench": "b2",
+      "arm": "wasm_scan",
+      "path": "/home/kenneth/projects/HotMem/bench/native_spike/corpus/events_10mb.jsonl",
+      "offset": 0,
+      "length": 0,
+      "cache": "warm",
+      "loadavg": "5.00 4.53 3.44 2/410 16859",
+      "spawn_s": 0.1
+    }
+  },
+  "total_s": 654.2,
+  "final_context": {
+    "loadavg": "5.00 4.53 3.44 2/409 16859",
+    "mem_available_mb": 705,
+    "ts": "08:01:34"
+  }
+}
