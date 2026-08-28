@@ -4,6 +4,15 @@ All notable changes to HotMem will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Performance follow-ups from the native helper spike (#87–#92)
+
+Work in progress — see PR for the unified acceptance criteria covering:
+single-read verified hydration (#87), streaming range hash (#88), JSONL
+inspection validation policy (#89), `embed_text` trigram batching (#90), and
+derived-vector-index polish (#92).
+
 ## [0.2.4] - 2026-08-28
 
 ### Added — Optional derived vector index (#49)
