@@ -5,6 +5,14 @@ Scope (#53):
     - Validate sampled lines are JSON; report the first malformed line offset
       in ``unsupported_reason`` instead of crashing (provenance, not outage).
     - O(file size) byte read, O(1) memory via buffered newline scanning.
+
+Validation policy (#89):
+    Inspection is ADVISORY — it never authorizes import, hydration, snapshot,
+    or provenance decisions. Default validation is "sampled": only lines
+    inside the ``sample_size`` window are parsed, and the result declares its
+    assurance via ``metadata["validation"]``. ``validation="full"`` keeps the
+    pre-#89 behavior (every line parsed) for consumers that need it.
+
 """
 
 from __future__ import annotations
@@ -18,6 +26,7 @@ from hotmem.storage import StorageAdapter, StorageMetadata
 from .base import FileInspection
 
 _READ_CHUNK = 1 << 20  # 1 MiB read window — constant memory regardless of file size.
+_VALIDATION_MODES = ("sampled", "full")
 
 
 class JSONLInspector:
@@ -31,10 +40,15 @@ class JSONLInspector:
         *,
         count_rows: bool = False,
         sample_size: int = 5,
+        validation: str = "sampled",
     ) -> FileInspection:
+        if validation not in _VALIDATION_MODES:
+            raise ValueError(
+                f"unknown validation mode {validation!r}; expected one of {_VALIDATION_MODES}"
+            )
         path = _resolve(uri)
         row_count, sample_rows, byte_ranges, unsupported_reason = _stream(
-            path, count_rows=count_rows, sample_size=sample_size
+            path, count_rows=count_rows, sample_size=sample_size, validation=validation
         )
 
         columns = _infer_columns(sample_rows)
@@ -51,7 +65,7 @@ class JSONLInspector:
             has_header=None,
             sample=sample_rows or None,
             byte_ranges=byte_ranges or None,
-            metadata={},
+            metadata={"validation": validation},
             unsupported_reason=unsupported_reason,
         )
 
@@ -67,16 +81,21 @@ def _stream(
     *,
     count_rows: bool,
     sample_size: int,
+    validation: str = "sampled",
 ) -> tuple[int | None, list[dict[str, Any]], list[tuple[int, int]], str | None]:
     """One streaming pass: count lines, collect a bounded sample, validate JSON.
 
     Counts newlines in fixed-size chunks (cheap, allocation-free) and samples
     the first ``sample_size`` complete records by capturing byte offsets.
+
+    ``validation="sampled"`` parses only lines inside the sample window
+    (declared advisory assurance, #89); ``"full"`` parses every line.
     """
     row_count = 0 if count_rows else None
     sample_rows: list[dict[str, Any]] = []
     byte_ranges: list[tuple[int, int]] = []
     unsupported_reason: str | None = None
+    full_validation = validation == "full"
 
     line_index = 0
     line_start = 0
@@ -91,7 +110,7 @@ def _stream(
                 if carry:
                     if count_rows and carry.strip():
                         row_count = (row_count or 0) + 1
-                    if unsupported_reason is None:
+                    if unsupported_reason is None and (full_validation or line_index < sample_size):
                         unsupported_reason = _validate(carry, line_index, line_start)
                     _handle_line(
                         carry,
@@ -114,7 +133,7 @@ def _stream(
                 line_len = len(complete)
                 if count_rows and complete.strip():
                     row_count = (row_count or 0) + 1
-                if unsupported_reason is None:
+                if unsupported_reason is None and (full_validation or line_index < sample_size):
                     unsupported_reason = _validate(complete, line_index, line_start)
                 _handle_line(
                     complete,

@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed — JSONL inspection validation policy (#89)
+- Inspection is **advisory** and now declares its assurance level:
+  `FileInspection.metadata["validation"]` is `sampled` (default — only the
+  declared sample window is parsed) or `full`. A malformed line beyond the
+  sampled window is reported only under `validation="full"`; `row_count`
+  semantics are unchanged. Full validation remains available via
+  `inspect_file(..., validation="full")` and `hotmem inspect
+  --full-validation`. Measured: 34 ms vs 115 ms per 11.6 MB file
+  (~5.5x at 100 MB per the spike baseline). Authoritative verification of
+  canonical content is unaffected — provenance checksums, not inspection.
+
 ### Changed — streaming verification for large ranges (#88)
 - `provenance.verify_range` hashes ranges above `STREAM_VERIFY_THRESHOLD`
   (8 MiB) while streaming through the new optional adapter capability

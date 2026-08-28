@@ -35,6 +35,7 @@ class CSVInspector:
         *,
         count_rows: bool = False,
         sample_size: int = 5,
+        validation: str = "sampled",  # noqa: ARG002 — JSON validation is JSONL-only
     ) -> FileInspection:
         head = adapter.read_range(uri, 0, min(_SNIFF_BYTES, meta["size"] or 0))
         text = head.decode("utf-8", errors="replace")

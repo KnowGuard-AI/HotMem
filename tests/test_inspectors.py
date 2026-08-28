@@ -149,6 +149,48 @@ def test_jsonl_chunk_spanning_line_offsets_are_exact(tmp_path):
     assert insp.byte_ranges == expected
 
 
+def test_jsonl_sampled_validation_reports_window_and_declares_assurance(tmp_path):
+    """#89: a malformed line inside the sample window is reported in both
+    modes; the result always declares its assurance level via metadata."""
+    path = tmp_path / "window.jsonl"
+    path.write_text('{"a": 1}\n{broken}\n{"a": 3}\n')
+
+    sampled = inspect_file(str(path), count_rows=True, sample_size=5)
+    assert sampled.unsupported_reason is not None
+    assert "line 1" in sampled.unsupported_reason
+    assert sampled.metadata["validation"] == "sampled"
+
+    full = inspect_file(str(path), count_rows=True, sample_size=5, validation="full")
+    assert full.unsupported_reason == sampled.unsupported_reason
+    assert full.metadata["validation"] == "full"
+
+
+def test_jsonl_sampled_validation_skips_lines_beyond_window(tmp_path):
+    """#89: a malformed line beyond the sampled window is only reported with
+    validation='full' — sampled inspection declares reduced assurance, and
+    row_count (validation-independent) still counts every non-blank line."""
+    path = tmp_path / "late.jsonl"
+    lines = [json.dumps({"i": i}) for i in range(5)] + ["{broken late}", json.dumps({"i": 9})]
+    path.write_text("\n".join(lines) + "\n")
+
+    sampled = inspect_file(str(path), count_rows=True, sample_size=5)
+    assert sampled.unsupported_reason is None
+    assert sampled.metadata["validation"] == "sampled"
+    assert sampled.row_count == 7
+
+    full = inspect_file(str(path), count_rows=True, sample_size=5, validation="full")
+    assert full.unsupported_reason is not None
+    assert "line 5" in full.unsupported_reason
+    assert full.metadata["validation"] == "full"
+
+
+def test_jsonl_validation_mode_is_validated(tmp_path):
+    path = tmp_path / "v.jsonl"
+    path.write_text('{"a": 1}\n')
+    with pytest.raises(ValueError):
+        inspect_file(str(path), validation="bogus")
+
+
 def test_jsonl_handles_no_trailing_newline(tmp_path):
     path = tmp_path / "notrail.jsonl"
     path.write_text('{"a": 1}\n{"a": 2}')  # no trailing newline

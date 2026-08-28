@@ -81,6 +81,7 @@ class FileInspector(Protocol):
         *,
         count_rows: bool = False,
         sample_size: int = 5,
+        validation: str = "sampled",  # JSONL-only; accepted for uniform dispatch
     ) -> FileInspection: ...
 
 
