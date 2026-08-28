@@ -1,0 +1,79 @@
+{
+  "generator": "gen_corpus.py",
+  "seed": 48,
+  "profile": "reduced",
+  "created": "2026-08-27T01:41:25Z",
+  "checksum_files": [
+    {
+      "name": "bin_1kb.bin",
+      "size": 1024,
+      "sha256": "13b413ae99f070dc77c5d604c6b902a8af440e6ad817ebb5aeeaf8d85ebef594"
+    },
+    {
+      "name": "bin_100kb.bin",
+      "size": 102400,
+      "sha256": "407f241da530674b6803b9b3fe2bad2e6bb8b6bce10a988d2c062c5ac248e075"
+    },
+    {
+      "name": "bin_1mb.bin",
+      "size": 1048576,
+      "sha256": "da992adb41e2c939a2207b611d8f81012d67e120f2906ac7c81af88dfd8c7df5"
+    },
+    {
+      "name": "bin_10mb.bin",
+      "size": 10485760,
+      "sha256": "931ff5c54c2cf812861679b87335ef2186c523c8a0c87c1c9a21ba7475f05227"
+    },
+    {
+      "name": "bin_100mb.bin",
+      "size": 104857600,
+      "sha256": "124c78b11c2590eb9d5778159b562190ca3bd50d146eb0979abbc5348ca829ba"
+    }
+  ],
+  "jsonl_files": [
+    {
+      "name": "events_10mb.jsonl",
+      "size": 10485937,
+      "rows": 8894,
+      "sha256": "2b540649918a3a84b10ed3509c7bcf5f0a488a7af0735d19878e62c5f3bb8db3",
+      "bad_line_index": 5339,
+      "bad_line_offset": 6292320
+    },
+    {
+      "name": "events_50mb.jsonl",
+      "size": 52429550,
+      "rows": 44464,
+      "sha256": "8d6b43def019c2c98679cebee538d9e883625b374146b2ee53a5beaf0207adb7",
+      "bad_line_index": 26678,
+      "bad_line_offset": 31457732
+    },
+    {
+      "name": "events_100mb.jsonl",
+      "size": 104857784,
+      "rows": 88914,
+      "sha256": "15565bfdb04cc4e66ecb9f88590da8224474fca30ba9b3761ccb772d11b4fca5",
+      "bad_line_index": 53346,
+      "bad_line_offset": 62915663
+    }
+  ],
+  "bundle_trees": [
+    {
+      "name": "bundles_100",
+      "count": 100,
+      "files": 700,
+      "tree_digest": "96b38eb510a4ef70124785121817da93d0d1619f6ad565a7eed072778f8761ea"
+    },
+    {
+      "name": "bundles_1000",
+      "count": 1000,
+      "files": 7000,
+      "tree_digest": "85d63479813bc350183ddb1c45eefd2e3e09b52fd876a4825cd4f5ab058d708d"
+    },
+    {
+      "name": "bundles_2500",
+      "count": 2500,
+      "files": 17500,
+      "tree_digest": "31523e64e8e68d8f73fb07ec24fea16b082095b4846b10902c038b916bd394da"
+    }
+  ]
+}
