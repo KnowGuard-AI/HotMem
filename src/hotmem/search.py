@@ -65,9 +65,9 @@ def _search_text(row: dict[str, Any]) -> str:
 
 def _fetch_candidates(
     db: MemoryDB,
-    query: str,
     query_vec: list[float],
     query_blob: bytes,
+    fts_rows: list[dict[str, Any]],
     include_archived: bool,
     vector_index: VectorIndex | None,
 ) -> list[dict[str, Any]]:
@@ -79,9 +79,10 @@ def _fetch_candidates(
 
     Accelerated (fresh index): the index supplies oversampled cosine
     candidate ids; those ids are re-fetched and re-scored in SQLite with the
-    same TTL-live/archived predicates, unioned with FTS match ids so text-only
-    matches are never lost. Ranking is recomputed downstream either way, so
-    both paths produce identical results.
+    same TTL-live/archived predicates, unioned with the FTS match ids
+    (already fetched once by the caller) so text-only matches are never
+    lost. Ranking is recomputed downstream either way, so both paths produce
+    identical results.
     """
     if (
         vector_index is not None
@@ -98,7 +99,6 @@ def _fetch_candidates(
             hits = []
         if hits:
             candidate_ids = [h["id"] for h in hits]
-            fts_rows = db.fts_search(query, include_archived=include_archived)
             candidate_ids += [r["id"] for r in fts_rows]
             # Dedupe, preserving order (index ranking first, FTS additions after).
             seen: set[str] = set()
@@ -137,10 +137,12 @@ def search_memories(
         query_vec = embed_text(query)
         query_blob = pack_embedding(query_vec)
 
+        # One FTS pass serves both candidate unioning and BM25 scoring (#92).
+        fts_rows = db.fts_search(query, include_archived=include_archived)
         candidates = _fetch_candidates(
-            db, query, query_vec, query_blob, include_archived, vector_index
+            db, query_vec, query_blob, fts_rows, include_archived, vector_index
         )
-        fts_scores = _normalize_bm25(db.fts_search(query, include_archived=include_archived))
+        fts_scores = _normalize_bm25(fts_rows)
 
         # Apply hybrid scoring
         scored = []

@@ -259,6 +259,44 @@ def test_rebuild_parity_includes_archived_when_requested(tmp_db: MemoryDB):
     assert "arch" in [m[0] for m in _messages(accelerated)]
 
 
+def test_search_by_ids_chunking_beyond_legacy_bind_limit(tmp_db: MemoryDB):
+    """#92: more candidate ids than SQLite's legacy 999-variable cap must
+    still work and stay order-identical to the deterministic full scan."""
+    ids = [f"m{i:04d}" for i in range(1100)]
+    for i, mid in enumerate(ids):
+        _add_fact(tmp_db, mid, f"chunk bind fact {i} invoice-{i % 7}")
+    query_vec = embed_text("invoice")
+    query_blob = pack_embedding(query_vec)
+
+    by_ids = tmp_db.search_by_ids(query_blob, ids)
+    full_scan = tmp_db.search_with_cosine(query_blob)
+    assert [r["id"] for r in by_ids] == [r["id"] for r in full_scan]
+    assert len(by_ids) == 1100
+
+
+def test_accelerated_search_runs_single_fts_pass(tmp_db: MemoryDB, monkeypatch: pytest.MonkeyPatch):
+    """#92: candidate unioning and BM25 normalization share one FTS query."""
+    _seed_store(tmp_db)
+    index = FakeVectorIndex()
+    rebuild_vector_index(tmp_db, index)
+
+    calls = {"n": 0}
+    original = tmp_db.fts_search
+
+    def counting(*args: Any, **kwargs: Any):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tmp_db, "fts_search", counting)
+
+    search_memories(tmp_db, "invoice", top_k=3, vector_index=index)
+    assert calls["n"] == 1
+
+    calls["n"] = 0
+    search_memories(tmp_db, "invoice", top_k=3)  # fallback path: also one pass
+    assert calls["n"] == 1
+
+
 def test_rebuild_on_null_index_is_noop(tmp_db: MemoryDB, tmp_path: Path):
     _add_fact(tmp_db, "1", "hello")
     index = get_vector_index(None, base_dir=tmp_path)

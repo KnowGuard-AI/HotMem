@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed — derived vector index polish (#92)
+- `search_by_ids` binds candidate ids in chunks of 900, so any configured
+  `oversample` stays under SQLite's legacy 999-variable cap; chunk results
+  are merged into the identical canonical order.
+- The accelerated search path runs a single FTS pass — candidate unioning
+  and BM25 normalization share one query (also true of the fallback path).
+- Swallowed Chroma delete/clear failures are now logged at warn level; the
+  derived index reuses `embed.unpack_embedding` for the blob format.
+
 ### Performance follow-ups from the native helper spike (#87–#92)
 
 Work in progress — see PR for the unified acceptance criteria covering:

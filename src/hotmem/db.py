@@ -34,6 +34,10 @@ from hotmem.trace import get_tracer
 
 _trace = get_tracer("db")
 
+# Ids bound per query in search_by_ids: stays under SQLite's legacy
+# 999-variable limit even with the embedding parameter plus headroom (#92).
+_SEARCH_BIND_CHUNK = 900
+
 # Single source of truth for the memories table column order. Drives INSERT
 # statement generation and SQLite-to-SQLite import projection so the three
 # write paths cannot drift.
@@ -871,22 +875,39 @@ class MemoryDB:
         ``search_with_cosine``, so ids that expired, were archived, or were
         deleted since indexing are filtered out here. Used by the accelerated
         search path (#49) to re-score vector-index candidates in SQLite.
+
+        Ids are bound in chunks of ``_SEARCH_BIND_CHUNK`` so any configured
+        ``oversample`` stays under SQLite's legacy 999-variable cap; chunk
+        results are merged and re-sorted into the same canonical order.
         """
         if not memory_ids:
             return []
         archived_clause = "" if include_archived else " AND promotion_state != 'ARCHIVED'"
-        placeholders = ", ".join("?" for _ in memory_ids)
-        rows = self._conn.execute(
-            f"""SELECT id, identifier, fact_text, fact_summary, importance,
-                       metadata_json, source, created_at,
-                       cosine_sim(embedding, ?) AS cosine_score
-                FROM memories
-                WHERE id IN ({placeholders})
-                  AND {_ttl_live()}{archived_clause}
-                ORDER BY cosine_score DESC, id ASC""",
-            (query_embedding, *memory_ids),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        results: list[dict[str, Any]] = []
+        for start in range(0, len(memory_ids), _SEARCH_BIND_CHUNK):
+            chunk = memory_ids[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"""SELECT id, identifier, fact_text, fact_summary, importance,
+                           metadata_json, source, created_at,
+                           cosine_sim(embedding, ?) AS cosine_score
+                    FROM memories
+                    WHERE id IN ({placeholders})
+                      AND {_ttl_live()}{archived_clause}""",
+                (query_embedding, *chunk),
+            ).fetchall()
+            results.extend(dict(r) for r in rows)
+        # Same total order as the per-chunk SQL ORDER BY: ids are unique, so
+        # (cosine DESC, id ASC) is deterministic. NULL cosine (no embedding)
+        # sorts last, matching SQLite's DESC default.
+        results.sort(
+            key=lambda r: (
+                r["cosine_score"] is None,
+                -(r["cosine_score"] or 0.0),
+                r["id"],
+            )
+        )
+        return results
 
     def all_rows(self, *, include_embedding: bool = False) -> list[dict[str, Any]]:
         """Return all memory rows as dicts (for snapshot export)."""
