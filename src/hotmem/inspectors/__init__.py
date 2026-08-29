@@ -7,7 +7,7 @@ Purpose:
     contents into SQLite.
 
 Interface:
-    inspect_file(uri, *, count_rows=False, sample_size=5) -> FileInspection
+    inspect_file(uri, *, count_rows=False, sample_size=5, validation="sampled") -> FileInspection
     get_inspector(uri) -> FileInspector
     UnsupportedFormatError — raised when no inspector handles a format
 
@@ -78,6 +78,7 @@ def inspect_file(
     *,
     count_rows: bool = False,
     sample_size: int = 5,
+    validation: str = "sampled",
 ) -> FileInspection:
     """Inspect a backing file and return provenance + light metadata.
 
@@ -86,7 +87,15 @@ def inspect_file(
     raised for remote schemes; ``UnsupportedFormatError`` for unknown
     formats; otherwise a FileInspection (which may carry
     ``unsupported_reason`` for a recognized-but-malformed file).
+
+    ``validation`` is advisory-assurance control for JSONL (#89):
+    "sampled" (default) parses only the sample window and declares the
+    level via ``FileInspection.metadata["validation"]``; "full" parses
+    every line. Inspection is advisory — it never authorizes import,
+    hydration, snapshot, or provenance decisions.
     """
     adapter, meta = resolve_adapter(uri)
     inspector = _inspector_for_format(meta["format"])
-    return inspector.inspect(uri, adapter, meta, count_rows=count_rows, sample_size=sample_size)
+    return inspector.inspect(
+        uri, adapter, meta, count_rows=count_rows, sample_size=sample_size, validation=validation
+    )

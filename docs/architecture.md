@@ -34,6 +34,14 @@ HotMem combines deterministic text embeddings, keyword overlap, and importance
 to rank local memories. Read-only inspectors provide lightweight metadata for
 CSV, JSONL, and Parquet files without turning the runtime into a query engine.
 
+Inspection is **advisory**: it never authorizes import, hydration, snapshot,
+or provenance decisions. JSONL validation is sampled by default (lines inside
+the declared sample window only) and the result declares its assurance level
+via `metadata.validation` (`sampled` | `full`); pass `--full-validation`
+(CLI) or `validation="full"` to parse every line. Authoritative verification
+of canonical memory content always happens through provenance checksums, not
+through inspection.
+
 An optional derived vector index can accelerate candidate retrieval. The index
 is disposable and rebuildable from SQLite, sits in front of the canonical
 hybrid ranker rather than replacing it, and search falls back to the

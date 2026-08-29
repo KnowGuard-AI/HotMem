@@ -59,6 +59,7 @@ class ParquetInspector:
         *,
         count_rows: bool = False,  # noqa: ARG002 — num_rows comes from the footer
         sample_size: int = 0,  # noqa: ARG002 — no row sampling (metadata-only)
+        validation: str = "sampled",  # noqa: ARG002 — JSON validation is JSONL-only
     ) -> FileInspection:
         size = meta["size"]
         unsupported = self._validate_magic(adapter, uri, size)

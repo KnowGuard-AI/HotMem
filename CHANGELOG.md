@@ -4,6 +4,58 @@ All notable changes to HotMem will be documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed — JSONL inspection validation policy (#89)
+- Inspection is **advisory** and now declares its assurance level:
+  `FileInspection.metadata["validation"]` is `sampled` (default — only the
+  declared sample window is parsed) or `full`. A malformed line beyond the
+  sampled window is reported only under `validation="full"`; `row_count`
+  semantics are unchanged. Full validation remains available via
+  `inspect_file(..., validation="full")` and `hotmem inspect
+  --full-validation`. Measured: 34 ms vs 115 ms per 11.6 MB file
+  (~5.5x at 100 MB per the spike baseline). Authoritative verification of
+  canonical content is unaffected — provenance checksums, not inspection.
+
+### Changed — streaming verification for large ranges (#88)
+- `provenance.verify_range` hashes ranges above `STREAM_VERIFY_THRESHOLD`
+  (8 MiB) while streaming through the new optional adapter capability
+  `LocalFilesystemAdapter.read_range_chunked` — O(chunk) memory instead of
+  O(range), identical digest and `ProvenanceError` semantics. Adapters
+  without the capability and ranges at/below the threshold keep the simple
+  single-read path.
+
+### Changed — single-read verified hydration (#87)
+- Verified hydration now hashes the bytes it already read instead of
+  re-reading the range through `provenance.verify_range` — one read per
+  range (spike B1: ~+16% at 100 MB). Digest and `ProvenanceError`
+  semantics are unchanged; new internal `provenance.verify_bytes` helper
+  carries the identical checksum contract.
+
+### Changed — embed_text trigram hashing (#90)
+- Trigram hashing now runs through a bounded per-gram cache
+  (`lru_cache`, 65 536 entries) replacing per-call md5 + hex parsing;
+  vectors are **bit-identical** to the previous `hotmem-hash-v1` output
+  (golden equivalence test over ASCII/unicode/random corpora). Measured
+  ~5.9x faster per embedding on realistic text — directly attacks the
+  37–78% of `parse_bundle` time the spike attributed to `embed_text`.
+
+### Changed — derived vector index polish (#92)
+- `search_by_ids` binds candidate ids in chunks of 900, so any configured
+  `oversample` stays under SQLite's legacy 999-variable cap; chunk results
+  are merged into the identical canonical order.
+- The accelerated search path runs a single FTS pass — candidate unioning
+  and BM25 normalization share one query (also true of the fallback path).
+- Swallowed Chroma delete/clear failures are now logged at warn level; the
+  derived index reuses `embed.unpack_embedding` for the blob format.
+
+### Performance follow-ups from the native helper spike (#87–#92)
+
+Work in progress — see PR for the unified acceptance criteria covering:
+single-read verified hydration (#87), streaming range hash (#88), JSONL
+inspection validation policy (#89), `embed_text` trigram batching (#90), and
+derived-vector-index polish (#92).
+
 ## [0.2.4] - 2026-08-28
 
 ### Added — Optional derived vector index (#49)

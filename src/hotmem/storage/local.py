@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import mmap
+from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
 
@@ -53,6 +54,31 @@ class LocalFilesystemAdapter:
         with open(path, "rb") as f:
             f.seek(offset)
             return f.read(length)
+
+    def read_range_chunked(
+        self, uri: str, offset: int, length: int, chunk_size: int = 1 << 20
+    ) -> Iterator[bytes]:
+        """Yield [offset, offset+length) in bounded chunks (O(chunk) memory).
+
+        Optional capability consumed by provenance.verify_range for
+        large-range streaming verification (#88); adapters without it fall
+        back to whole-range reads. Raises the same FileNotFoundError as
+        read_range; a short stream is the caller's truncation signal.
+        """
+        if offset < 0:
+            raise ValueError(f"offset must be non-negative, got {offset}")
+        if length < 0:
+            raise ValueError(f"length must be non-negative, got {length}")
+        path = _to_path(uri)
+        remaining = length
+        with open(path, "rb") as f:
+            f.seek(offset)
+            while remaining > 0:
+                chunk = f.read(min(chunk_size, remaining))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+                yield chunk
 
     def exists(self, uri: str) -> bool:
         return _to_path(uri).exists()

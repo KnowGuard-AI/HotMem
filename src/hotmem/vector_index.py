@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from hotmem.embed import unpack_embedding
 from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("vector_index")
@@ -282,8 +283,14 @@ class ChromaVectorIndex(_MarkerMixin):
     def delete(self, memory_ids: list[str]) -> None:
         if not memory_ids:
             return
-        with _suppress_exception(Exception):
+        try:
             self._collection.delete(ids=list(memory_ids))
+        except Exception as err:  # derived index; deletion failure is non-fatal
+            _trace.warn(
+                "delete",
+                "chroma delete failed; index stays disposable and stale",
+                detail={"error": str(err)},
+            )
 
     def count(self) -> int:
         return int(self._collection.count())
@@ -310,8 +317,14 @@ class ChromaVectorIndex(_MarkerMixin):
         }
 
     def clear(self) -> None:
-        with _suppress_exception(Exception):
+        try:
             self._client.delete_collection("hotmem_memories")
+        except Exception as err:  # missing collection is the normal clear case
+            _trace.warn(
+                "clear",
+                "chroma collection delete failed; recreating",
+                detail={"error": str(err)},
+            )
         self._collection = self._client.get_or_create_collection(
             name="hotmem_memories",
             metadata={"hnsw:space": "cosine"},
@@ -341,19 +354,6 @@ class _suppress_oserror:
 
     def __exit__(self, exc_type, exc, tb) -> bool:
         return exc_type is not None and issubclass(exc_type, OSError)
-
-
-class _suppress_exception:
-    """Context manager that swallows a given exception type."""
-
-    def __init__(self, exc_type: type[BaseException]) -> None:
-        self.exc_type = exc_type
-
-    def __enter__(self) -> _suppress_exception:
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> bool:
-        return exc_type is not None and issubclass(exc_type, self.exc_type)
 
 
 def chroma_available() -> bool:
@@ -447,7 +447,7 @@ def rebuild_vector_index(
             blob = row.get("embedding")
             if not blob:
                 continue
-            embedding = _unpack_blob(blob)
+            embedding = unpack_embedding(blob)
             if not embedding:
                 continue
             records.append(
@@ -488,15 +488,6 @@ def rebuild_vector_index(
     }
     _trace.info("rebuild", "vector index rebuilt from canonical storage", detail=result)
     return result
-
-
-def _unpack_blob(blob: bytes) -> list[float]:
-    import struct
-
-    count = len(blob) // 4
-    if count == 0:
-        return []
-    return list(struct.unpack(f"{count}f", blob))
 
 
 def remove_index_directory(base_dir: str | Path) -> bool:

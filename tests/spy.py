@@ -15,6 +15,7 @@ class SpyAdapter:
     def __init__(self, inner: Any) -> None:
         self.inner = inner
         self.read_range_calls = 0
+        self.read_range_chunked_calls = 0
         self.checksum_calls = 0
         self.exists_calls = 0
         self.read_calls = 0
@@ -22,6 +23,10 @@ class SpyAdapter:
     def read_range(self, uri: str, offset: int, length: int) -> bytes:
         self.read_range_calls += 1
         return self.inner.read_range(uri, offset, length)
+
+    def read_range_chunked(self, uri: str, offset: int, length: int, chunk_size: int = 1 << 20):
+        self.read_range_chunked_calls += 1
+        return self.inner.read_range_chunked(uri, offset, length, chunk_size)
 
     def read(self, uri: str) -> bytes:
         self.read_calls += 1
@@ -41,4 +46,9 @@ class SpyAdapter:
     @property
     def total_file_reads(self) -> int:
         """Count of methods that open/read the backing file (excludes exists)."""
-        return self.read_range_calls + self.checksum_calls + self.read_calls
+        return (
+            self.read_range_calls
+            + self.read_range_chunked_calls
+            + self.checksum_calls
+            + self.read_calls
+        )

@@ -963,7 +963,7 @@ def create_app(
         """Full rebuild of the derived vector index from canonical storage.
 
         Reads only SQLite rows (metadata + embeddings) — never touches a
-        backing file.         Returns 400 ``vector_index_disabled`` when no backend
+        backing file. Returns 400 ``vector_index_disabled`` when no backend
         is configured (the default). This is an admin operation, never on
         the search hot path; stale indexes fall back to the SQLite scan.
         """

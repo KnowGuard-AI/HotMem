@@ -20,7 +20,12 @@ from fastapi.testclient import TestClient
 
 from hotmem.db import MemoryDB
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
-from hotmem.provenance import ProvenanceError
+from hotmem.provenance import (
+    STREAM_VERIFY_THRESHOLD,
+    ChecksumMismatchError,
+    ProvenanceError,
+    verify_range,
+)
 from hotmem.storage.local import LocalFilesystemAdapter
 
 # ── 1. add file-backed -> hydrate returns exact byte range ───────────────────
@@ -107,6 +112,38 @@ def test_checksum_mismatch_raises_http_409(app_client: TestClient):
     assert body["error"] == "provenance_mismatch"
 
 
+def test_verify_range_streams_large_ranges(tmp_path: Path):
+    """#88: ranges above STREAM_VERIFY_THRESHOLD hash while streaming —
+    same digest, identical mismatch/truncation errors, O(chunk) memory;
+    small ranges keep the simple single-read path."""
+    from spy import SpyAdapter
+
+    adapter = SpyAdapter(LocalFilesystemAdapter())
+    data = bytes(range(256)) * ((STREAM_VERIFY_THRESHOLD + 4096) // 256)
+    big = tmp_path / "big.bin"
+    big.write_bytes(data)
+
+    ok = hashlib.sha256(data[100 : 100 + STREAM_VERIFY_THRESHOLD + 1]).hexdigest()
+    verify_range(adapter, str(big), 100, STREAM_VERIFY_THRESHOLD + 1, ok)
+    assert adapter.read_range_chunked_calls == 1
+    assert adapter.read_range_calls == 0
+
+    # At exactly the threshold: still the simple single-read path (boundary).
+    ok_at = hashlib.sha256(data[100 : 100 + STREAM_VERIFY_THRESHOLD]).hexdigest()
+    verify_range(adapter, str(big), 100, STREAM_VERIFY_THRESHOLD, ok_at)
+    assert adapter.read_range_calls == 1
+
+    ok_small = hashlib.sha256(data[100:132]).hexdigest()
+    verify_range(adapter, str(big), 100, 32, ok_small)
+    assert adapter.read_range_calls == 2
+
+    with pytest.raises(ChecksumMismatchError):
+        verify_range(adapter, str(big), 100, STREAM_VERIFY_THRESHOLD, "0" * 64)
+    with pytest.raises(ProvenanceError) as exc:
+        verify_range(adapter, str(big), 0, len(data) + 1, "0" * 64)
+    assert exc.value.reason == "truncated"
+
+
 def test_missing_file_raises_provenance_error(tmp_db: MemoryDB, fixture_file: Path):
     expected = hashlib.sha256(fixture_file.read_bytes()[0:20]).hexdigest()
     ref = FileRef(
@@ -146,6 +183,34 @@ def test_missing_file_raises_http_409(app_client: TestClient):
 
 
 # ── 3. metadata access performs no file read (spy on adapter) ────────────────
+
+
+def test_verified_hydrate_reads_range_once(tmp_db: MemoryDB, fixture_file: Path):
+    """#87: verified hydration reads the range exactly once — the checksum is
+    computed over the already-read bytes instead of a second read."""
+    from spy import SpyAdapter
+
+    spy = SpyAdapter(LocalFilesystemAdapter())
+    import hotmem.memory as mem_mod
+
+    orig = mem_mod.get_adapter
+    mem_mod.get_adapter = lambda uri: spy
+    try:
+        expected = hashlib.sha256(fixture_file.read_bytes()[10:30]).hexdigest()
+        ref = FileRef(
+            source_uri=str(fixture_file),
+            byte_offset=10,
+            byte_length=20,
+            source_format="bin",
+            source_checksum=expected,
+        )
+        mid, _ = add_file_backed(tmp_db, identifier="ds", file_ref=ref, summary="v")
+
+        content = hydrate_memory(tmp_db, mid)
+        assert content == fixture_file.read_bytes()[10:30]
+        assert spy.read_range_calls == 1, "verified hydration must not re-read the range"
+    finally:
+        mem_mod.get_adapter = orig
 
 
 def test_metadata_access_no_file_read(tmp_db: MemoryDB, fixture_file: Path):

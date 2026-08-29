@@ -343,24 +343,38 @@ def openapi(output: str | None, fmt: str):
     help="Max sample rows to preview (CSV/JSONL).",
 )
 @click.option(
+    "--full-validation",
+    "full_validation",
+    is_flag=True,
+    help="JSONL: validate every line instead of only the sampled window. "
+    "Inspection is advisory; full validation costs ~5x on large files.",
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
     help="Emit raw JSON (bypasses the renderer, for scripting).",
 )
-def inspect(uri: str, count_rows: bool, sample_size: int, as_json: bool):
+def inspect(uri: str, count_rows: bool, sample_size: int, full_validation: bool, as_json: bool):
     """Inspect a local file's structure and provenance without ingesting it.
 
     Lightweight metadata-only inspection for CSV, JSONL, and Parquet files.
     Never copies file contents into the database — returns URI, size, checksum,
     columns, and an optional bounded sample. Unsupported formats and remote
-    schemes fail with a clear error.
+    schemes fail with a clear error. Inspection is advisory: JSONL validation
+    covers the sampled window unless --full-validation is passed, and the
+    result declares its assurance level.
     """
     from hotmem.inspectors import UnsupportedFormatError, inspect_file
     from hotmem.storage import UnsupportedSchemeError
 
     try:
-        inspection = inspect_file(uri, count_rows=count_rows, sample_size=sample_size)
+        inspection = inspect_file(
+            uri,
+            count_rows=count_rows,
+            sample_size=sample_size,
+            validation="full" if full_validation else "sampled",
+        )
     except UnsupportedFormatError as err:
         raise click.ClickException(str(err)) from err
     except UnsupportedSchemeError as err:
@@ -380,6 +394,7 @@ def inspect(uri: str, count_rows: bool, sample_size: int, as_json: bool):
         rows=data["row_count"],
         checksum=str(data["checksum"])[:12] + "…",
     )
+    click.echo(f"validation: {data['metadata'].get('validation', 'sampled')} (advisory)")
     if data["columns"]:
         click.echo(f"columns: {', '.join(data['columns'])}")
     if data["delimiter"]:

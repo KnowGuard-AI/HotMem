@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import math
 import struct
+from functools import lru_cache
 
 from hotmem.trace import Timer, get_tracer
 
@@ -28,6 +29,18 @@ _trace = get_tracer("embed")
 
 EMBEDDING_DIM = 64
 EMBEDDING_MODEL = "hotmem-hash-v1"
+
+
+# Bounded cache of trigram -> (bucket, sign). Text reuses a small vocabulary
+# of character trigrams heavily (bundle corpora share word pools), so the
+# cache removes nearly all md5 calls while keeping vectors bit-identical:
+# same gram bytes -> same digest -> same bucket/sign (#90).
+@lru_cache(maxsize=65536)
+def _gram_bucket_sign(gram: str) -> tuple[int, float]:
+    h = int.from_bytes(hashlib.md5(gram.encode(), usedforsecurity=False).digest(), "big")
+    bucket = h % EMBEDDING_DIM
+    sign = 1.0 if (h >> 64) % 2 == 0 else -1.0
+    return bucket, sign
 
 
 def embed_text(text: str) -> list[float]:
@@ -42,11 +55,7 @@ def embed_text(text: str) -> list[float]:
 
         # Hash overlapping trigrams into embedding buckets
         for i in range(max(1, len(text_lower) - 2)):
-            gram = text_lower[i : i + 3]
-            h = int(hashlib.md5(gram.encode(), usedforsecurity=False).hexdigest(), 16)
-            bucket = h % EMBEDDING_DIM
-            # Use upper bits for sign/magnitude
-            sign = 1.0 if (h >> 64) % 2 == 0 else -1.0
+            bucket, sign = _gram_bucket_sign(text_lower[i : i + 3])
             vec[bucket] += sign
 
         # L2 normalize
