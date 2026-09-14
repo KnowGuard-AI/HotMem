@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — company-brain interchange contract and planning docs (#67)
+- Restored the issue-linked OKF planning notes under `docs/okf/`
+  (`company-brain-interchange.md`, `file-native-memory-practices.md`,
+  `format-and-maintenance.md`, `index.md`) from git history; they are excluded
+  from the generated docs site via mkdocs `exclude_docs` so the public surface
+  added by #82 is unchanged.
+- Added `docs/okf/interchange-v1.md` — the normative `hotmem-interchange-v1`
+  contract: required/optional/forward-compatible record fields, canonical
+  JSON serialization, logical vs file digests, gzip transport rules, embedding
+  compatibility, and loaded/skipped/invalid hydration semantics. Extension
+  manifest fields are documented as Proposed and are not emitted (ADR-003).
+
 ### Changed — JSONL inspection validation policy (#89)
 - Inspection is **advisory** and now declares its assurance level:
   `FileInspection.metadata["validation"]` is `sampled` (default — only the

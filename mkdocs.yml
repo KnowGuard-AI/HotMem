@@ -7,6 +7,11 @@ edit_uri: edit/main/docs/
 
 docs_dir: docs
 
+# Planning notes live in-repo for issue linkage but stay off the public site.
+exclude_docs: |
+  okf/*
+
+
 theme:
   name: material
   logo: assets/brand/hotmem.svg
