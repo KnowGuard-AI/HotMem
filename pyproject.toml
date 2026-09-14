@@ -34,12 +34,16 @@ dev = [
     "pytest>=9,<10",
     "pytest-cov>=6,<7",
     "ruff>=0.15,<1",
+    "pyyaml>=6,<7",
 ]
 docs = [
     "mkdocs-material>=9,<10",
 ]
 vector = [
     "chromadb>=1.0,<2",
+]
+okf = [
+    "pyyaml>=6,<7",
 ]
 
 [project.scripts]
