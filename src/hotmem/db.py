@@ -24,7 +24,7 @@ import math
 import re
 import sqlite3
 import struct
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -925,6 +925,29 @@ class MemoryDB:
         query = f"SELECT {base}, {v2_cols}{tail} FROM memories"
         rows = self._conn.execute(query).fetchall()
         return [dict(r) for r in rows]
+
+    def iter_rows(self, *, include_embedding: bool = True, batch: int = 1000) -> Iterator[dict]:
+        """Stream all memory rows as dicts in id order, fetchmany-batched.
+
+        Streaming export path (interchange #67/#69): memory stays O(batch)
+        instead of loading every row at once, and the ORDER BY id makes the
+        output order deterministic.
+        """
+        v2_cols = (
+            "namespace, tier, memory_type, source_uri, source_format, "
+            "source_checksum, byte_offset, byte_length, updated_at, snapshot_id, "
+            "promotion_state, promotion_candidate, parent_memory, "
+            "related_memories, tags, schema_version, fact_summary, provenance_json"
+        )
+        base = (
+            "id, identifier, fact_text, embedding_dim, embedding_model, source, "
+            "importance, metadata_json, content_hash, ttl_seconds, created_at"
+        )
+        tail = ", embedding" if include_embedding else ""
+        query = f"SELECT {base}, {v2_cols}{tail} FROM memories ORDER BY id"
+        cursor = self._conn.execute(query)
+        while rows := cursor.fetchmany(batch):
+            yield from (dict(r) for r in rows)
 
     def content_hashes(self) -> set[str]:
         """Return non-empty content hashes currently stored in the database."""
