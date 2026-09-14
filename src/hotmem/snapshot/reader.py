@@ -2,41 +2,46 @@
 
 Purpose:
      Read a Snapshot v2 directory: verify the manifest's per-file and overall
-     checksums (hard error on mismatch), then stream ``memories.jsonl`` into the
-     DB. File-backed memories are reconstructed as references WITHOUT touching
-     the backing files (reference-not-duplicate principle, matching #38).
+     checksums (hard error on mismatch), then stream ``memories.jsonl`` into
+     the DB. File-backed memories are reconstructed as references WITHOUT
+     touching the backing files (reference-not-duplicate, matching #38).
 
-     Hydration uses stored base64 embeddings when present (no re-embedding);
-     falls back to embedding fact_text (inline) or fact_summary (file-backed
-     with summary); stores NULL embedding for file-backed without summary.
+     Every record runs through the shared interchange normalization (issue
+     #67): full field preservation (namespace, tier, tags, ttl, provenance,
+     file references), ONE embedding compatibility rule — stored embeddings
+     are reused only when model/dim/blob match, otherwise re-embedded from
+     fact_text (inline) or fact_summary (file-backed); NULL embedding for
+     file-backed without summary — and bounded-batch inserts with
+     database-backed deduplication (no per-record commits, no full hash-set
+     loads).
 
 Interface:
      detect_v2(path) -> bool
      verify_manifest(dir) -> Manifest
      hydrate_v2(db, dir) -> HydrateResult
 
-Deps: hotmem.db, hotmem.embed, hotmem.snapshot.format, hotmem.trace
+Deps: hotmem.db, hotmem.embed, hotmem.snapshot.format, hotmem.swap,
+      hotmem.interchange, hotmem.trace
 Extension: add migration from older snapshot schema versions here.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import os
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from hotmem.db import MemoryDB
-from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.interchange.compat import resolve_embedding
+from hotmem.interchange.record import normalize_record, validate_record
 from hotmem.snapshot.format import (
     Manifest,
     SnapshotChecksumError,
     compute_overall,
     sha256_file,
 )
+from hotmem.swap import _HYDRATE_BATCH, record_to_memory_record
 from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("snapshot.reader")
@@ -65,6 +70,10 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
     ``overall_sha256``. ``metadata.json`` is intentionally NOT verified
     (informational only, so wall-clock timestamps don't break determinism).
     Extraneous files in the directory are ignored (forward-compatible).
+
+    Manifest-listed paths are confinement-checked (interchange contract #67):
+    absolute paths, ``..`` traversal, and symlink escapes are rejected before
+    any file is read.
     """
     d = Path(snapshot_dir)
     manifest_path = d / MANIFEST_NAME
@@ -81,6 +90,8 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
     # Verify each listed file.
     per_file_hashes: dict[str, str] = {}
     for rel, entry in manifest.files.items():
+        if not _confined_relpath(d, rel):
+            raise SnapshotChecksumError("path_escape", file=rel)
         fpath = d / rel
         if not fpath.is_file():
             raise SnapshotChecksumError("missing_file", file=rel)
@@ -116,13 +127,33 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
     return manifest
 
 
+def _confined_relpath(root: Path, rel: str) -> bool:
+    """True if ``rel`` names a path inside ``root`` without traversal/symlinks.
+
+    A crafted manifest must never make the verifier read outside the package
+    (interchange contract #67, path confinement). Absolute paths and any
+    component escaping the root are rejected; symlinked entries are rejected
+    because they can point outside even with a clean relative name.
+    """
+    if not rel or rel.startswith("/") or Path(rel).is_absolute() or ".." in Path(rel).parts:
+        return False
+    resolved = (root / rel).resolve()
+    try:
+        resolved.relative_to(root.resolve())
+    except ValueError:
+        return False
+    return os.path.realpath(root / rel) == str(resolved) and not os.path.islink(root / rel)
+
+
 def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
     """Verify the manifest and load all memories into the DB.
 
     Deduplicates by ``content_hash`` (skips rows that already exist). Never
     touches backing files for file-backed memories — references are preserved.
-    Uses stored base64 embeddings when present; otherwise embeds fact_text or
-    fact_summary, or stores NULL embedding for file-backed without summary.
+    Uses stored embeddings only when compatible (model/dim/blob); otherwise
+    re-embeds fact_text or fact_summary, or stores NULL embedding for
+    file-backed without summary. Records that fail validation are counted
+    invalid and skipped (interchange-v1 §7).
     """
     snapshot_dir = Path(snapshot_dir)
     with Timer() as t:
@@ -131,102 +162,71 @@ def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
         if not memories_path.is_file():
             raise SnapshotChecksumError("missing_file", file=MEMORIES_NAME)
 
-        loaded = 0
-        skipped = 0
+        counters = {
+            "loaded": 0,
+            "skipped": 0,
+            "invalid": 0,
+            "reused_embeddings": 0,
+            "computed_embeddings": 0,
+        }
+        pending: list[dict] = []
+        batch_seen: set[str] = set()
 
-        with open(memories_path) as f:
+        def flush() -> None:
+            if not pending:
+                return
+            existing = db.batch_existing_hashes([r["content_hash"] for r in pending])
+            todo = [r for r in pending if r["content_hash"] not in existing]
+            counters["skipped"] += len(pending) - len(todo)
+
+            records = []
+            for rec in todo:
+                blob, model, dim, reused = resolve_embedding(rec)
+                counters["reused_embeddings" if reused else "computed_embeddings"] += 1
+                records.append(
+                    record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
+                )
+            loaded = db.insert_many_ignore(records)
+            counters["loaded"] += loaded
+            counters["skipped"] += len(records) - loaded
+            pending.clear()
+            batch_seen.clear()
+
+        with open(memories_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 record = json.loads(line)
-                content_hash = record.get("content_hash") or ""
-                if content_hash and db.exists(content_hash):
-                    skipped += 1
+                if not isinstance(record, dict):
+                    counters["invalid"] += 1
                     continue
+                rec = normalize_record(record, default_source="snapshot")
+                if validate_record(rec):
+                    counters["invalid"] += 1
+                    continue
+                content_hash = rec["content_hash"]
+                if content_hash in batch_seen:
+                    counters["skipped"] += 1
+                    continue
+                batch_seen.add(content_hash)
+                pending.append(rec)
+                if len(pending) >= _HYDRATE_BATCH:
+                    flush()
+        flush()
 
-                memory_type = record.get("memory_type") or "inline"
-                embedding_b64 = record.get("embedding")
-                embedding_blob = base64.b64decode(embedding_b64) if embedding_b64 else None
-
-                if memory_type == "file":
-                    _insert_file_backed(db, record, embedding_blob)
-                else:
-                    _insert_inline(db, record, embedding_blob)
-                loaded += 1
+        loaded = counters["loaded"]
+        skipped = counters["skipped"]
+        invalid = counters["invalid"]
 
     _trace.info(
         "hydrate_v2",
-        f"hydrated {loaded} memories, skipped {skipped} dupes",
+        f"hydrated {loaded} memories, skipped {skipped} dupes, {invalid} invalid",
         detail={
             "path": str(snapshot_dir),
             "snapshot_id": manifest.snapshot_id[:12],
             "ms": round(t.ms, 2),
+            **{k: counters[k] for k in counters},
         },
     )
     return HydrateResult(loaded=loaded, skipped_dupes=skipped)
-
-
-def _insert_inline(db: MemoryDB, record: dict[str, Any], embedding_blob: bytes | None) -> None:
-    """Insert an inline memory, using the stored embedding or re-embedding fact_text."""
-    fact_text = record.get("fact_text") or ""
-    if embedding_blob is None:
-        embedding_blob = pack_embedding(embed_text(fact_text))
-        embedding_model = EMBEDDING_MODEL
-        embedding_dim = EMBEDDING_DIM
-    else:
-        embedding_model = record.get("embedding_model") or EMBEDDING_MODEL
-        embedding_dim = record.get("embedding_dim") or EMBEDDING_DIM
-
-    db.insert(
-        id=record.get("id") or uuid.uuid4().hex,
-        identifier=record.get("identifier", ""),
-        fact_text=fact_text,
-        embedding=embedding_blob,
-        embedding_dim=embedding_dim,
-        embedding_model=embedding_model,
-        source=record.get("source", "snapshot"),
-        importance=record.get("importance", 0.5),
-        metadata_json=json.dumps(record.get("metadata") or {}),
-        content_hash=record.get("content_hash") or "",
-    )
-
-
-def _insert_file_backed(db: MemoryDB, record: dict[str, Any], embedding_blob: bytes | None) -> None:
-    """Insert a file-backed memory reference (no backing file touched).
-
-    Uses the stored embedding when present; else embeds fact_summary if present;
-    else stores an empty embedding (NULL by convention in #38).
-    """
-    fact_summary = record.get("fact_summary")
-    if embedding_blob is None:
-        if fact_summary:
-            embedding_blob = pack_embedding(embed_text(fact_summary))
-            embedding_model = EMBEDDING_MODEL
-            embedding_dim = EMBEDDING_DIM
-        else:
-            embedding_blob = b""
-            embedding_model = ""
-            embedding_dim = EMBEDDING_DIM
-    else:
-        embedding_model = record.get("embedding_model") or EMBEDDING_MODEL
-        embedding_dim = record.get("embedding_dim") or EMBEDDING_DIM
-
-    db.insert_file_backed(
-        id=record.get("id") or uuid.uuid4().hex,
-        identifier=record.get("identifier", ""),
-        source_uri=record.get("source_uri") or "",
-        byte_offset=int(record.get("byte_offset") or 0),
-        byte_length=int(record.get("byte_length") or 0),
-        source_format=record.get("source_format") or "",
-        source_checksum=record.get("source_checksum"),
-        fact_summary=fact_summary,
-        embedding=embedding_blob,
-        embedding_dim=embedding_dim,
-        embedding_model=embedding_model,
-        source=record.get("source", "snapshot"),
-        importance=record.get("importance", 0.5),
-        metadata_json=json.dumps(record.get("metadata") or {}),
-        content_hash=record.get("content_hash") or "",
-        provenance_json=json.dumps(record["provenance"]) if record.get("provenance") else None,
-    )

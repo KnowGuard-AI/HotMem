@@ -426,3 +426,119 @@ def test_legacy_api_file_alias_still_works(app_client: TestClient):
     assert resp.status_code == 200
     assert resp.json()["exported"] == 1
     assert swap.is_file()
+
+
+# ── Shared normalization on the v2 path (#67) ──────────────────────────────
+
+
+def test_roundtrip_preserves_namespace_tier_tags_ttl(tmp_db: MemoryDB, tmp_path: Path):
+    import hashlib as _h
+
+    db = tmp_db
+    db.insert(
+        id="ns1",
+        identifier="vendor_x",
+        fact_text="namespaced fact",
+        embedding=pack_embedding(embed_text("namespaced fact")),
+        content_hash=_h.sha256(b"vendor_x:namespaced fact").hexdigest(),
+        namespace="team-x",
+        tier="warm",
+        tags='["ns", "tier"]',
+        ttl_seconds=43200,
+        fact_summary="namespaced",
+        provenance_json=json.dumps({"origin": "test"}),
+    )
+    out = tmp_path / "snap"
+    write_snapshot_v2(db, out)
+    record = json.loads((out / "memories.jsonl").read_text().strip())
+    assert record["namespace"] == "team-x"
+    assert record["tier"] == "warm"
+    assert record["tags"] == ["ns", "tier"]
+    assert record["ttl_seconds"] == 43200
+    assert record["provenance"] == {"origin": "test"}
+
+    result = hydrate(MemoryDB(tmp_path / "fresh.sqlite"), out)
+    db2 = MemoryDB(tmp_path / "fresh.sqlite")
+    row = db2.all_rows()[0]
+    assert row["namespace"] == "team-x"
+    assert row["tier"] == "warm"
+    assert json.loads(row["tags"]) == ["ns", "tier"]
+    assert row["ttl_seconds"] == 43200
+    assert json.loads(row["provenance_json"]) == {"origin": "test"}
+    db2.close()
+    assert result.loaded == 1
+
+
+def test_v2_hydrate_rejects_incompatible_stored_embedding(
+    tmp_db: MemoryDB, snapshot_dir: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A v2 record with a foreign embedding must be re-embedded, not reused.
+
+    Before #67 the v2 reader base64-decoded blindly; the shared compatibility
+    rule now applies here too.
+    """
+    blob = pack_embedding(embed_text("v2 fact"))
+    snapshot_dir.mkdir(parents=True)
+    record = {
+        "schema_version": 2,
+        "id": "bad-model",
+        "identifier": "x",
+        "fact_text": "v2 fact",
+        "memory_type": "fact",
+        "embedding": base64.b64encode(blob).decode(),
+        "embedding_dim": 64,
+        "embedding_model": "foreign-model-v9",
+        "source": "snapshot",
+        "content_hash": hashlib.sha256(b"x:v2 fact").hexdigest(),
+    }
+    (snapshot_dir / MEMORIES_NAME).write_text(json.dumps(record) + "\n")
+    manifest = {
+        "format": "hotmem-snapshot-v2",
+        "snapshot_id": "x" * 64,
+        "created_at": "2026-01-01T00:00:00Z",
+        "files": {MEMORIES_NAME: {"size": None, "sha256": ""}},
+    }
+    payload = (snapshot_dir / MEMORIES_NAME).read_bytes()
+    manifest["files"][MEMORIES_NAME] = {
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    (snapshot_dir / MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    fresh = MemoryDB(snapshot_dir.parent / "fresh.sqlite")
+    result = hydrate(fresh, snapshot_dir)
+    row = fresh.all_rows(include_embedding=True)[0]
+    fresh.close()
+    assert result.loaded == 1
+    assert row["embedding_model"] == EMBEDDING_MODEL
+    assert row["embedding"] == blob  # same text -> same deterministic vector
+
+
+def test_verify_manifest_rejects_path_escape(tmp_path: Path):
+    """A manifest listing ../outside must fail verification (confinement)."""
+    d = tmp_path / "snap"
+    d.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    (d / MEMORIES_NAME).write_text("{}\n")
+    payload = (d / MEMORIES_NAME).read_bytes()
+    manifest = {
+        "format": "hotmem-snapshot-v2",
+        "snapshot_id": "x" * 64,
+        "files": {
+            MEMORIES_NAME: {
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            },
+            "../outside.txt": {
+                "size": outside.stat().st_size,
+                "sha256": hashlib.sha256(outside.read_bytes()).hexdigest(),
+            },
+        },
+    }
+    (d / MANIFEST_NAME).write_text(json.dumps(manifest))
+
+    from hotmem.snapshot.reader import verify_manifest
+
+    with pytest.raises(SnapshotChecksumError, match="path_escape"):
+        verify_manifest(d)

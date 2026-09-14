@@ -26,9 +26,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Callable
 from typing import Any
 
-from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL
+from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
 
 
 def compatible_embedding_blob(record: dict[str, Any]) -> bytes | None:
@@ -55,3 +56,35 @@ def compatible_embedding_blob(record: dict[str, Any]) -> bytes | None:
     if len(blob) != EMBEDDING_DIM * 4:
         return None
     return blob
+
+
+def resolve_embedding(
+    record: dict[str, Any],
+    *,
+    embed_fn: Callable[[str], list[float]] = embed_text,
+    pack_fn: Callable[[list[float]], bytes] = pack_embedding,
+) -> tuple[bytes, str, int, bool]:
+    """Apply interchange-v1 §5 and return ``(blob, model, dim, reused)``.
+
+    - Compatible stored embedding → reused as-is (recorded model/dim).
+    - Incompatible → re-embed from ``fact_text`` (inline) or ``fact_summary``
+      (file-backed), stamped with the CURRENT model/dim.
+    - File-backed with no summary → NULL-embedding convention (#38):
+      empty blob, empty model — a predictable, rebuildable state.
+
+    ``embed_fn`` is injected so callers' monkeypatches keep working.
+    """
+    blob = compatible_embedding_blob(record)
+    if blob is not None:
+        model = record.get("embedding_model") or EMBEDDING_MODEL
+        dim = record.get("embedding_dim") or EMBEDDING_DIM
+        return blob, str(model), int(dim), True
+
+    if record.get("memory_type") == "file":
+        text = record.get("fact_summary") or ""
+    else:
+        text = record.get("fact_text") or ""
+
+    if text:
+        return pack_fn(embed_fn(text)), EMBEDDING_MODEL, EMBEDDING_DIM, False
+    return b"", "", EMBEDDING_DIM, False

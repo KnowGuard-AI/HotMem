@@ -74,6 +74,10 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
 
     Embeddings are base64-encoded so the jsonl is text-portable and can be
     rehydrated without re-embedding (stored-embedding variant, #25).
+
+    The full canonical field set is emitted (issue #67): ttl_seconds,
+    namespace, tier, and tags now round-trip instead of being dropped by
+    the writer while the readers learned to preserve them.
     """
     embedding_blob: bytes | None = row.get("embedding")
     embedding_b64 = base64.b64encode(embedding_blob).decode() if embedding_blob else None
@@ -91,6 +95,10 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "importance": row["importance"],
         "metadata": _parse_json_field(row["metadata_json"]),
         "content_hash": row["content_hash"],
+        "ttl_seconds": row["ttl_seconds"],
+        "namespace": row["namespace"],
+        "tier": row["tier"],
+        "tags": _parse_json_field(row["tags"]) or [],
         "source_uri": row["source_uri"],
         "byte_offset": row["byte_offset"],
         "byte_length": row["byte_length"],

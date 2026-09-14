@@ -32,7 +32,7 @@ from typing import TextIO
 from hotmem.db import MemoryDB, MemoryRecord
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
 from hotmem.interchange.canonical import compute_content_hash
-from hotmem.interchange.compat import compatible_embedding_blob
+from hotmem.interchange.compat import resolve_embedding
 from hotmem.interchange.record import normalize_record, validate_record
 from hotmem.trace import Timer, get_tracer
 
@@ -95,34 +95,35 @@ def _open_swap_write(path: Path) -> Iterator[TextIO]:
             yield f
 
 
-def _stored_embedding(record: dict) -> bytes | None:
-    """Return a compatible stored embedding from a snapshot record, if present.
-
-    Delegates to the shared interchange compatibility rule (issue #67), which
-    accepts both ``embedding_b64`` (legacy) and ``embedding`` (v2) spellings.
-    """
-    return compatible_embedding_blob(record)
-
-
 # Hydration flushes in bounded batches: bounded memory + batched (database-backed)
 # dedup instead of loading the entire destination hash set (interchange #67).
 _HYDRATE_BATCH = 1000
 
 
-def _record_to_memory_record(rec: dict, blob: bytes) -> MemoryRecord:
+def record_to_memory_record(
+    rec: dict,
+    blob: bytes,
+    *,
+    embedding_model: str | None = None,
+    embedding_dim: int | None = None,
+) -> MemoryRecord:
     """Build a db-ready MemoryRecord from a normalized interchange record.
 
     Every canonical field survives: namespace, tier, tags, provenance,
     fact_summary, file-backed references, and lifecycle columns that legacy
     writers emit — previously dropped by this path (#67 field preservation).
+    Shared with the Snapshot v2 reader (issue #67) so both build rows
+    identically. ``embedding_model``/``embedding_dim`` override the record's
+    recorded pair when resolve_embedding decided a re-embed (§5: re-embedded
+    rows carry the CURRENT model, never the stale recorded one).
     """
     return MemoryRecord(
         id=rec["id"],
         identifier=rec["identifier"],
         fact_text=rec["fact_text"],
         embedding=blob,
-        embedding_dim=rec["embedding_dim"] or EMBEDDING_DIM,
-        embedding_model=rec["embedding_model"] or EMBEDDING_MODEL,
+        embedding_dim=embedding_dim if embedding_dim is not None else rec["embedding_dim"],
+        embedding_model=embedding_model if embedding_model is not None else rec["embedding_model"],
         source=rec["source"],
         importance=rec["importance"],
         metadata_json=json.dumps(rec["metadata"]),
@@ -168,14 +169,12 @@ def _flush_batch(
 
     records: list[MemoryRecord] = []
     for rec in todo:
-        blob = _stored_embedding(rec)
-        if blob is None:
-            vec = embed_text(rec["fact_text"])
-            blob = pack_embedding(vec)
-            counters["computed_embeddings"] += 1
-        else:
+        blob, model, dim, reused = resolve_embedding(rec, embed_fn=embed_text)
+        if reused:
             counters["reused_embeddings"] += 1
-        records.append(_record_to_memory_record(rec, blob))
+        else:
+            counters["computed_embeddings"] += 1
+        records.append(record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim))
 
     loaded = db.insert_many_ignore(records)
     counters["loaded"] += loaded
