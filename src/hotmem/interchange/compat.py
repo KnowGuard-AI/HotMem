@@ -83,7 +83,9 @@ def resolve_embedding(
     if record.get("memory_type") == "file":
         text = record.get("fact_summary") or ""
     else:
-        text = record.get("fact_text") or ""
+        # Inline records re-embed from fact_text; a summary is the only
+        # usable text when fact_text is absent (#69 predictable reporting).
+        text = record.get("fact_text") or record.get("fact_summary") or ""
 
     if text:
         return pack_fn(embed_fn(text)), EMBEDDING_MODEL, EMBEDDING_DIM, False

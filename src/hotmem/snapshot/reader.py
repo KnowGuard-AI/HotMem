@@ -91,7 +91,7 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
     # Verify each listed file.
     per_file_hashes: dict[str, str] = {}
     for rel, entry in manifest.files.items():
-        if not _confined_relpath(d, rel):
+        if not confined_relpath(d, rel):
             raise SnapshotChecksumError("path_escape", file=rel)
         fpath = d / rel
         if not fpath.is_file():
@@ -128,7 +128,7 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
     return manifest
 
 
-def _confined_relpath(root: Path, rel: str) -> bool:
+def confined_relpath(root: Path, rel: str) -> bool:
     """True if ``rel`` names a path inside ``root`` without traversal/symlinks.
 
     A crafted manifest must never make the verifier read outside the package
