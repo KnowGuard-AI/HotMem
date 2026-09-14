@@ -391,3 +391,123 @@ def test_hydrate_sqlite_rejects_malicious_column_name(tmp_path):
     assert row["id"] == "e1"
     assert row["fact_text"] == "evil"
     dst.close()
+
+
+# ── v2 field preservation through the legacy JSONL path (#67) ───────────────
+
+
+def test_hydrate_preserves_v2_fields(tmp_db: MemoryDB, tmp_path: Path):
+    """Legacy JSONL round-trip must not drop namespace/tier/tags/provenance/etc.
+
+    The legacy writer emits every v2 column; before #67 the reader silently
+    discarded all of them. Now normalize_record keeps them all.
+    """
+    swap = tmp_path / "swap.jsonl"
+    record = {
+        "id": "v2-full",
+        "identifier": "agent",
+        "fact_text": "prefers vim keybindings",
+        "namespace": "team-x",
+        "tier": "hot",
+        "tags": '["editor", "prefs"]',
+        "fact_summary": "editor preference",
+        "provenance_json": json.dumps({"origin": "session", "actor": "human:z"}),
+        "source": "swap",
+        "importance": 0.9,
+        "memory_type": "fact",
+    }
+    swap.write_text(json.dumps(record) + "\n")
+
+    result = hydrate(tmp_db, swap)
+    assert result.loaded == 1
+
+    row = tmp_db.all_rows()[0]
+    assert row["namespace"] == "team-x"
+    assert row["tier"] == "hot"
+    assert json.loads(row["tags"]) == ["editor", "prefs"]
+    assert row["fact_summary"] == "editor preference"
+    assert json.loads(row["provenance_json"]) == {"origin": "session", "actor": "human:z"}
+    assert row["importance"] == 0.9
+    assert row["schema_version"] == 1
+    assert row["id"] == "v2-full"
+
+
+def test_hydrate_preserves_file_backed_reference_fields(tmp_db: MemoryDB, tmp_path: Path):
+    swap = tmp_path / "swap.jsonl"
+    record = {
+        "id": "file-ref",
+        "identifier": "data:orders",
+        "fact_text": "",
+        "fact_summary": "orders csv range",
+        "memory_type": "file",
+        "source_uri": "data/orders.csv",
+        "source_format": "csv",
+        "source_checksum": "abc123",
+        "byte_offset": 10,
+        "byte_length": 100,
+    }
+    swap.write_text(json.dumps(record) + "\n")
+
+    result = hydrate(tmp_db, swap)
+    assert result.loaded == 1
+
+    row = tmp_db.all_rows()[0]
+    assert row["memory_type"] == "file"
+    assert row["source_uri"] == "data/orders.csv"
+    assert row["source_format"] == "csv"
+    assert row["source_checksum"] == "abc123"
+    assert row["byte_offset"] == 10
+    assert row["byte_length"] == 100
+
+
+def test_hydrate_rejects_unusable_inline_record(tmp_db: MemoryDB, tmp_path: Path):
+    """Inline record with no text and no summary counts invalid and is not stored."""
+    swap = tmp_path / "swap.jsonl"
+    swap.write_text(json.dumps({"identifier": "", "fact_text": ""}) + "\n")
+
+    result = hydrate(tmp_db, swap)
+    assert result.loaded == 0
+    assert tmp_db.count() == 0
+
+
+def test_hydrate_dedup_across_batch_boundaries(tmp_db: MemoryDB, tmp_path: Path):
+    """Dedup stays correct when duplicates span the 1000-record flush boundary."""
+    swap = tmp_path / "swap.jsonl"
+    lines = []
+    for i in range(1200):
+        lines.append(json.dumps({"identifier": f"a{i}", "fact_text": f"fact {i}"}))
+    # Duplicates of records from the first batch, appearing in the second.
+    for i in range(0, 5):
+        lines.append(json.dumps({"identifier": f"a{i}", "fact_text": f"fact {i}"}))
+    swap.write_text("\n".join(lines) + "\n")
+
+    result = hydrate(tmp_db, swap)
+    assert result.loaded == 1200
+    assert result.skipped_dupes == 5
+
+    # Re-hydrate: idempotent — everything is now a duplicate.
+    again = hydrate(tmp_db, swap)
+    assert again.loaded == 0
+    assert again.skipped_dupes == 1205
+
+
+def test_hydrate_does_not_load_entire_hash_set(tmp_db: MemoryDB, tmp_path: Path):
+    """Database-backed dedup: batch_existing_hashes replaces the full-set load."""
+    swap = tmp_path / "swap.jsonl"
+    swap.write_text(json.dumps({"identifier": "a", "fact_text": "fact"}) + "\n")
+
+    calls: list[int] = []
+    original = MemoryDB.batch_existing_hashes
+
+    def spy(self, hashes):
+        calls.append(len(hashes))
+        return original(self, hashes)
+
+    MemoryDB.batch_existing_hashes = spy
+    try:
+        result = hydrate(tmp_db, swap)
+    finally:
+        MemoryDB.batch_existing_hashes = original
+
+    assert result.loaded == 1
+    assert calls  # batched lookup happened instead of content_hashes()

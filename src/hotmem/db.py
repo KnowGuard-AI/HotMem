@@ -933,6 +933,25 @@ class MemoryDB:
         ).fetchall()
         return {row["content_hash"] for row in rows}
 
+    def batch_existing_hashes(self, hashes: list[str]) -> set[str]:
+        """Return the subset of ``hashes`` already stored (chunked SELECT).
+
+        Database-backed deduplication for hydration paths: bounded memory
+        (chunk of at most ``_SEARCH_BIND_CHUNK`` bound parameters) instead of
+        loading the full destination hash set (interchange contract #67).
+        """
+        unique = sorted({h for h in hashes if h})
+        found: set[str] = set()
+        for start in range(0, len(unique), _SEARCH_BIND_CHUNK):
+            chunk = unique[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT content_hash FROM memories WHERE content_hash IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            found.update(row["content_hash"] for row in rows)
+        return found
+
     def exists(self, content_hash: str) -> bool:
         """Check if a memory with this content_hash already exists."""
         row = self._conn.execute(
