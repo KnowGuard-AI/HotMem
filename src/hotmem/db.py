@@ -1074,9 +1074,7 @@ class MemoryDB:
                 batch_seen.clear()
                 rows_dicts = [dict(row) for row in batch]
                 candidate_hashes = [
-                    d.get("content_hash", "")
-                    for d in rows_dicts
-                    if d.get("content_hash", "")
+                    d.get("content_hash", "") for d in rows_dicts if d.get("content_hash", "")
                 ]
                 existing = self.batch_existing_hashes(candidate_hashes)
                 records: list[MemoryRecord] = []

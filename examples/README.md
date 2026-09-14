@@ -13,6 +13,7 @@ Copy-paste-runnable examples showing HotMem with each framework and runtime.
 | [fastapi_backend](fastapi_backend) | Standalone FastAPI app using HotMem as a library | Python | `uvicorn app:app` |
 | [mcp_claude_desktop](mcp_claude_desktop) | `hotmem mcp` wired into Claude Desktop | Config | paste config + restart |
 | [typescript](typescript) | TS client add/search against `hotmem serve` | TypeScript | `npx tsx agent.ts` |
+| [company-brain-restore](company-brain-restore) | Reproducible wiki → JSONL → instance → package → clean-instance clone (#69) | Shell | `./restore.sh` |
 
 ## Prerequisites
 
