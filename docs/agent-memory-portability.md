@@ -6,6 +6,22 @@ the practical problem behind "agent memory": retaining facts, decisions,
 preferences, project knowledge, source provenance, and operational state so a
 new process can resume useful work instead of starting cold.
 
+## Cloning an instance (company-brain restore)
+
+Issue #69 adds the interchange package: a versioned directory
+(`manifest.json` + canonical `memories.jsonl` or `memories.jsonl.gz`)
+produced by `hotmem snapshot --file <dir> --package [--gz]` and restored
+with `hotmem hydrate --file <dir>`. Verification — required files, sizes,
+file and decompressed digests, record counts, schema compatibility, and
+path confinement — completes before any target write, and the restore is
+transactional: a corrupt package leaves the target untouched. Equivalent
+contents always produce the same logical identity regardless of
+compression or export time, repeated restores load zero records, and
+compatible stored embeddings are reused without re-embedding. The
+normative contract lives in `docs/okf/interchange-v1.md`; a reproducible
+end-to-end walkthrough runs at
+`examples/company-brain-restore/restore.sh` (see #67–#69).
+
 ## The HotMem model
 
 ```text

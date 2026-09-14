@@ -62,6 +62,8 @@ export interface HydrateRequest {
 export interface HydrateResponse {
   loaded: number;
   skipped_dupes: number;
+  /** Records that parsed but failed validation and were not inserted (#67). */
+  invalid?: number;
 }
 
 export interface SnapshotResponse {

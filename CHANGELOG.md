@@ -6,6 +6,94 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — deterministic OKF wiki importer (#68)
+- `hotmem import --from okf <bundle-dir> [--out review.jsonl]` converts a
+  Google Open Knowledge Format v0.2 bundle (markdown pages with YAML
+  frontmatter) into deterministic, reviewable HotMem interchange JSONL —
+  validated against the authoritative specification
+  (GoogleCloudPlatform/open-knowledge-format) and a vendored slice of the
+  public `acme_retail` fixture bundle (Apache-2.0) plus synthetic
+  edge fixtures.
+- Every page becomes one record: identifier = concept path, fact_text =
+  body, fact_summary = description/title, SHA-256 source hash, namespace,
+  tags, trust tier (§5.3), status/staleness, temporal provenance
+  (generated/verified/sources/usage_window, with the v0.1 `timestamp`
+  fallback), and normalized link relationships. Same bundle ⇒ byte-identical
+  JSONL. Raw sources stay distinct from compiled knowledge (`references/`
+  marked, never fetched). Safety envelope: 16 MiB per-file cap, PyYAML
+  safe_load only (new `okf` extra), symlink/root confinement, zero network,
+  malformed pages warn + skip.
+
+### Added — verified clone packaging and restore (#69)
+- `hotmem snapshot --file <dir> --package [--gz]` writes a
+  `hotmem-interchange-v1` package: versioned manifest (record_count,
+  logical_id, file + decompressed digests, source identity, embedding
+  compatibility block) plus a canonical JSONL or byte-stable gzip payload
+  (mtime=0). Publish is atomic (staging dir + rename); equivalent contents
+  always share the same logical identity regardless of compression, order,
+  or export time.
+- `hotmem hydrate --file <dir>` dispatches packages to a verify-then-hydrate
+  restore: verification (files, sizes, digests, record counts, schema,
+  manifest path confinement) completes before any write; the restore runs in
+  one transaction — corrupted or truncated packages leave the target
+  byte-identical. Compatible embeddings are reused (zero re-embeds),
+  incompatible ones re-embed from text, and records without usable text are
+  reported as `invalid` and never stored. Repeat restores load zero records.
+- `hotmem verify <dir>` verifies packages and Snapshot v2 directories with
+  structured diagnostics; `/v1/hydrate` maps verification failures to 409
+  (`package_verification_failed` + reason/file/expected/actual); `/v1`
+  `/v1/snapshot` gains `package`/`gz` booleans; TS client
+  `snapshot(file, {package, gz})`.
+- Reproducible end-to-end example: `examples/company-brain-restore/`
+  (README + `restore.sh`) — wiki → JSONL → source instance → package → clean
+  instance → idempotent repeat. `docs/agent-memory-portability.md` documents
+  the clone workflow.
+
+### Changed — one shared record pipeline across all readers (#67)
+- New `hotmem.interchange` package (canonical serialization, digests,
+  record normalization/validation, embedding compatibility) is the single
+  path behind legacy JSONL/GZ, Snapshot v2, SQLite hydration, bundles, and
+  packages. Field preservation is unified: namespace, tier, tags,
+  fact_summary, provenance, TTL, file-backed references, and unknown
+  top-level keys (preserved under `metadata._interchange_unknown`) now
+  survive every round-trip; Snapshot v2 embeddings are compatibility-checked
+  before reuse instead of blindly decoded.
+- Hydration results report `loaded` / `skipped_dupes` / `invalid` across
+  CLI, API, MCP, and the event log (additive — existing callers unaffected).
+- Structural performance: exports stream (`iter_rows`, hash-while-write)
+  and dedup is database-backed (chunked batch lookups) — no per-record
+  commits, no full destination hash-set loads, bounded batches everywhere.
+  Benchmarks vs main at 10k/50k/100k records (`bench/interchange/`):
+  memory peaks fall from 226–273 MB to a flat 2–4 MB at 100k (~60–70x)
+  with comparable throughput; stored-embedding restores make zero embed
+  calls. Some restore paths trade throughput for the new contract
+  semantics (details + tables in `bench/interchange/README.md`).
+
+### Fixed — Snapshot v2 documentation accuracy (#67)
+- `docs/snapshot-v2.md` now matches the implementation: manifest key is
+  `file_backed_references` (with the historical `file_references` read-alias
+  noted), the manifest example includes the informational `created_at` /
+  `hotmem_version` fields, record examples include `ttl_seconds` / `namespace`
+  / `tier` / `tags` (which now round-trip), the determinism section no longer
+  overclaims byte-identical `manifest.json` (wall-clock informational fields
+  are excluded from checksums and identity), the legacy section states the
+  actual legacy embedding field (`embedding_b64`, vs v2's `embedding`), and
+  the hydration section documents the shared embedding-compatibility rule,
+  loaded/skipped_dupes/invalid semantics, path confinement, and batched
+  database-backed dedup.
+
+### Added — company-brain interchange contract and planning docs (#67)
+- Restored the issue-linked OKF planning notes under `docs/okf/`
+  (`company-brain-interchange.md`, `file-native-memory-practices.md`,
+  `format-and-maintenance.md`, `index.md`) from git history; they are excluded
+  from the generated docs site via mkdocs `exclude_docs` so the public surface
+  added by #82 is unchanged.
+- Added `docs/okf/interchange-v1.md` — the normative `hotmem-interchange-v1`
+  contract: required/optional/forward-compatible record fields, canonical
+  JSON serialization, logical vs file digests, gzip transport rules, embedding
+  compatibility, and loaded/skipped/invalid hydration semantics. Extension
+  manifest fields are documented as Proposed and are not emitted (ADR-003).
+
 ### Changed — JSONL inspection validation policy (#89)
 - Inspection is **advisory** and now declares its assurance level:
   `FileInspection.metadata["validation"]` is `sampled` (default — only the

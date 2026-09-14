@@ -809,10 +809,14 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 docs = [
     { name = "mkdocs-material" },
+]
+okf = [
+    { name = "pyyaml" },
 ]
 vector = [
     { name = "chromadb" },
@@ -827,10 +831,12 @@ requires-dist = [
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9,<10" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9,<10" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6,<7" },
+    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6,<7" },
+    { name = "pyyaml", marker = "extra == 'okf'", specifier = ">=6,<7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15,<1" },
     { name = "uvicorn", specifier = ">=0.30,<1" },
 ]
-provides-extras = ["dev", "docs", "vector"]
+provides-extras = ["dev", "docs", "vector", "okf"]
 
 [[package]]
 name = "httpcore"

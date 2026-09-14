@@ -24,7 +24,7 @@ import math
 import re
 import sqlite3
 import struct
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -766,14 +766,20 @@ class MemoryDB:
         self._conn.commit()
         return cursor.rowcount if cursor.rowcount != -1 else 0
 
-    def insert_many_ignore(self, records: Iterable[MemoryRecord]) -> int:
-        """Insert many memory rows in one transaction, ignoring duplicate hashes/ids."""
+    def insert_many_ignore(self, records: Iterable[MemoryRecord], *, _commit: bool = True) -> int:
+        """Insert many memory rows in one transaction, ignoring duplicate hashes/ids.
+
+        ``_commit=False`` lets a caller batch many inserts into one wider
+        transaction (e.g. the all-or-nothing package restore, #69) and commit
+        or roll back explicitly.
+        """
         rows = [tuple(getattr(record, c) for c in _MEMORY_COLUMNS) for record in records]
         if not rows:
             return 0
 
         cursor = self._conn.executemany(_INSERT_OR_IGNORE_SQL, rows)
-        self._conn.commit()
+        if _commit:
+            self._conn.commit()
         inserted = cursor.rowcount if cursor.rowcount != -1 else 0
         _trace.debug("insert_many", f"stored {inserted} memories", detail={"attempted": len(rows)})
         return inserted
@@ -926,12 +932,54 @@ class MemoryDB:
         rows = self._conn.execute(query).fetchall()
         return [dict(r) for r in rows]
 
+    def iter_rows(self, *, include_embedding: bool = True, batch: int = 1000) -> Iterator[dict]:
+        """Stream all memory rows as dicts in id order, fetchmany-batched.
+
+        Streaming export path (interchange #67/#69): memory stays O(batch)
+        instead of loading every row at once, and the ORDER BY id makes the
+        output order deterministic.
+        """
+        v2_cols = (
+            "namespace, tier, memory_type, source_uri, source_format, "
+            "source_checksum, byte_offset, byte_length, updated_at, snapshot_id, "
+            "promotion_state, promotion_candidate, parent_memory, "
+            "related_memories, tags, schema_version, fact_summary, provenance_json"
+        )
+        base = (
+            "id, identifier, fact_text, embedding_dim, embedding_model, source, "
+            "importance, metadata_json, content_hash, ttl_seconds, created_at"
+        )
+        tail = ", embedding" if include_embedding else ""
+        query = f"SELECT {base}, {v2_cols}{tail} FROM memories ORDER BY id"
+        cursor = self._conn.execute(query)
+        while rows := cursor.fetchmany(batch):
+            yield from (dict(r) for r in rows)
+
     def content_hashes(self) -> set[str]:
         """Return non-empty content hashes currently stored in the database."""
         rows = self._conn.execute(
             "SELECT content_hash FROM memories WHERE content_hash != ''"
         ).fetchall()
         return {row["content_hash"] for row in rows}
+
+    def batch_existing_hashes(self, hashes: list[str]) -> set[str]:
+        """Return the subset of ``hashes`` already stored (chunked SELECT).
+
+        Database-backed deduplication for hydration paths: bounded memory
+        (chunk of at most ``_SEARCH_BIND_CHUNK`` bound parameters) instead of
+        loading the full destination hash set (interchange contract #67).
+        """
+        unique = sorted({h for h in hashes if h})
+        found: set[str] = set()
+        for start in range(0, len(unique), _SEARCH_BIND_CHUNK):
+            chunk = unique[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT content_hash FROM memories WHERE content_hash IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            found.update(row["content_hash"] for row in rows)
+        return found
 
     def exists(self, content_hash: str) -> bool:
         """Check if a memory with this content_hash already exists."""
@@ -1014,25 +1062,36 @@ class MemoryDB:
             col_sql = ", ".join(select_cols)
             cursor = src_conn.execute(f"SELECT {col_sql} FROM memories")
 
-            seen_hashes = self.content_hashes()
+            # Database-backed dedup (interchange #67): per-batch chunked
+            # SELECT instead of loading the entire destination hash set;
+            # a batch-local set catches intra-batch duplicates. Correct even
+            # on legacy DBs where the unique partial index is absent.
+            batch_seen: set[str] = set()
             while True:
                 batch = cursor.fetchmany(1000)
                 if not batch:
                     break
+                batch_seen.clear()
+                rows_dicts = [dict(row) for row in batch]
+                candidate_hashes = [
+                    d.get("content_hash", "") for d in rows_dicts if d.get("content_hash", "")
+                ]
+                existing = self.batch_existing_hashes(candidate_hashes)
                 records: list[MemoryRecord] = []
-                for row in batch:
-                    d = dict(row)
+                for d in rows_dicts:
                     ch = d.get("content_hash", "")
-                    if ch and ch in seen_hashes:
+                    if ch and (ch in existing or ch in batch_seen):
                         skipped += 1
                         continue
                     if ch:
-                        seen_hashes.add(ch)
+                        batch_seen.add(ch)
                     # Build from the columns present; dataclass defaults fill the
                     # rest (missing v2 columns in v0.1 sources).
                     records.append(MemoryRecord(**{c: d[c] for c in select_cols}))
                 if records:
-                    loaded += self.insert_many_ignore(records)
+                    inserted = self.insert_many_ignore(records)
+                    loaded += inserted
+                    skipped += len(records) - inserted
         finally:
             src_conn.close()
 

@@ -33,6 +33,7 @@ from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
 from hotmem.events import EventType, append_event, emit_import_event, query_events
 from hotmem.hygiene import check_hygiene
+from hotmem.interchange.hydrate import PackageError
 from hotmem.lifecycle import (
     InvalidTransitionError,
     list_by_state,
@@ -148,7 +149,7 @@ class HydrateRequest(BaseModel):
 
 
 class SnapshotRequest(BaseModel):
-    """Export memories to a snapshot path (v2 directory or legacy JSONL)."""
+    """Export memories to a snapshot path (package, v2 directory, or legacy JSONL)."""
 
     model_config = {"populate_by_name": True}
 
@@ -159,6 +160,14 @@ class SnapshotRequest(BaseModel):
     copy_attachments: bool = Field(
         default=False,
         description="Copy small file-backed byte ranges into attachments/ (v2 only)",
+    )
+    package: bool = Field(
+        default=False,
+        description="Write a hotmem-interchange-v1 clone package (#69)",
+    )
+    gz: bool = Field(
+        default=False,
+        description="Gzip the package payload (with package=true)",
     )
 
 
@@ -239,6 +248,7 @@ async def lifespan(app: FastAPI):
             path=str(swap_path),
             loaded=result.loaded,
             skipped_dupes=result.skipped_dupes,
+            invalid=result.invalid,
         )
         _trace.info(
             "startup",
@@ -594,6 +604,18 @@ def create_app(
                     "message": str(err),
                 },
             )
+        except PackageError as err:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "package_verification_failed",
+                    "reason": err.reason,
+                    "file": err.file,
+                    "expected": err.expected,
+                    "actual": err.actual,
+                    "message": str(err),
+                },
+            )
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
         # Record import event (deduplicated via emit_import_event helper).
@@ -602,10 +624,12 @@ def create_app(
             path=target,
             loaded=result.loaded,
             skipped_dupes=result.skipped_dupes,
+            invalid=result.invalid,
         )
         return {
             "loaded": result.loaded,
             "skipped_dupes": result.skipped_dupes,
+            "invalid": result.invalid,
             "path": target,
         }
 
@@ -616,7 +640,12 @@ def create_app(
         target = req.path or req.file or _state.get("swap_path") or "swap.jsonl"
         try:
             result = snapshot_write(
-                db, target, copy_attachments=req.copy_attachments, base_dir=base_dir
+                db,
+                target,
+                copy_attachments=req.copy_attachments,
+                base_dir=base_dir,
+                package=req.package,
+                gz=req.gz,
             )
         except SnapshotChecksumError as err:
             return JSONResponse(

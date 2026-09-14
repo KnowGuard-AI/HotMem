@@ -21,6 +21,7 @@ Extension: add encryption, remote sync, or attachment policies here.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import socket
@@ -74,6 +75,10 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
 
     Embeddings are base64-encoded so the jsonl is text-portable and can be
     rehydrated without re-embedding (stored-embedding variant, #25).
+
+    The full canonical field set is emitted (issue #67): ttl_seconds,
+    namespace, tier, and tags now round-trip instead of being dropped by
+    the writer while the readers learned to preserve them.
     """
     embedding_blob: bytes | None = row.get("embedding")
     embedding_b64 = base64.b64encode(embedding_blob).decode() if embedding_blob else None
@@ -91,6 +96,10 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "importance": row["importance"],
         "metadata": _parse_json_field(row["metadata_json"]),
         "content_hash": row["content_hash"],
+        "ttl_seconds": row["ttl_seconds"],
+        "namespace": row["namespace"],
+        "tier": row["tier"],
+        "tags": _parse_json_field(row["tags"]) or [],
         "source_uri": row["source_uri"],
         "byte_offset": row["byte_offset"],
         "byte_length": row["byte_length"],
@@ -134,43 +143,57 @@ def write_snapshot_v2(
     adapter = LocalFilesystemAdapter() if copy_attachments else None
 
     with Timer() as t:
-        rows = db.all_rows(include_embedding=True)
-        # Deterministic ordering: sort by id.
-        rows.sort(key=lambda r: r["id"])
-
-        records = [_row_to_record(r) for r in rows]
-        content_hashes = [r["content_hash"] for r in rows if r["content_hash"]]
-
-        # Build file references; copy small ranges into attachments/ if enabled.
+        # Streaming export (interchange #67): rows stream in id order
+        # (fetchmany batches) and the payload digest is computed while
+        # writing — one pass, O(batch) memory.
+        content_hashes: list[str] = []
         file_references: list[FileReference] = []
         copied: dict[str, str] = {}  # attachment filename -> memory_id (for trace)
-        for rec in records:
-            if rec["memory_type"] != "file" or not rec["source_uri"]:
-                continue
-            ref = FileReference(
-                memory_id=rec["id"],
-                source_uri=rec["source_uri"],
-                byte_offset=rec["byte_offset"] or 0,
-                byte_length=rec["byte_length"] or 0,
-                source_format=rec["source_format"],
-                source_checksum=rec["source_checksum"],
-                attachment=None,
-            )
-            if copy_attachments and adapter is not None and 0 < ref.byte_length < attach_threshold:
-                att_name = _copy_attachment(adapter, ref, attachments_dir, base_dir)
-                if att_name is not None:
-                    ref.attachment = att_name
-                    copied[att_name] = ref.memory_id
-            file_references.append(ref)
+        inline_count = 0
+        file_backed_count = 0
+        memory_count = 0
+        payload_bytes = 0
+        payload_hasher = hashlib.sha256()
 
-        # Write memories.jsonl (sorted, one record per line, compact JSON).
         memories_path = out_dir / MEMORIES_NAME
-        with open(memories_path, "w") as f:
-            for rec in records:
-                f.write(json.dumps(rec, sort_keys=True, default=str) + "\n")
+        with open(memories_path, "w", encoding="utf-8") as f:
+            for row in db.iter_rows(include_embedding=True):
+                rec = _row_to_record(row)
+                memory_count += 1
 
-        inline_count = sum(1 for r in records if r["memory_type"] != "file")
-        file_backed_count = sum(1 for r in records if r["memory_type"] == "file")
+                if rec["memory_type"] == "file":
+                    file_backed_count += 1
+                    if rec["source_uri"]:
+                        ref = FileReference(
+                            memory_id=rec["id"],
+                            source_uri=rec["source_uri"],
+                            byte_offset=rec["byte_offset"] or 0,
+                            byte_length=rec["byte_length"] or 0,
+                            source_format=rec["source_format"],
+                            source_checksum=rec["source_checksum"],
+                            attachment=None,
+                        )
+                        if (
+                            copy_attachments
+                            and adapter is not None
+                            and 0 < ref.byte_length < attach_threshold
+                        ):
+                            att_name = _copy_attachment(adapter, ref, attachments_dir, base_dir)
+                            if att_name is not None:
+                                ref.attachment = att_name
+                                copied[att_name] = ref.memory_id
+                        file_references.append(ref)
+                else:
+                    inline_count += 1
+
+                if rec["content_hash"]:
+                    content_hashes.append(rec["content_hash"])
+
+                line = json.dumps(rec, sort_keys=True, default=str) + "\n"
+                encoded = line.encode("utf-8")
+                payload_hasher.update(encoded)
+                payload_bytes += len(encoded)
+                f.write(line)
 
         # Write metadata.json (informational only — NOT included in checksums
         # so wall-clock timestamps/host don't break manifest determinism).
@@ -179,17 +202,15 @@ def write_snapshot_v2(
             created_at=_utc_now_iso(),
             host=socket.gethostname(),
             db_path=str(db.db_path),
-            counts={"inline": inline_count, "file": file_backed_count, "total": len(records)},
+            counts={"inline": inline_count, "file": file_backed_count, "total": memory_count},
         )
         metadata_path = out_dir / METADATA_NAME
         metadata_path.write_text(json.dumps(meta.to_dict(), sort_keys=True, indent=2) + "\n")
 
-        # Compute per-file checksums for manifest (metadata.json excluded for
+        # Per-file checksums for manifest (metadata.json excluded for
         # determinism — it carries created_at/host which vary per run).
         per_file: dict[str, FileEntry] = {
-            MEMORIES_NAME: FileEntry(
-                size=os.path.getsize(memories_path), sha256=sha256_file(memories_path)
-            ),
+            MEMORIES_NAME: FileEntry(size=payload_bytes, sha256=payload_hasher.hexdigest()),
         }
         # List attachment files in deterministic (sorted) order.
         attachment_entries: list[AttachmentEntry] = []
@@ -218,7 +239,7 @@ def write_snapshot_v2(
             snapshot_id=snapshot_id,
             created_at=_utc_now_iso(),
             hotmem_version=__version__,
-            memory_count=len(records),
+            memory_count=memory_count,
             file_backed_count=file_backed_count,
             inline_count=inline_count,
             files=per_file,
@@ -233,7 +254,7 @@ def write_snapshot_v2(
 
     _trace.info(
         "snapshot_v2",
-        f"exported {len(records)} memories to {out_dir}",
+        f"exported {memory_count} memories to {out_dir}",
         detail={
             "path": str(out_dir),
             "manifest": str(manifest_path),
@@ -244,7 +265,7 @@ def write_snapshot_v2(
             "ms": round(t.ms, 2),
         },
     )
-    return SnapshotResult(exported=len(records), path=str(out_dir))
+    return SnapshotResult(exported=memory_count, path=str(out_dir))
 
 
 def _copy_attachment(

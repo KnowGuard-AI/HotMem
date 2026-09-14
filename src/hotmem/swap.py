@@ -4,23 +4,25 @@ Purpose:
     Load memories from a swap file (JSONL) into the database, and export
     the current database state back to a swap file. Deduplicates on content_hash.
 
+    Hydration runs every record through the shared interchange normalization
+    (hotmem.interchange, issue #67): all v2 fields survive the round-trip,
+    one embedding-compatibility rule applies, and parsing is bounded-batch
+    with database-backed deduplication.
+
 Interface:
     hydrate(db, swap_path) -> HydrateResult
     snapshot(db, swap_path, include_embeddings=True) -> SnapshotResult
-    compute_content_hash(identifier, fact_text) -> str
+    compute_content_hash(identifier, fact_text) -> str   (re-exported)
 
-Deps: hotmem.db, hotmem.embed, hotmem.trace
+Deps: hotmem.db, hotmem.embed, hotmem.interchange, hotmem.trace
 Extension: add compression, encryption, or remote swap sources here.
 """
 
 from __future__ import annotations
 
 import base64
-import binascii
 import gzip
-import hashlib
 import json
-import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -29,20 +31,29 @@ from typing import TextIO
 
 from hotmem.db import MemoryDB, MemoryRecord
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.interchange.canonical import compute_content_hash
+from hotmem.interchange.compat import resolve_embedding
+from hotmem.interchange.record import normalize_record, validate_record
 from hotmem.trace import Timer, get_tracer
 
+__all__ = [
+    "HydrateResult",
+    "SnapshotResult",
+    "add_memory",
+    "compute_content_hash",
+    "hydrate",
+    "snapshot",
+    "write_record",
+]
+
 _trace = get_tracer("swap")
-
-
-def compute_content_hash(identifier: str, fact_text: str) -> str:
-    """SHA-256 hash of identifier + fact_text for deduplication."""
-    return hashlib.sha256(f"{identifier}:{fact_text}".encode()).hexdigest()
 
 
 @dataclass
 class HydrateResult:
     loaded: int
     skipped_dupes: int
+    invalid: int = 0
 
 
 @dataclass
@@ -85,33 +96,90 @@ def _open_swap_write(path: Path) -> Iterator[TextIO]:
             yield f
 
 
-def _metadata_json(record: dict) -> str:
-    metadata = record.get("metadata")
-    if metadata is not None:
-        return json.dumps(metadata)
-    return record.get("metadata_json", "{}")
+# Hydration flushes in bounded batches: bounded memory + batched (database-backed)
+# dedup instead of loading the entire destination hash set (interchange #67).
+_HYDRATE_BATCH = 1000
 
 
-def _stored_embedding(record: dict) -> bytes | None:
-    """Return a compatible stored embedding from a snapshot record, if present."""
-    if record.get("embedding_dim", EMBEDDING_DIM) != EMBEDDING_DIM:
-        return None
-    if record.get("embedding_model", EMBEDDING_MODEL) != EMBEDDING_MODEL:
-        return None
+def record_to_memory_record(
+    rec: dict,
+    blob: bytes,
+    *,
+    embedding_model: str | None = None,
+    embedding_dim: int | None = None,
+) -> MemoryRecord:
+    """Build a db-ready MemoryRecord from a normalized interchange record.
 
-    encoded = record.get("embedding_b64")
-    if not encoded:
-        return None
+    Every canonical field survives: namespace, tier, tags, provenance,
+    fact_summary, file-backed references, and lifecycle columns that legacy
+    writers emit — previously dropped by this path (#67 field preservation).
+    Shared with the Snapshot v2 reader (issue #67) so both build rows
+    identically. ``embedding_model``/``embedding_dim`` override the record's
+    recorded pair when resolve_embedding decided a re-embed (§5: re-embedded
+    rows carry the CURRENT model, never the stale recorded one).
+    """
+    return MemoryRecord(
+        id=rec["id"],
+        identifier=rec["identifier"],
+        fact_text=rec["fact_text"],
+        embedding=blob,
+        embedding_dim=embedding_dim if embedding_dim is not None else rec["embedding_dim"],
+        embedding_model=embedding_model if embedding_model is not None else rec["embedding_model"],
+        source=rec["source"],
+        importance=rec["importance"],
+        metadata_json=json.dumps(rec["metadata"]),
+        content_hash=rec["content_hash"],
+        ttl_seconds=rec["ttl_seconds"],
+        created_at=rec["created_at"],
+        namespace=rec["namespace"],
+        tier=rec["tier"],
+        memory_type=rec["memory_type"],
+        source_uri=rec["source_uri"],
+        source_format=rec["source_format"],
+        source_checksum=rec["source_checksum"] or "",
+        byte_offset=rec["byte_offset"],
+        byte_length=rec["byte_length"],
+        updated_at=rec["updated_at"],
+        snapshot_id=rec["snapshot_id"],
+        promotion_state=rec["promotion_state"] or "HOT",
+        promotion_candidate=rec["promotion_candidate"] or 0,
+        parent_memory=rec["parent_memory"],
+        related_memories=json.dumps(rec["related_memories"]),
+        tags=json.dumps(rec["tags"]),
+        schema_version=rec["schema_version"],
+        fact_summary=rec["fact_summary"],
+        provenance_json=json.dumps(rec["provenance"]) if rec["provenance"] else None,
+    )
 
-    try:
-        blob = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, TypeError):
-        return None
 
-    expected_bytes = EMBEDDING_DIM * 4
-    if len(blob) != expected_bytes:
-        return None
-    return blob
+def _flush_batch(
+    db: MemoryDB,
+    pending: list[dict],
+    *,
+    counters: dict,
+) -> None:
+    """Resolve embeddings and insert one bounded batch; update counters in place.
+
+    Database-backed dedup: one chunked SELECT finds destination duplicates
+    before any embedding work, then insert_many_ignore handles residual
+    races. loaded/skipped/reused/computed counters live in ``counters``.
+    """
+    existing = db.batch_existing_hashes([r["content_hash"] for r in pending])
+    todo = [r for r in pending if r["content_hash"] not in existing]
+    counters["skipped"] += len(pending) - len(todo)
+
+    records: list[MemoryRecord] = []
+    for rec in todo:
+        blob, model, dim, reused = resolve_embedding(rec, embed_fn=embed_text)
+        if reused:
+            counters["reused_embeddings"] += 1
+        else:
+            counters["computed_embeddings"] += 1
+        records.append(record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim))
+
+    loaded = db.insert_many_ignore(records)
+    counters["loaded"] += loaded
+    counters["skipped"] += len(records) - loaded
 
 
 def hydrate(
@@ -125,6 +193,11 @@ def hydrate(
     Accepts JSONL, JSONL.GZ, or a HotMem SQLite database (.sqlite/.db).
     Deduplicates by content_hash - skips rows that already exist in the DB.
     For SQLite sources, embeddings are reused as-is (fast-path, no recompute).
+
+    Every record goes through the shared interchange normalization (issue
+    #67): all v2 fields (namespace, tier, tags, provenance, fact_summary,
+    file references) survive the round-trip, embeddings are reused only when
+    compatible, and parsing is bounded-batch with database-backed dedup.
 
     on_progress, if given, is invoked once per parsed line with the byte
     length of that line — enabling byte-based progress reporting without
@@ -140,87 +213,75 @@ def hydrate(
         return HydrateResult(loaded=loaded, skipped_dupes=skipped)
 
     with Timer() as t:
-        records: list[MemoryRecord] = []
-        seen_hashes = db.content_hashes()
-        skipped = 0
-        bytes_read = 0
-        parsed = 0
-        reused_embeddings = 0
-        computed_embeddings = 0
+        counters = {
+            "loaded": 0,
+            "skipped": 0,
+            "invalid": 0,
+            "parsed": 0,
+            "bytes_read": 0,
+            "reused_embeddings": 0,
+            "computed_embeddings": 0,
+        }
+        pending: list[dict] = []
+        batch_seen: set[str] = set()
+
+        def flush() -> None:
+            if pending:
+                _flush_batch(db, pending, counters=counters)
+                pending.clear()
+                batch_seen.clear()
 
         try:
             with _open_swap_read(swap_path) as f:
                 for line in f:
                     line_bytes_len = len(line.encode())
-                    bytes_read += line_bytes_len
+                    counters["bytes_read"] += line_bytes_len
                     line = line.strip()
                     if not line:
                         if on_progress is not None:
                             on_progress(line_bytes_len)
                         continue
                     record = json.loads(line)
-                    parsed += 1
+                    counters["parsed"] += 1
                     if on_progress is not None:
                         on_progress(line_bytes_len)
 
-                    identifier = record.get("identifier", "")
-                    fact_text = record.get("fact_text", "")
-                    content_hash = record.get("content_hash") or compute_content_hash(
-                        identifier, fact_text
-                    )
-
-                    if content_hash in seen_hashes:
-                        skipped += 1
+                    if not isinstance(record, dict):
+                        counters["invalid"] += 1
                         continue
-                    seen_hashes.add(content_hash)
+                    rec = normalize_record(record)
+                    if validate_record(rec):
+                        counters["invalid"] += 1
+                        continue
 
-                    blob = _stored_embedding(record)
-                    if blob is None:
-                        vec = embed_text(fact_text)
-                        blob = pack_embedding(vec)
-                        computed_embeddings += 1
-                    else:
-                        reused_embeddings += 1
-
-                    records.append(
-                        MemoryRecord(
-                            id=record.get("id", uuid.uuid4().hex),
-                            identifier=identifier,
-                            fact_text=fact_text,
-                            embedding=blob,
-                            embedding_dim=record.get("embedding_dim", EMBEDDING_DIM),
-                            embedding_model=record.get("embedding_model", EMBEDDING_MODEL),
-                            source=record.get("source", "swap"),
-                            importance=record.get("importance", 0.5),
-                            metadata_json=_metadata_json(record),
-                            content_hash=content_hash,
-                            ttl_seconds=record.get("ttl_seconds"),
-                            created_at=record.get("created_at"),
-                        )
-                    )
+                    content_hash = rec["content_hash"]
+                    if content_hash in batch_seen:
+                        counters["skipped"] += 1
+                        continue
+                    batch_seen.add(content_hash)
+                    pending.append(rec)
+                    if len(pending) >= _HYDRATE_BATCH:
+                        flush()
         except (EOFError, OSError) as err:
             if _swap_format(swap_path) == "jsonl.gz":
                 raise ValueError(f"malformed compressed swap file: {swap_path}") from err
             raise
 
-        loaded = db.insert_many_ignore(records)
-        skipped += len(records) - loaded
+        flush()
+        loaded = counters["loaded"]
+        skipped = counters["skipped"]
+        invalid = counters["invalid"]
 
     _trace.info(
         "hydrate",
-        f"hydrated {loaded} memories, skipped {skipped} dupes",
+        f"hydrated {loaded} memories, skipped {skipped} dupes, {invalid} invalid",
         detail={
             "path": str(swap_path),
             "ms": round(t.ms, 2),
-            "bytes_read": bytes_read,
-            "parsed": parsed,
-            "loaded": loaded,
-            "skipped_dupes": skipped,
-            "computed_embeddings": computed_embeddings,
-            "reused_embeddings": reused_embeddings,
+            **{k: counters[k] for k in counters},
         },
     )
-    return HydrateResult(loaded=loaded, skipped_dupes=skipped)
+    return HydrateResult(loaded=loaded, skipped_dupes=skipped, invalid=invalid)
 
 
 def write_record(f: TextIO, record: dict) -> None:
@@ -279,25 +340,27 @@ def snapshot(
 ) -> SnapshotResult:
     """Export all memories from the database to a JSONL or JSONL.GZ swap file.
 
-    on_progress, if given, is invoked once per exported row with the count of
-    rows written so far (cumulative).
+    Streams rows in id order (fetchmany batches) so memory stays O(batch)
+    for large stores (interchange #67). on_progress, if given, is invoked
+    once per exported row with the count of rows written so far (cumulative).
     """
     swap_path = Path(swap_path)
 
     with Timer() as t:
-        rows = db.all_rows(include_embedding=include_embeddings)
+        exported = 0
         with _open_swap_write(swap_path) as f:
-            for i, row in enumerate(rows, 1):
+            for row in db.iter_rows(include_embedding=include_embeddings):
                 embedding = row.pop("embedding", None)
                 if embedding is not None:
                     row["embedding_b64"] = base64.b64encode(embedding).decode("ascii")
                 write_record(f, row)
+                exported += 1
                 if on_progress is not None:
-                    on_progress(i)
+                    on_progress(exported)
 
     _trace.info(
         "snapshot",
-        f"exported {len(rows)} memories",
+        f"exported {exported} memories",
         detail={"path": str(swap_path), "ms": round(t.ms, 2)},
     )
-    return SnapshotResult(exported=len(rows), path=str(swap_path))
+    return SnapshotResult(exported=exported, path=str(swap_path))

@@ -84,11 +84,23 @@ export class HotMemClient {
     return this.request<HydrateResponse>("POST", "/v1/hydrate", payload);
   }
 
-  /** Trigger database snapshot to swap file. */
-  async snapshot(file?: string): Promise<SnapshotResponse> {
+  /** Trigger database snapshot to swap file, v2 directory, or interchange package. */
+  async snapshot(
+    file?: string,
+    options?: { package?: boolean; gz?: boolean; copyAttachments?: boolean },
+  ): Promise<SnapshotResponse> {
     const payload: Record<string, unknown> = {};
     if (file !== undefined) {
       payload.file = file;
+    }
+    if (options?.package !== undefined) {
+      payload.package = options.package;
+    }
+    if (options?.gz !== undefined) {
+      payload.gz = options.gz;
+    }
+    if (options?.copyAttachments !== undefined) {
+      payload.copy_attachments = options.copyAttachments;
     }
     return this.request<SnapshotResponse>("POST", "/v1/snapshot", payload);
   }

@@ -19,7 +19,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v4
       - run: uv venv
-      - run: uv pip install -e ".[dev,mcp]"
+      - run: uv pip install -e ".[dev,mcp,okf]"
       - run: uv run ruff check src/ tests/ examples/
       - run: uv run ruff format --check src/ tests/ examples/
       - run: uv run pytest --cov=hotmem --cov-report=xml
@@ -60,7 +60,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v4
       - run: uv venv
-      - run: uv pip install -e ".[dev,mcp]"
+      - run: uv pip install -e ".[dev,mcp,okf]"
       - name: Install adapters
         run: |
           uv pip install -e adapters/langchain
