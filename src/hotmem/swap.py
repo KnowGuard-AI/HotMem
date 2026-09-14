@@ -16,9 +16,7 @@ Extension: add compression, encryption, or remote swap sources here.
 from __future__ import annotations
 
 import base64
-import binascii
 import gzip
-import hashlib
 import json
 import uuid
 from collections.abc import Callable, Iterator
@@ -29,14 +27,11 @@ from typing import TextIO
 
 from hotmem.db import MemoryDB, MemoryRecord
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.interchange.canonical import compute_content_hash
+from hotmem.interchange.compat import compatible_embedding_blob
 from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("swap")
-
-
-def compute_content_hash(identifier: str, fact_text: str) -> str:
-    """SHA-256 hash of identifier + fact_text for deduplication."""
-    return hashlib.sha256(f"{identifier}:{fact_text}".encode()).hexdigest()
 
 
 @dataclass
@@ -93,25 +88,12 @@ def _metadata_json(record: dict) -> str:
 
 
 def _stored_embedding(record: dict) -> bytes | None:
-    """Return a compatible stored embedding from a snapshot record, if present."""
-    if record.get("embedding_dim", EMBEDDING_DIM) != EMBEDDING_DIM:
-        return None
-    if record.get("embedding_model", EMBEDDING_MODEL) != EMBEDDING_MODEL:
-        return None
+    """Return a compatible stored embedding from a snapshot record, if present.
 
-    encoded = record.get("embedding_b64")
-    if not encoded:
-        return None
-
-    try:
-        blob = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, TypeError):
-        return None
-
-    expected_bytes = EMBEDDING_DIM * 4
-    if len(blob) != expected_bytes:
-        return None
-    return blob
+    Delegates to the shared interchange compatibility rule (issue #67), which
+    accepts both ``embedding_b64`` (legacy) and ``embedding`` (v2) spellings.
+    """
+    return compatible_embedding_blob(record)
 
 
 def hydrate(
