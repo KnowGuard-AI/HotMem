@@ -13,6 +13,7 @@ hotmem serve --db ./my.sqlite
 hotmem serve --host 0.0.0.0 --port 8711
 hotmem hydrate --file swap.jsonl --db ./my.sqlite
 hotmem snapshot --file swap.jsonl --db ./my.sqlite
+hotmem import --from okf --db ./company-wiki --target ./brain.sqlite --out ./wiki.jsonl
 hotmem status
 hotmem openapi --output openapi.json
 hotmem openapi --output openapi.yaml --format yaml
@@ -73,3 +74,41 @@ Export the OpenAPI specification.
 |---|---|---|
 | `--output` / `-o` | stdout | Output file path |
 | `--format` | json | Output format (json or yaml) |
+
+### 4.6 `import`
+
+Import memories from a foreign memory system or knowledge bundle into HotMem.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--from` | required | Source type: `mem0` (SQLite history DB) or `okf` (OKF v0.2 bundle directory) |
+| `--db` | required | Source database path (mem0) or bundle directory (okf) |
+| `--target` | temp DB | HotMem database to hydrate into |
+| `--out` | temp file, deleted | Keep the intermediate JSONL for review |
+
+The command always emits the intermediate JSONL before hydration — pass
+`--out` to keep a reviewable artifact of exactly what will be loaded.
+
+#### OKF bundles (`--from okf`)
+
+Reads a Google Open Knowledge Format v0.2 bundle — a directory tree of
+markdown concept pages with YAML frontmatter — and converts each page into
+one deterministic record: identifier is the concept path (sans `.md`),
+`fact_text` is the page body, frontmatter trust/lifecycle/provenance
+families are preserved (trust tier, status, sources, generated/verified
+timestamps), relative and bundle-absolute links are captured, and each
+record carries the page's SHA-256 as `source_checksum`. The same bundle
+always produces byte-identical JSONL.
+
+Living-wiki conventions that import cleanly:
+
+- An `index.md` per directory listing child pages (reserved; never a record).
+- Compact, focused pages that link to each other rather than duplicating
+  content — links become record relationships.
+- Raw source material under `references/` stays distinct from compiled
+  knowledge: it is recorded as provenance and marked in metadata, never
+  fetched or inlined.
+
+Safety envelope: per-file size cap (16 MiB), safe YAML only, symlink
+escapes rejected, zero network access. Pages with malformed frontmatter
+warn and are skipped — they never crash the import.

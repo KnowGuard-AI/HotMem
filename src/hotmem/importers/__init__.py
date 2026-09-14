@@ -23,11 +23,13 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from hotmem.importers.mem0 import read_mem0_sqlite
+from hotmem.importers.okf import read_okf
 
 ImporterFn = Callable[[Path], Iterator[dict]]
 
 IMPORTERS: dict[str, ImporterFn] = {
     "mem0": read_mem0_sqlite,
+    "okf": read_okf,
 }
 
 

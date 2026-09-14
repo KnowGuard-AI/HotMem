@@ -50,6 +50,15 @@ def canonical_line(record: dict[str, Any]) -> str:
     return canonical_dumps(record) + "\n"
 
 
+def write_canonical(f, record: dict[str, Any]) -> None:
+    """Serialize one canonical JSONL record to a file handle.
+
+    Mirror of hotmem.swap.write_record for the canonical byte form, so writer
+    call sites can swap serialization without changing shape.
+    """
+    f.write(canonical_line(record))
+
+
 def compute_content_hash(identifier: str, fact_text: str) -> str:
     """SHA-256 of identifier + fact_text — the per-record logical identity.
 

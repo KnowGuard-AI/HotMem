@@ -437,15 +437,15 @@ def playground(db_path: str | None, url: str | None):
     "--from",
     "source",
     required=True,
-    type=click.Choice(["mem0"], case_sensitive=False),
-    help="Source memory system to import from.",
+    type=click.Choice(["mem0", "okf"], case_sensitive=False),
+    help="Source memory system to import from (mem0) or an OKF v0.2 bundle (okf).",
 )
 @click.option(
     "--db",
     "source_db",
     required=True,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Path to the source memory database (e.g. mem0's history SQLite DB).",
+    type=click.Path(exists=True),
+    help="Path to the source memory database (mem0) or OKF bundle directory (okf).",
 )
 @click.option(
     "--target",
@@ -467,15 +467,24 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
     One-command migration: read the source store, convert to HotMem swap JSONL,
     hydrate into the target DB. Embeddings are re-computed by HotMem's
     embedder (source dims differ, so reuse is not possible).
+
+    OKF bundles (--from okf) convert every markdown concept page into one
+    deterministic, reviewable JSONL record BEFORE hydration — keep it with
+    --out to review exactly what will be loaded (#68).
     """
     import tempfile as _tempfile
 
     from hotmem.db import MemoryDB
     from hotmem.importers import IMPORTERS
+    from hotmem.interchange.canonical import write_canonical
     from hotmem.swap import hydrate as do_hydrate
     from hotmem.swap import write_record
 
     reader = IMPORTERS[source.lower()]
+    # OKF records serialize canonically (sorted, compact, UTF-8) so the
+    # reviewable JSONL is byte-stable across runs (#68 acceptance); mem0
+    # keeps the historical swap-record serialization.
+    serialize = write_canonical if source.lower() == "okf" else write_record
 
     ui = get_renderer()
 
@@ -494,7 +503,7 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
             # count up front); the byte-total bar applies to the hydrate phase.
             with open(swap_path, "w") as f, ui.progress(total=None, desc="Reading source"):
                 for record in reader(_Path(source_db)):
-                    write_record(f, record)
+                    serialize(f, record)
         except (ValueError, FileNotFoundError) as err:
             raise click.ClickException(f"import from {source} failed: {err}") from err
 
