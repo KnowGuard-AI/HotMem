@@ -360,10 +360,19 @@ def normalize_verified(fm: dict[str, Any]) -> list[dict[str, Any]] | None:
 def _okf_metadata(
     page: PageData, fm: dict[str, Any], verified: list[dict[str, Any]] | None
 ) -> dict[str, Any]:
+    """Classification + faithful frontmatter passthrough.
+
+    Derived fields give HotMem its signals (§5.3 tiers, §5.4 status); the
+    complete jsonified frontmatter is preserved verbatim under
+    ``frontmatter`` per §11's SHOULD-preserve rule — unknown keys (runtime,
+    parameters, executor, attester, producer extensions) survive the
+    round-trip unharmed.
+    """
     meta: dict[str, Any] = {
         "type": str(fm.get("type", "")),
         "status": str(fm.get("status") or "stable"),  # §5.4: absent ⇒ stable
         "trust_tier": derive_trust_tier(verified),
+        "frontmatter": fm,
     }
     for key in ("title", "resource", "stale_after"):
         if fm.get(key) is not None:
