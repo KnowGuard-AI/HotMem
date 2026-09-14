@@ -26,3 +26,7 @@ planned-evolution.md
 bench/native_spike/corpus/
 bench/native_spike/**/*.so
 bench/native_spike/**/*.o
+corpus/
+
+# interchange benchmarks (#67-69) — generated corpora
+bench/interchange/corpus/

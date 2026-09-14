@@ -1,0 +1,483 @@
+{
+  "runs": [
+    {
+      "meta": {
+        "hotmem_file": "/Users/zubinj/forge/HotMem/src",
+        "label": "branch",
+        "on_branch": true,
+        "python": "3.11.9"
+      },
+      "rows": [
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 12785.8,
+          "scenario": "export_plain",
+          "seconds": 0.782,
+          "size": 10000,
+          "tracemalloc_peak_mb": 2.95
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 7948.7,
+          "scenario": "export_gz",
+          "seconds": 1.258,
+          "size": 10000,
+          "tracemalloc_peak_mb": 3.2
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 13647.6,
+          "scenario": "export_plain_noemb",
+          "seconds": 0.733,
+          "size": 10000,
+          "tracemalloc_peak_mb": 2.39
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 12317.8,
+          "scenario": "package_export",
+          "seconds": 0.812,
+          "size": 10000,
+          "tracemalloc_peak_mb": 3.87
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 7130.2,
+          "scenario": "package_export_gz",
+          "seconds": 1.402,
+          "size": 10000,
+          "tracemalloc_peak_mb": 4.13
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 94355.8,
+          "scenario": "package_verify",
+          "seconds": 0.106,
+          "size": 10000,
+          "tracemalloc_peak_mb": 0.31
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 6635.3,
+          "scenario": "restore_initial",
+          "seconds": 1.507,
+          "size": 10000,
+          "tracemalloc_peak_mb": 4.21
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 0.0,
+          "scenario": "restore_repeat",
+          "seconds": 0.532,
+          "size": 10000,
+          "tracemalloc_peak_mb": 2.32
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 10000,
+          "rec_per_s": 3264.2,
+          "scenario": "restore_reembed",
+          "seconds": 3.064,
+          "size": 10000,
+          "tracemalloc_peak_mb": 3.85
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 7290.4,
+          "scenario": "package_restore_initial",
+          "seconds": 1.372,
+          "size": 10000,
+          "tracemalloc_peak_mb": 4.16
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 0.0,
+          "scenario": "package_restore_repeat",
+          "seconds": 0.473,
+          "size": 10000,
+          "tracemalloc_peak_mb": 2.27
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 12357.1,
+          "scenario": "export_plain",
+          "seconds": 4.046,
+          "size": 50000,
+          "tracemalloc_peak_mb": 2.96
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 7601.8,
+          "scenario": "export_gz",
+          "seconds": 6.577,
+          "size": 50000,
+          "tracemalloc_peak_mb": 3.21
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 14300.5,
+          "scenario": "export_plain_noemb",
+          "seconds": 3.496,
+          "size": 50000,
+          "tracemalloc_peak_mb": 2.39
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 13036.4,
+          "scenario": "package_export",
+          "seconds": 3.835,
+          "size": 50000,
+          "tracemalloc_peak_mb": 11.92
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 6772.1,
+          "scenario": "package_export_gz",
+          "seconds": 7.383,
+          "size": 50000,
+          "tracemalloc_peak_mb": 11.93
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 96834.8,
+          "scenario": "package_verify",
+          "seconds": 0.516,
+          "size": 50000,
+          "tracemalloc_peak_mb": 0.31
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 5017.0,
+          "scenario": "restore_initial",
+          "seconds": 9.966,
+          "size": 50000,
+          "tracemalloc_peak_mb": 4.22
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 0.0,
+          "scenario": "restore_repeat",
+          "seconds": 2.786,
+          "size": 50000,
+          "tracemalloc_peak_mb": 2.33
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 50000,
+          "rec_per_s": 2735.9,
+          "scenario": "restore_reembed",
+          "seconds": 18.276,
+          "size": 50000,
+          "tracemalloc_peak_mb": 3.86
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 5729.4,
+          "scenario": "package_restore_initial",
+          "seconds": 8.727,
+          "size": 50000,
+          "tracemalloc_peak_mb": 4.17
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 0.0,
+          "scenario": "package_restore_repeat",
+          "seconds": 2.424,
+          "size": 50000,
+          "tracemalloc_peak_mb": 2.28
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 12176.4,
+          "scenario": "export_plain",
+          "seconds": 8.213,
+          "size": 100000,
+          "tracemalloc_peak_mb": 2.96
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 7623.7,
+          "scenario": "export_gz",
+          "seconds": 13.117,
+          "size": 100000,
+          "tracemalloc_peak_mb": 3.21
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 13362.2,
+          "scenario": "export_plain_noemb",
+          "seconds": 7.484,
+          "size": 100000,
+          "tracemalloc_peak_mb": 2.39
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 12342.1,
+          "scenario": "package_export",
+          "seconds": 8.102,
+          "size": 100000,
+          "tracemalloc_peak_mb": 23.76
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 6680.5,
+          "scenario": "package_export_gz",
+          "seconds": 14.969,
+          "size": 100000,
+          "tracemalloc_peak_mb": 23.76
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 94668.3,
+          "scenario": "package_verify",
+          "seconds": 1.056,
+          "size": 100000,
+          "tracemalloc_peak_mb": 0.31
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 4757.0,
+          "scenario": "restore_initial",
+          "seconds": 21.022,
+          "size": 100000,
+          "tracemalloc_peak_mb": 4.23
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 0.0,
+          "scenario": "restore_repeat",
+          "seconds": 5.786,
+          "size": 100000,
+          "tracemalloc_peak_mb": 2.33
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 100000,
+          "rec_per_s": 2577.3,
+          "scenario": "restore_reembed",
+          "seconds": 38.8,
+          "size": 100000,
+          "tracemalloc_peak_mb": 3.86
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 5619.4,
+          "scenario": "package_restore_initial",
+          "seconds": 17.796,
+          "size": 100000,
+          "tracemalloc_peak_mb": 4.18
+        },
+        {
+          "branch_only": true,
+          "embed_calls": 0,
+          "rec_per_s": 0.0,
+          "scenario": "package_restore_repeat",
+          "seconds": 4.93,
+          "size": 100000,
+          "tracemalloc_peak_mb": 2.28
+        }
+      ]
+    },
+    {
+      "meta": {
+        "hotmem_file": "/tmp/hotmem-main/src",
+        "label": "main",
+        "on_branch": false,
+        "python": "3.11.9"
+      },
+      "rows": [
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 13681.1,
+          "scenario": "export_plain",
+          "seconds": 0.731,
+          "size": 10000,
+          "tracemalloc_peak_mb": 22.65
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 7446.7,
+          "scenario": "export_gz",
+          "seconds": 1.343,
+          "size": 10000,
+          "tracemalloc_peak_mb": 22.65
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 15349.9,
+          "scenario": "export_plain_noemb",
+          "seconds": 0.651,
+          "size": 10000,
+          "tracemalloc_peak_mb": 19.82
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 8103.5,
+          "scenario": "restore_initial",
+          "seconds": 1.234,
+          "size": 10000,
+          "tracemalloc_peak_mb": 27.42
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 0.0,
+          "scenario": "restore_repeat",
+          "seconds": 0.28,
+          "size": 10000,
+          "tracemalloc_peak_mb": 2.7
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 10000,
+          "rec_per_s": 1780.3,
+          "scenario": "restore_reembed",
+          "seconds": 5.617,
+          "size": 10000,
+          "tracemalloc_peak_mb": 27.44
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 12039.2,
+          "scenario": "export_plain",
+          "seconds": 4.153,
+          "size": 50000,
+          "tracemalloc_peak_mb": 113.32
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 7299.2,
+          "scenario": "export_gz",
+          "seconds": 6.85,
+          "size": 50000,
+          "tracemalloc_peak_mb": 113.32
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 13578.6,
+          "scenario": "export_plain_noemb",
+          "seconds": 3.682,
+          "size": 50000,
+          "tracemalloc_peak_mb": 99.16
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 6758.4,
+          "scenario": "restore_initial",
+          "seconds": 7.398,
+          "size": 50000,
+          "tracemalloc_peak_mb": 136.64
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 0.0,
+          "scenario": "restore_repeat",
+          "seconds": 1.339,
+          "size": 50000,
+          "tracemalloc_peak_mb": 12.89
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 50000,
+          "rec_per_s": 1802.7,
+          "scenario": "restore_reembed",
+          "seconds": 27.736,
+          "size": 50000,
+          "tracemalloc_peak_mb": 136.65
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 12776.8,
+          "scenario": "export_plain",
+          "seconds": 7.827,
+          "size": 100000,
+          "tracemalloc_peak_mb": 226.49
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 7716.9,
+          "scenario": "export_gz",
+          "seconds": 12.959,
+          "size": 100000,
+          "tracemalloc_peak_mb": 226.49
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 13918.4,
+          "scenario": "export_plain_noemb",
+          "seconds": 7.185,
+          "size": 100000,
+          "tracemalloc_peak_mb": 198.16
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 6667.6,
+          "scenario": "restore_initial",
+          "seconds": 14.998,
+          "size": 100000,
+          "tracemalloc_peak_mb": 273.12
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 0,
+          "rec_per_s": 0.0,
+          "scenario": "restore_repeat",
+          "seconds": 2.743,
+          "size": 100000,
+          "tracemalloc_peak_mb": 26.7
+        },
+        {
+          "branch_only": false,
+          "embed_calls": 100000,
+          "rec_per_s": 1811.0,
+          "scenario": "restore_reembed",
+          "seconds": 55.218,
+          "size": 100000,
+          "tracemalloc_peak_mb": 273.13
+        }
+      ]
+    }
+  ]
+}
