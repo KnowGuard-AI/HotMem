@@ -766,9 +766,7 @@ class MemoryDB:
         self._conn.commit()
         return cursor.rowcount if cursor.rowcount != -1 else 0
 
-    def insert_many_ignore(
-        self, records: Iterable[MemoryRecord], *, _commit: bool = True
-    ) -> int:
+    def insert_many_ignore(self, records: Iterable[MemoryRecord], *, _commit: bool = True) -> int:
         """Insert many memory rows in one transaction, ignoring duplicate hashes/ids.
 
         ``_commit=False`` lets a caller batch many inserts into one wider

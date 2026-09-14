@@ -137,15 +137,17 @@ def hydrate(swap_file: str, db_path: str):
     # legacy .jsonl/.jsonl.gz goes through swap.hydrate with the UI progress bar.
     is_dir_target = not swap_file.endswith((".jsonl", ".jsonl.gz"))
     if is_dir_target:
+        from hotmem.interchange.hydrate import PackageError
         from hotmem.snapshot import hydrate as do_hydrate_v2
         from hotmem.snapshot.format import SnapshotChecksumError
 
         db = MemoryDB(db_path)
         try:
             result = do_hydrate_v2(db, swap_file)
-        except SnapshotChecksumError as err:
+        except (SnapshotChecksumError, PackageError) as err:
             db.close()
-            raise click.ClickException(f"Snapshot checksum failure ({err.reason}): {err}") from err
+            reason = getattr(err, "reason", "checksum")
+            raise click.ClickException(f"Snapshot verification failure ({reason}): {err}") from err
         db.close()
         get_renderer().summary(
             "hydrate",
@@ -177,7 +179,7 @@ def hydrate(swap_file: str, db_path: str):
     "swap_file",
     default="swap.jsonl",
     type=click.Path(),
-    help="Snapshot path: a directory (v2) or .jsonl/.jsonl.gz file (legacy).",
+    help="Snapshot path: a directory (v2/package) or .jsonl/.jsonl.gz file (legacy).",
 )
 @click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
 @click.option(
@@ -187,21 +189,37 @@ def hydrate(swap_file: str, db_path: str):
     default=False,
     help="Copy small file-backed byte ranges into attachments/ (v2 only).",
 )
-def snapshot(swap_file: str, db_path: str, copy_attachments: bool):
+@click.option(
+    "--package",
+    "package",
+    is_flag=True,
+    default=False,
+    help="Write a hotmem-interchange-v1 clone package (manifest + canonical payload) (#69).",
+)
+@click.option(
+    "--gz",
+    "gz",
+    is_flag=True,
+    default=False,
+    help="Gzip the package payload (with --package): memories.jsonl.gz, byte-stable (mtime=0).",
+)
+def snapshot(swap_file: str, db_path: str, copy_attachments: bool, package: bool, gz: bool):
     """Export database memories to a snapshot (v2 directory or legacy JSONL).
 
     A path ending in .jsonl/.jsonl.gz writes a legacy single-file snapshot;
     any other path writes a v2 directory (manifest + memories.jsonl + optional
     attachments). Pass --attach to copy small file-backed byte ranges (<8 KB)
-    into attachments/; large ranges stay referenced.
+    into attachments/; large ranges stay referenced. Pass --package (optionally
+    --gz) to write a hotmem-interchange-v1 clone package: versioned manifest,
+    canonical record stream, atomic publish (#69).
     """
     from pathlib import Path
 
     from hotmem.db import MemoryDB
 
-    # Route v2 directories through the snapshot dispatch;
+    # Route v2/package directories through the snapshot dispatch;
     # legacy .jsonl/.jsonl.gz goes through swap.snapshot with the UI progress bar.
-    is_dir_target = not swap_file.endswith((".jsonl", ".jsonl.gz"))
+    is_dir_target = package or not swap_file.endswith((".jsonl", ".jsonl.gz"))
     if is_dir_target:
         from hotmem.snapshot import snapshot as do_snapshot_v2
 
@@ -209,6 +227,8 @@ def snapshot(swap_file: str, db_path: str, copy_attachments: bool):
         result = do_snapshot_v2(
             db,
             swap_file,
+            package=package,
+            gz=gz,
             copy_attachments=copy_attachments,
             base_dir=str(Path(db_path).resolve().parent),
         )
@@ -226,6 +246,29 @@ def snapshot(swap_file: str, db_path: str, copy_attachments: bool):
     db.close()
 
     ui.summary("snapshot", exported=result.exported, path=result.path)
+
+
+@main.command()
+@click.argument("path", type=click.Path(exists=True))
+def verify(path: str):
+    """Verify a snapshot directory or interchange package (#69).
+
+    Checks required files, sizes, digests, and record counts before any
+    restore; exits non-zero with structured diagnostics on failure.
+    """
+    from hotmem.interchange.hydrate import PackageError
+    from hotmem.snapshot import verify as do_verify
+    from hotmem.snapshot.format import SnapshotChecksumError
+
+    ui = get_renderer()
+    try:
+        summary = do_verify(path)
+    except (PackageError, SnapshotChecksumError) as err:
+        detail = {"reason": getattr(err, "reason", None), "file": getattr(err, "file", None)}
+        _trace.warn("verify", f"verification failed: {err}", detail=detail)
+        ui.summary("verify", valid=False, reason=getattr(err, "reason", str(err)))
+        raise click.ClickException(str(err)) from err
+    ui.summary("verify", **summary)
 
 
 @main.command()

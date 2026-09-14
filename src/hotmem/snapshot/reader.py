@@ -29,11 +29,11 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 from hotmem.db import MemoryDB
 from hotmem.interchange.compat import resolve_embedding
+from hotmem.interchange.paths import confined_relpath
 from hotmem.interchange.record import normalize_record, validate_record
 from hotmem.snapshot.format import (
     Manifest,
@@ -41,7 +41,7 @@ from hotmem.snapshot.format import (
     compute_overall,
     sha256_file,
 )
-from hotmem.swap import _HYDRATE_BATCH, record_to_memory_record
+from hotmem.swap import _HYDRATE_BATCH, HydrateResult, record_to_memory_record
 from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("snapshot.reader")
@@ -49,13 +49,6 @@ _trace = get_tracer("snapshot.reader")
 MANIFEST_NAME = "manifest.json"
 MEMORIES_NAME = "memories.jsonl"
 METADATA_NAME = "metadata.json"
-
-
-@dataclass
-class HydrateResult:
-    loaded: int
-    skipped_dupes: int
-    invalid: int = 0
 
 
 def detect_v2(path: str | Path) -> bool:
@@ -126,24 +119,6 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
         )
 
     return manifest
-
-
-def confined_relpath(root: Path, rel: str) -> bool:
-    """True if ``rel`` names a path inside ``root`` without traversal/symlinks.
-
-    A crafted manifest must never make the verifier read outside the package
-    (interchange contract #67, path confinement). Absolute paths and any
-    component escaping the root are rejected; symlinked entries are rejected
-    because they can point outside even with a clean relative name.
-    """
-    if not rel or rel.startswith("/") or Path(rel).is_absolute() or ".." in Path(rel).parts:
-        return False
-    resolved = (root / rel).resolve()
-    try:
-        resolved.relative_to(root.resolve())
-    except ValueError:
-        return False
-    return os.path.realpath(root / rel) == str(resolved) and not os.path.islink(root / rel)
 
 
 def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
