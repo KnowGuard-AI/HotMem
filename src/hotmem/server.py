@@ -239,6 +239,7 @@ async def lifespan(app: FastAPI):
             path=str(swap_path),
             loaded=result.loaded,
             skipped_dupes=result.skipped_dupes,
+            invalid=result.invalid,
         )
         _trace.info(
             "startup",
@@ -602,10 +603,12 @@ def create_app(
             path=target,
             loaded=result.loaded,
             skipped_dupes=result.skipped_dupes,
+            invalid=result.invalid,
         )
         return {
             "loaded": result.loaded,
             "skipped_dupes": result.skipped_dupes,
+            "invalid": result.invalid,
             "path": target,
         }
 

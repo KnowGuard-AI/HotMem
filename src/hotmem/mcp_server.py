@@ -278,7 +278,9 @@ def _handle_hydrate(state: _ServerState, arguments: dict[str, Any]) -> CallToolR
     """Load memories from a JSONL swap file into the database."""
     swap = arguments.get("file") or state.swap_path or "swap.jsonl"
     result = swap_hydrate(state.db, swap)
-    return _ok({"loaded": result.loaded, "skipped_dupes": result.skipped_dupes})
+    return _ok(
+        {"loaded": result.loaded, "skipped_dupes": result.skipped_dupes, "invalid": result.invalid}
+    )
 
 
 def _ok(payload: dict[str, Any]) -> CallToolResult:

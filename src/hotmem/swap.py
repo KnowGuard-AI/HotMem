@@ -53,6 +53,7 @@ _trace = get_tracer("swap")
 class HydrateResult:
     loaded: int
     skipped_dupes: int
+    invalid: int = 0
 
 
 @dataclass
@@ -280,7 +281,7 @@ def hydrate(
             **{k: counters[k] for k in counters},
         },
     )
-    return HydrateResult(loaded=loaded, skipped_dupes=skipped)
+    return HydrateResult(loaded=loaded, skipped_dupes=skipped, invalid=invalid)
 
 
 def write_record(f: TextIO, record: dict) -> None:

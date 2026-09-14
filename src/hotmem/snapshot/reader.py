@@ -55,6 +55,7 @@ METADATA_NAME = "metadata.json"
 class HydrateResult:
     loaded: int
     skipped_dupes: int
+    invalid: int = 0
 
 
 def detect_v2(path: str | Path) -> bool:
@@ -229,4 +230,4 @@ def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
             **{k: counters[k] for k in counters},
         },
     )
-    return HydrateResult(loaded=loaded, skipped_dupes=skipped)
+    return HydrateResult(loaded=loaded, skipped_dupes=skipped, invalid=invalid)

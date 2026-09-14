@@ -147,7 +147,12 @@ def hydrate(swap_file: str, db_path: str):
             db.close()
             raise click.ClickException(f"Snapshot checksum failure ({err.reason}): {err}") from err
         db.close()
-        get_renderer().summary("hydrate", loaded=result.loaded, skipped_dupes=result.skipped_dupes)
+        get_renderer().summary(
+            "hydrate",
+            loaded=result.loaded,
+            skipped_dupes=result.skipped_dupes,
+            invalid=result.invalid,
+        )
         return
 
     from hotmem.swap import hydrate as do_hydrate
@@ -161,7 +166,9 @@ def hydrate(swap_file: str, db_path: str):
         result = do_hydrate(db, swap_file, on_progress=tick)
     db.close()
 
-    ui.summary("hydrate", loaded=result.loaded, skipped_dupes=result.skipped_dupes)
+    ui.summary(
+        "hydrate", loaded=result.loaded, skipped_dupes=result.skipped_dupes, invalid=result.invalid
+    )
 
 
 @main.command()
@@ -504,6 +511,7 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
             source=source,
             imported=result.loaded,
             skipped_dupes=result.skipped_dupes,
+            invalid=result.invalid,
             target=target,
         )
     finally:

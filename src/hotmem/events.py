@@ -288,6 +288,7 @@ def emit_import_event(
     path: str,
     loaded: int,
     skipped_dupes: int,
+    invalid: int = 0,
     _commit: bool = True,
 ) -> dict[str, Any]:
     """Emit a SNAPSHOT_IMPORTED or BUNDLE_IMPORTED event (deduplicated helper).
@@ -308,6 +309,7 @@ def emit_import_event(
         payload={
             "loaded": loaded,
             "skipped_dupes": skipped_dupes,
+            "invalid": invalid,
             "path": str(path),
             "format": fmt,
         },

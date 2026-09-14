@@ -511,3 +511,21 @@ def test_hydrate_does_not_load_entire_hash_set(tmp_db: MemoryDB, tmp_path: Path)
 
     assert result.loaded == 1
     assert calls  # batched lookup happened instead of content_hashes()
+
+
+def test_hydrate_reports_invalid_records(tmp_db: MemoryDB, tmp_path: Path):
+    """Non-object lines and unusable records count invalid and are not stored."""
+    swap = tmp_path / "swap.jsonl"
+    lines = [
+        json.dumps({"identifier": "ok", "fact_text": "good fact"}),
+        json.dumps(["not", "an", "object"]),
+        json.dumps({"identifier": "", "fact_text": ""}),
+        json.dumps({"identifier": "ok2", "fact_text": "good fact 2"}),
+    ]
+    swap.write_text("\n".join(lines) + "\n")
+
+    result = hydrate(tmp_db, swap)
+    assert result.loaded == 2
+    assert result.skipped_dupes == 0
+    assert result.invalid == 2
+    assert tmp_db.count() == 2

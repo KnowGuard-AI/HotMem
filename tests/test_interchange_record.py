@@ -197,3 +197,12 @@ def test_absent_dim_and_model_default_to_current():
     # Legacy records without dim/model fields are compatible by default.
     b64 = _blob_b64()
     assert compatible_embedding_blob({"embedding_b64": b64}) is not None
+
+
+def test_hydrate_result_invalid_field_is_additive():
+    """HydrateResult.invalid defaults to 0 — existing callers are unaffected."""
+    from hotmem.snapshot.reader import HydrateResult as V2Result
+    from hotmem.swap import HydrateResult as SwapResult
+
+    assert SwapResult(loaded=1, skipped_dupes=0).invalid == 0
+    assert V2Result(loaded=1, skipped_dupes=0).invalid == 0

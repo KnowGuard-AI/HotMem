@@ -222,7 +222,9 @@ def test_sync_client_return_shapes(tmp_path):
         )
 
         hydrated = client.hydrate()
-        assert_keys_exact(hydrated, {"loaded", "skipped_dupes", "path"}, "client.hydrate()")
+        assert_keys_exact(
+            hydrated, {"loaded", "skipped_dupes", "invalid", "path"}, "client.hydrate()"
+        )
 
         snap = client.snapshot()
         assert_keys_exact(snap, {"exported", "path"}, "client.snapshot()")
