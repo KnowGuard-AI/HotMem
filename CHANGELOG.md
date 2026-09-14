@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed — Snapshot v2 documentation accuracy (#67)
+- `docs/snapshot-v2.md` now matches the implementation: manifest key is
+  `file_backed_references` (with the historical `file_references` read-alias
+  noted), the manifest example includes the informational `created_at` /
+  `hotmem_version` fields, record examples include `ttl_seconds` / `namespace`
+  / `tier` / `tags` (which now round-trip), the determinism section no longer
+  overclaims byte-identical `manifest.json` (wall-clock informational fields
+  are excluded from checksums and identity), the legacy section states the
+  actual legacy embedding field (`embedding_b64`, vs v2's `embedding`), and
+  the hydration section documents the shared embedding-compatibility rule,
+  loaded/skipped_dupes/invalid semantics, path confinement, and batched
+  database-backed dedup.
+
 ### Added — company-brain interchange contract and planning docs (#67)
 - Restored the issue-linked OKF planning notes under `docs/okf/`
   (`company-brain-interchange.md`, `file-native-memory-practices.md`,
