@@ -1062,25 +1062,38 @@ class MemoryDB:
             col_sql = ", ".join(select_cols)
             cursor = src_conn.execute(f"SELECT {col_sql} FROM memories")
 
-            seen_hashes = self.content_hashes()
+            # Database-backed dedup (interchange #67): per-batch chunked
+            # SELECT instead of loading the entire destination hash set;
+            # a batch-local set catches intra-batch duplicates. Correct even
+            # on legacy DBs where the unique partial index is absent.
+            batch_seen: set[str] = set()
             while True:
                 batch = cursor.fetchmany(1000)
                 if not batch:
                     break
+                batch_seen.clear()
+                rows_dicts = [dict(row) for row in batch]
+                candidate_hashes = [
+                    d.get("content_hash", "")
+                    for d in rows_dicts
+                    if d.get("content_hash", "")
+                ]
+                existing = self.batch_existing_hashes(candidate_hashes)
                 records: list[MemoryRecord] = []
-                for row in batch:
-                    d = dict(row)
+                for d in rows_dicts:
                     ch = d.get("content_hash", "")
-                    if ch and ch in seen_hashes:
+                    if ch and (ch in existing or ch in batch_seen):
                         skipped += 1
                         continue
                     if ch:
-                        seen_hashes.add(ch)
+                        batch_seen.add(ch)
                     # Build from the columns present; dataclass defaults fill the
                     # rest (missing v2 columns in v0.1 sources).
                     records.append(MemoryRecord(**{c: d[c] for c in select_cols}))
                 if records:
-                    loaded += self.insert_many_ignore(records)
+                    inserted = self.insert_many_ignore(records)
+                    loaded += inserted
+                    skipped += len(records) - inserted
         finally:
             src_conn.close()
 

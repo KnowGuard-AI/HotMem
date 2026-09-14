@@ -340,25 +340,27 @@ def snapshot(
 ) -> SnapshotResult:
     """Export all memories from the database to a JSONL or JSONL.GZ swap file.
 
-    on_progress, if given, is invoked once per exported row with the count of
-    rows written so far (cumulative).
+    Streams rows in id order (fetchmany batches) so memory stays O(batch)
+    for large stores (interchange #67). on_progress, if given, is invoked
+    once per exported row with the count of rows written so far (cumulative).
     """
     swap_path = Path(swap_path)
 
     with Timer() as t:
-        rows = db.all_rows(include_embedding=include_embeddings)
+        exported = 0
         with _open_swap_write(swap_path) as f:
-            for i, row in enumerate(rows, 1):
+            for row in db.iter_rows(include_embedding=include_embeddings):
                 embedding = row.pop("embedding", None)
                 if embedding is not None:
                     row["embedding_b64"] = base64.b64encode(embedding).decode("ascii")
                 write_record(f, row)
+                exported += 1
                 if on_progress is not None:
-                    on_progress(i)
+                    on_progress(exported)
 
     _trace.info(
         "snapshot",
-        f"exported {len(rows)} memories",
+        f"exported {exported} memories",
         detail={"path": str(swap_path), "ms": round(t.ms, 2)},
     )
-    return SnapshotResult(exported=len(rows), path=str(swap_path))
+    return SnapshotResult(exported=exported, path=str(swap_path))
