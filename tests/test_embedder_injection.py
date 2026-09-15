@@ -191,8 +191,14 @@ def test_v2_snapshot_hydration_reports_embedding_disposition(tmp_path: Path):
     other.close()
 
 
-def test_delta_apply_rebuilds_incompatible_vectors_under_active_embedder(tmp_path: Path):
-    """Delta apply re-embeds upserts under the injected runtime and reports it."""
+def test_delta_apply_reuses_same_space_and_rebuilds_foreign_vectors(tmp_path: Path):
+    """Delta apply reuses same-space vectors and re-embeds foreign ones.
+
+    Delta records carry base64 embeddings (fixed: raw db blobs were once
+    serialized as python reprs, forcing a rebuild on every apply); a
+    same-space upsert reuses its vector, a foreign-model record rebuilds
+    under the active embedder and is stamped accordingly.
+    """
     base = MemoryDB(tmp_path / "base.sqlite")
     semantic = SemanticFake()
     add_memory(base, "vendor", "delta baseline fact", embedder=semantic)
@@ -202,20 +208,36 @@ def test_delta_apply_rebuilds_incompatible_vectors_under_active_embedder(tmp_pat
     producer = MemoryDB(tmp_path / "producer.sqlite")
     hydrate_package(producer, base_pkg, embedder=semantic)
     add_memory(producer, "vendor", "delta updated fact", embedder=semantic)
+    # A second record stored under a FOREIGN model (mixed-space producer).
+    foreign_vec = pack_embedding(_stable_vec("foreign delta fact", 64))
+
+    import hashlib as _hl
+
+    producer.insert(
+        id="foreign-rec",
+        identifier="vendor",
+        fact_text="foreign delta fact",
+        embedding=foreign_vec,
+        embedding_dim=64,
+        embedding_model="foreign/v9",
+        content_hash=_hl.sha256(b"foreign").hexdigest(),
+    )
     delta_dir = tmp_path / "delta"
     produce_delta(producer, base_pkg, delta_dir)
 
     receiver = MemoryDB(tmp_path / "receiver.sqlite")
     apply_result = apply_delta(receiver, delta_dir, embedder=semantic)
-    assert apply_result.applied >= 1
-    assert apply_result.embedding_rebuilt >= 1
+    assert apply_result.applied >= 2
+    assert apply_result.embedding_reused == 1  # same-space upsert reused
+    assert apply_result.embedding_rebuilt == 1  # foreign record re-embedded
     rows = {r["fact_text"]: r for r in receiver.all_rows(include_embedding=True)}
     assert rows["delta updated fact"]["embedding_model"] == semantic.descriptor.key
+    assert rows["foreign delta fact"]["embedding_model"] == semantic.descriptor.key
 
     # Replay is idempotent: zero applies, zero embed work.
     replay = apply_delta(receiver, delta_dir, embedder=semantic)
     assert replay.applied == 0
-    assert replay.embedding_rebuilt == 0
+    assert replay.embedding_rebuilt == 0 and replay.embedding_reused == 0
     for db in (base, producer, receiver):
         db.close()
 

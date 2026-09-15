@@ -24,6 +24,7 @@ Extension: hydration paths decide policy (skip-and-count vs hard fail) on
 
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 from typing import Any
@@ -136,6 +137,12 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
     memory_type = "file" if raw.get("memory_type") == "file" else "fact"
 
     embedding = raw.get("embedding") or raw.get("embedding_b64") or None
+    if isinstance(embedding, bytes | bytearray):
+        # DB rows stream raw blobs (delta producer, iter_rows); the
+        # interchange record form is base64 — a repr string here would be
+        # silently incompatible forever (#78: same-space delta replays must
+        # reuse their vectors, not rebuild on every apply).
+        embedding = base64.b64encode(bytes(embedding)).decode("ascii")
 
     metadata = _as_json(raw.get("metadata", raw.get("metadata_json")), {})
     if not isinstance(metadata, dict):
