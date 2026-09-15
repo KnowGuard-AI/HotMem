@@ -85,7 +85,8 @@ JSONL is text-portable and can be rehydrated without re-embedding.
   "ttl_seconds": null | 3600, "namespace": "", "tier": "hot", "tags": [],
   "source_uri": null | "...", "byte_offset": null | 0, "byte_length": null | 100,
   "source_checksum": null | "...", "source_format": null | "csv",
-  "provenance": null | {}, "created_at": "..."
+  "provenance": null | {}, "created_at": "...",
+  "promotion_state": "HOT", "promotion_candidate": 0
 }
 ```
 

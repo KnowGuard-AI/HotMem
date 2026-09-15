@@ -103,5 +103,9 @@ def state_fingerprint(rows: list[dict[str, Any]] | tuple) -> str:
     same shape as the clone's logical_id, but covering every mutable
     field. Equal for equivalent instances regardless of row order.
     """
-    fingerprints = sorted(record_fingerprint(row) for row in rows)
-    return sha256_bytes("".join(fingerprints).encode())
+    return state_fingerprint_from_list([record_fingerprint(row) for row in rows])
+
+
+def state_fingerprint_from_list(fingerprints: list[str]) -> str:
+    """Aggregate pre-computed per-record fingerprints (streaming producers)."""
+    return sha256_bytes("".join(sorted(fingerprints)).encode())
