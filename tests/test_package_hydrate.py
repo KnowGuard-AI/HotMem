@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from hotmem.db import MemoryDB
-from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, HashEmbedder, embed_text, pack_embedding
 from hotmem.interchange.canonical import canonical_line, compute_content_hash
 from hotmem.interchange.hydrate import PackageError, hydrate_package, verify_package
 from hotmem.interchange.package import MANIFEST_NAME, PAYLOAD_GZ, PAYLOAD_PLAIN, write_package
@@ -230,13 +230,13 @@ def test_restore_reuses_compatible_embeddings_zero_embed_calls(
 ):
     """#69 acceptance: compatible embeddings reused, none re-computed."""
     calls: list[str] = []
-    original = embed_text
 
-    def spy(text: str):
-        calls.append(text)
-        return original(text)
+    class SpyEmbedder(HashEmbedder):
+        def embed(self, text: str):
+            calls.append(text)
+            return super().embed(text)
 
-    monkeypatch.setattr("hotmem.interchange.compat.embed_text", spy)
+    monkeypatch.setattr("hotmem.interchange.compat.DEFAULT_EMBEDDER", SpyEmbedder())
     target = MemoryDB(tmp_path / "clean.sqlite")
     result = hydrate_package(target, pkg)
     assert result.loaded == 3

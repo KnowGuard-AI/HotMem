@@ -190,7 +190,16 @@ def test_sync_client_return_shapes(tmp_path):
 
         health = client.health()
         assert_keys_exact(
-            health, {"status", "memory_count", "db_path", "uptime_s"}, "client.health()"
+            health,
+            {
+                "status",
+                "memory_count",
+                "db_path",
+                "uptime_s",
+                # Sanitized active embedding descriptor (issue #78) — additive.
+                "embedding",
+            },
+            "client.health()",
         )
 
         added = client.add("v", "invoice risk")
@@ -223,7 +232,22 @@ def test_sync_client_return_shapes(tmp_path):
 
         hydrated = client.hydrate()
         assert_keys_exact(
-            hydrated, {"loaded", "skipped_dupes", "invalid", "path"}, "client.hydrate()"
+            hydrated,
+            {
+                "loaded",
+                "skipped_dupes",
+                "invalid",
+                "path",
+                # Embedding disposition (issue #78) — additive response fields.
+                "embedding_reused",
+                "embedding_rebuilt",
+                "embedding_missing",
+                "embedding_failed",
+                # Annotation merge disposition (issue #79) — additive.
+                "annotations_merged",
+                "annotation_conflicts",
+            },
+            "client.hydrate()",
         )
 
         snap = client.snapshot()

@@ -35,6 +35,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hotmem.annotations import (
+    AnnotationValidationError,
+    merge_duplicate_annotations,
+    validate_metadata,
+)
+from hotmem.embed import Embedder
 from hotmem.interchange.compat import resolve_embedding
 from hotmem.interchange.package import (
     FORMAT_ID,
@@ -242,14 +248,20 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
     )
 
 
-def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
+def hydrate_package(
+    db,
+    pkg_dir: str | Path,
+    *,
+    embedder: Embedder | None = None,
+) -> HydrateResult:
     """Verify, then restore a package in one transaction (#69).
 
     All-or-nothing: verification finishes before any write, inserts run in
     bounded batches inside a single transaction, and any error rolls back —
     the target remains byte-identical. Compatible stored embeddings are
-    reused; incompatible ones are re-embedded from text; records without
-    usable text count invalid (contract §5/§7) and are never stored.
+    reused; incompatible ones are re-embedded under ``embedder`` (issue #78;
+    ``None`` = the hash default) from text; records without usable text
+    count invalid (contract §5/§7) and are never stored.
     Idempotent: a repeated restore loads zero records.
     """
     pkg_dir = Path(pkg_dir)
@@ -260,23 +272,90 @@ def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
             "loaded": 0,
             "skipped": 0,
             "invalid": 0,
-            "reused_embeddings": 0,
-            "computed_embeddings": 0,
+            "embedding_reused": 0,
+            "embedding_rebuilt": 0,
+            "embedding_missing": 0,
+            "embedding_failed": 0,
+            "annotations_merged": 0,
+            "annotation_conflicts": 0,
         }
         pending: list[dict] = []
         batch_seen: set[str] = set()
 
+        # Parse every record up front (#79): local evidence references
+        # resolve against the FULL package id set — forward references
+        # included — plus the existing target, so validation cannot depend
+        # on streaming order. Annotation-less packages pay one extra list
+        # pass over already-parsed records; no extra file IO.
+        parsed: list[dict] = []
+        has_annotations = False
+        for line in verified.stream():
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)  # structural corruption: hard error
+            if not isinstance(record, dict):
+                counters["invalid"] += 1
+                continue
+            try:
+                rec = normalize_record(record, default_source="interchange")
+            except AnnotationValidationError as err:
+                # Malformed known envelope structure: the RECORD is invalid
+                # (#79) — counted and skipped, never a whole-restore failure.
+                counters["invalid"] += 1
+                _trace.debug(
+                    "hydrate_pkg",
+                    "skipping record with malformed annotations",
+                    detail={"error": str(err)},
+                )
+                continue
+            issues = validate_record(rec)
+            if issues:
+                counters["invalid"] += 1
+                _trace.debug(
+                    "hydrate_pkg",
+                    "skipping invalid record",
+                    detail={"id": rec["id"], "issues": issues},
+                )
+                continue
+            metadata = rec.get("metadata") or {}
+            if isinstance(metadata, dict) and "annotations" in metadata:
+                has_annotations = True
+            parsed.append(rec)
+
+        if has_annotations:
+            known_ids = {rec["id"] for rec in parsed} | set(db.all_ids())
+            for rec in parsed:
+                metadata = rec.get("metadata") or {}
+                if not (isinstance(metadata, dict) and "annotations" in metadata):
+                    continue
+                try:
+                    validate_metadata(metadata, known_ids=known_ids)
+                except AnnotationValidationError as err:
+                    counters["invalid"] += 1
+                    _trace.debug(
+                        "hydrate_pkg",
+                        "skipping record with invalid annotations",
+                        detail={"id": rec["id"], "error": str(err)},
+                    )
+                    parsed.remove(rec)
+
         def flush() -> None:
             if not pending:
                 return
-            existing = db.batch_existing_hashes([r["content_hash"] for r in pending])
+            hashes = [r["content_hash"] for r in pending]
+            existing = db.batch_existing_hashes(hashes)
             todo = [r for r in pending if r["content_hash"] not in existing]
             counters["skipped"] += len(pending) - len(todo)
 
+            merge_duplicate_annotations(
+                db, [r for r in pending if r["content_hash"] in existing], counters
+            )
+
             records = []
             for rec in todo:
-                blob, model, dim, reused = resolve_embedding(rec)
-                counters["reused_embeddings" if reused else "computed_embeddings"] += 1
+                blob, model, dim, status = resolve_embedding(rec, embedder=embedder)
+                counters[f"embedding_{status}"] += 1
                 records.append(
                     record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
                 )
@@ -287,24 +366,7 @@ def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
             batch_seen.clear()
 
         try:
-            for line in verified.stream():
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)  # structural corruption: hard error
-                if not isinstance(record, dict):
-                    counters["invalid"] += 1
-                    continue
-                rec = normalize_record(record, default_source="interchange")
-                issues = validate_record(rec)
-                if issues:
-                    counters["invalid"] += 1
-                    _trace.debug(
-                        "hydrate_pkg",
-                        "skipping invalid record",
-                        detail={"id": rec["id"], "issues": issues},
-                    )
-                    continue
+            for rec in parsed:
                 content_hash = rec["content_hash"]
                 if content_hash in batch_seen:
                     counters["skipped"] += 1
@@ -333,4 +395,14 @@ def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
             **{k: counters[k] for k in counters},
         },
     )
-    return HydrateResult(loaded=loaded, skipped_dupes=skipped, invalid=invalid)
+    return HydrateResult(
+        loaded=loaded,
+        skipped_dupes=skipped,
+        invalid=invalid,
+        embedding_reused=counters["embedding_reused"],
+        embedding_rebuilt=counters["embedding_rebuilt"],
+        embedding_missing=counters["embedding_missing"],
+        embedding_failed=counters["embedding_failed"],
+        annotations_merged=counters["annotations_merged"],
+        annotation_conflicts=counters["annotation_conflicts"],
+    )

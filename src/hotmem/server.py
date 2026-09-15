@@ -29,8 +29,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
 
+from hotmem.annotations import AnnotationValidationError, validate_metadata
 from hotmem.db import MemoryDB
-from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.events import EventType, append_event, emit_import_event, query_events
 from hotmem.hygiene import check_hygiene
 from hotmem.interchange.hydrate import PackageError
@@ -45,6 +46,7 @@ from hotmem.lifecycle import (
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
+from hotmem.rerank import Reranker
 from hotmem.search import search_memories
 from hotmem.snapshot import SnapshotChecksumError
 from hotmem.snapshot import hydrate as snapshot_hydrate
@@ -240,9 +242,9 @@ async def lifespan(app: FastAPI):
     else:
         _state["vector_index"] = _state["vector_index_injected"]
 
-    # Auto-hydrate if swap file exists
+    # Auto-hydrate if swap file exists (issue #78: under the runtime embedder)
     if swap_path and Path(swap_path).exists():
-        result = snapshot_hydrate(db, swap_path)
+        result = snapshot_hydrate(db, swap_path, embedder=_state["embedder"])
         emit_import_event(
             db,
             path=str(swap_path),
@@ -276,6 +278,8 @@ def create_app(
     base_dir: str | Path | None = None,
     vector_backend: str = "none",
     vector_index: VectorIndex | None = None,
+    embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -290,6 +294,14 @@ def create_app(
 
     ``vector_index`` injects a prebuilt index instance (test seam); it takes
     precedence over ``vector_backend``.
+
+    ``embedder`` is the runtime-owned embedding implementation (issue #78):
+    ``None`` means the hash default. It owns every write, search, hydration,
+    and reindex embedding in this process; rows stored under other
+    descriptors stay retrievable via FTS/importance (mixed-space safety).
+
+    ``reranker`` is the optional bounded second stage (issue #80):
+    ``None`` preserves the exact first-stage ranking (zero extra work).
     """
     if vector_backend not in VALID_BACKENDS:
         raise ValueError(
@@ -300,6 +312,8 @@ def create_app(
     _state["port"] = port
     _state["vector_backend"] = vector_backend
     _state["vector_index_injected"] = vector_index
+    _state["embedder"] = embedder if embedder is not None else DEFAULT_EMBEDDER
+    _state["reranker"] = reranker
     if base_dir is None:
         base_dir = str(Path(db_path).resolve().parent)
     _state["base_dir"] = str(base_dir)
@@ -332,17 +346,32 @@ def create_app(
     @app.get("/v1/health")
     async def health():
         db: MemoryDB = _state["db"]
+        embedder: Embedder = _state["embedder"]
+        descriptor = embedder.descriptor
         return {
             "status": "ok",
             "memory_count": db.count(),
             "db_path": _state["db_path"],
             "uptime_s": round(time.time() - _state["start_time"], 1),
+            # Sanitized active embedding descriptor (issue #78; additive) —
+            # the key/dimension only, never paths or provider secrets.
+            "embedding": {"model": descriptor.key, "dim": descriptor.dimension},
         }
 
     @app.post("/v1/add")
     async def add_memory(req: AddRequest):
         db: MemoryDB = _state["db"]
         base_dir: str = _state["base_dir"]
+        embedder: Embedder = _state["embedder"]
+        # #79: the reserved annotations envelope is validated at ingestion
+        # with an actionable error — never silently stored malformed.
+        try:
+            validate_metadata(req.metadata)
+        except AnnotationValidationError as err:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid_annotations", "message": str(err)},
+            )
         with Timer() as t:
             if req.file_uri is not None:
                 # File-backed path: store a reference, zero bytes copied.
@@ -363,6 +392,7 @@ def create_app(
                         importance=req.importance,
                         metadata=req.metadata,
                         source=req.source,
+                        embedder=embedder,
                     )
                 except UnsupportedSchemeError as err:
                     return JSONResponse(
@@ -397,10 +427,11 @@ def create_app(
                     _commit=True,
                 )
             else:
-                # Inline path — canonical add_memory helper.
+                # Inline path — canonical add under the runtime embedder (#78).
+                active = embedder
                 memory_id = uuid.uuid4().hex
                 content_hash = compute_content_hash(req.identifier, req.fact or "")
-                vec = embed_text(req.fact or "")
+                vec = active.embed(req.fact or "")
                 blob = pack_embedding(vec)
 
                 db.insert(
@@ -408,8 +439,8 @@ def create_app(
                     identifier=req.identifier,
                     fact_text=req.fact or "",
                     embedding=blob,
-                    embedding_dim=EMBEDDING_DIM,
-                    embedding_model=EMBEDDING_MODEL,
+                    embedding_dim=active.descriptor.dimension,
+                    embedding_model=active.descriptor.key,
                     source=req.source,
                     importance=req.importance,
                     metadata_json=json.dumps(req.metadata),
@@ -444,6 +475,8 @@ def create_app(
                 top_k=req.top_k,
                 max_chars=req.max_chars,
                 vector_index=vector_index,
+                embedder=_state["embedder"],
+                reranker=_state.get("reranker"),
             )
         return {
             "memories": messages,
@@ -591,7 +624,7 @@ def create_app(
         db: MemoryDB = _state["db"]
         target = req.path or req.file or _state.get("swap_path") or "swap.jsonl"
         try:
-            result = snapshot_hydrate(db, target)
+            result = snapshot_hydrate(db, target, embedder=_state["embedder"])
         except SnapshotChecksumError as err:
             return JSONResponse(
                 status_code=409,
@@ -631,6 +664,14 @@ def create_app(
             "skipped_dupes": result.skipped_dupes,
             "invalid": result.invalid,
             "path": target,
+            # Embedding disposition (issue #78; additive response fields).
+            "embedding_reused": result.embedding_reused,
+            "embedding_rebuilt": result.embedding_rebuilt,
+            "embedding_missing": result.embedding_missing,
+            "embedding_failed": result.embedding_failed,
+            # Annotation merge disposition (issue #79; additive).
+            "annotations_merged": result.annotations_merged,
+            "annotation_conflicts": result.annotation_conflicts,
         }
 
     @app.post("/v1/snapshot")
@@ -1024,8 +1065,10 @@ def create_app(
             rebuild_vector_index,
             db,
             vector_index,
-            embedding_model=EMBEDDING_MODEL,
-            embedding_dim=EMBEDDING_DIM,
+            # Stamp the ACTIVE descriptor (#78): the marker must prove which
+            # embedding space the index serves, so model switches read stale.
+            embedding_model=_state["embedder"].descriptor.key,
+            embedding_dim=_state["embedder"].descriptor.dimension,
         )
         append_event(
             db,

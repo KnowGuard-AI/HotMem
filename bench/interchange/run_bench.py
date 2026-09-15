@@ -82,38 +82,41 @@ def gen_corpus(db_path: Path, size: int) -> None:
 
 
 class EmbedCounter:
-    """Count embed_text calls through every resolution site (swap + compat)."""
+    """Count embed calls through every resolution site (#78 injection).
+
+    All hydration paths resolve against the call-time default in
+    ``hotmem.interchange.compat`` (swap, package, snapshot v2 readers), so
+    one counting embedder observes every site without module patching.
+    """
 
     def __init__(self) -> None:
-        import hotmem.swap as swap_mod
+        import hotmem.interchange.compat as compat_mod
 
-        self._sites = [swap_mod]
-        try:  # branch-only resolution site
-            import hotmem.interchange.compat as compat_mod
-
-            self._sites.append(compat_mod)
-        except ModuleNotFoundError:
-            pass
-        self._origs = {id(m): m.embed_text for m in self._sites}
+        self._compat = compat_mod
+        self._orig = compat_mod.DEFAULT_EMBEDDER
         self.calls = 0
 
-    def _spy_for(self, mod):
-        orig = self._origs[id(mod)]
+    def _spy(self) -> object:
+        orig = self._orig
+        counter = self
 
-        def spy(text: str):
-            self.calls += 1
-            return orig(text)
+        class CountingEmbedder:
+            @property
+            def descriptor(self):
+                return orig.descriptor
 
-        return spy
+            def embed(self, text: str):
+                counter.calls += 1
+                return orig.embed(text)
+
+        return CountingEmbedder()
 
     def __enter__(self) -> EmbedCounter:
-        for mod in self._sites:
-            mod.embed_text = self._spy_for(mod)
+        self._compat.DEFAULT_EMBEDDER = self._spy()
         return self
 
     def __exit__(self, *exc) -> None:
-        for mod in self._sites:
-            mod.embed_text = self._origs[id(mod)]
+        self._compat.DEFAULT_EMBEDDER = self._orig
 
 
 def _timed(fn):

@@ -31,7 +31,13 @@ import json
 import os
 from pathlib import Path
 
+from hotmem.annotations import (
+    AnnotationValidationError,
+    merge_duplicate_annotations,
+    validate_metadata,
+)
 from hotmem.db import MemoryDB
+from hotmem.embed import Embedder
 from hotmem.interchange.compat import resolve_embedding
 from hotmem.interchange.paths import confined_relpath
 from hotmem.interchange.record import normalize_record, validate_record
@@ -121,13 +127,19 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
     return manifest
 
 
-def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
+def hydrate_v2(
+    db: MemoryDB,
+    snapshot_dir: str | Path,
+    *,
+    embedder: Embedder | None = None,
+) -> HydrateResult:
     """Verify the manifest and load all memories into the DB.
 
     Deduplicates by ``content_hash`` (skips rows that already exist). Never
     touches backing files for file-backed memories — references are preserved.
-    Uses stored embeddings only when compatible (model/dim/blob); otherwise
-    re-embeds fact_text or fact_summary, or stores NULL embedding for
+    Uses stored embeddings only when compatible (descriptor/dim/blob);
+    otherwise re-embeds fact_text or fact_summary under ``embedder`` (issue
+    #78; ``None`` = the hash default), or stores NULL embedding for
     file-backed without summary. Records that fail validation are counted
     invalid and skipped (interchange-v1 §7).
     """
@@ -142,32 +154,21 @@ def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
             "loaded": 0,
             "skipped": 0,
             "invalid": 0,
-            "reused_embeddings": 0,
-            "computed_embeddings": 0,
+            "embedding_reused": 0,
+            "embedding_rebuilt": 0,
+            "embedding_missing": 0,
+            "embedding_failed": 0,
+            "annotations_merged": 0,
+            "annotation_conflicts": 0,
         }
         pending: list[dict] = []
         batch_seen: set[str] = set()
 
-        def flush() -> None:
-            if not pending:
-                return
-            existing = db.batch_existing_hashes([r["content_hash"] for r in pending])
-            todo = [r for r in pending if r["content_hash"] not in existing]
-            counters["skipped"] += len(pending) - len(todo)
-
-            records = []
-            for rec in todo:
-                blob, model, dim, reused = resolve_embedding(rec)
-                counters["reused_embeddings" if reused else "computed_embeddings"] += 1
-                records.append(
-                    record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
-                )
-            loaded = db.insert_many_ignore(records)
-            counters["loaded"] += loaded
-            counters["skipped"] += len(records) - loaded
-            pending.clear()
-            batch_seen.clear()
-
+        # Parse all records first (#79): local evidence references resolve
+        # against the full snapshot id set (forward references included)
+        # plus the existing target. See hydrate_package for the rationale.
+        parsed: list[dict] = []
+        has_annotations = False
         with open(memories_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -177,18 +178,75 @@ def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
                 if not isinstance(record, dict):
                     counters["invalid"] += 1
                     continue
-                rec = normalize_record(record, default_source="snapshot")
+                try:
+                    rec = normalize_record(record, default_source="snapshot")
+                except AnnotationValidationError as err:
+                    counters["invalid"] += 1  # malformed envelope: skip record (#79)
+                    _trace.debug(
+                        "hydrate_v2",
+                        "skipping record with malformed annotations",
+                        detail={"error": str(err)},
+                    )
+                    continue
                 if validate_record(rec):
                     counters["invalid"] += 1
                     continue
-                content_hash = rec["content_hash"]
-                if content_hash in batch_seen:
-                    counters["skipped"] += 1
+                metadata = rec.get("metadata") or {}
+                if isinstance(metadata, dict) and "annotations" in metadata:
+                    has_annotations = True
+                parsed.append(rec)
+
+        if has_annotations:
+            known_ids = {rec["id"] for rec in parsed} | set(db.all_ids())
+            for rec in list(parsed):
+                metadata = rec.get("metadata") or {}
+                if not (isinstance(metadata, dict) and "annotations" in metadata):
                     continue
-                batch_seen.add(content_hash)
-                pending.append(rec)
-                if len(pending) >= _HYDRATE_BATCH:
-                    flush()
+                try:
+                    validate_metadata(metadata, known_ids=known_ids)
+                except AnnotationValidationError as err:
+                    counters["invalid"] += 1
+                    _trace.debug(
+                        "hydrate_v2",
+                        "skipping record with invalid annotations",
+                        detail={"id": rec["id"], "error": str(err)},
+                    )
+                    parsed.remove(rec)
+
+        def flush() -> None:
+            if not pending:
+                return
+            hashes = [r["content_hash"] for r in pending]
+            existing = db.batch_existing_hashes(hashes)
+            todo = [r for r in pending if r["content_hash"] not in existing]
+            counters["skipped"] += len(pending) - len(todo)
+
+            merge_duplicate_annotations(
+                db, [r for r in pending if r["content_hash"] in existing], counters
+            )
+
+            records = []
+            for rec in todo:
+                blob, model, dim, status = resolve_embedding(rec, embedder=embedder)
+                counters[f"embedding_{status}"] += 1
+                records.append(
+                    record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
+                )
+            loaded = db.insert_many_ignore(records)
+            counters["loaded"] += loaded
+            counters["skipped"] += len(records) - loaded
+            pending.clear()
+            batch_seen.clear()
+
+        for rec in parsed:
+            content_hash = rec["content_hash"]
+            if content_hash in batch_seen:
+                counters["skipped"] += 1
+                continue
+            batch_seen.add(content_hash)
+            pending.append(rec)
+            if len(pending) >= _HYDRATE_BATCH:
+                flush()
         flush()
 
         loaded = counters["loaded"]
@@ -205,4 +263,14 @@ def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
             **{k: counters[k] for k in counters},
         },
     )
-    return HydrateResult(loaded=loaded, skipped_dupes=skipped, invalid=invalid)
+    return HydrateResult(
+        loaded=loaded,
+        skipped_dupes=skipped,
+        invalid=invalid,
+        embedding_reused=counters["embedding_reused"],
+        embedding_rebuilt=counters["embedding_rebuilt"],
+        embedding_missing=counters["embedding_missing"],
+        embedding_failed=counters["embedding_failed"],
+        annotations_merged=counters["annotations_merged"],
+        annotation_conflicts=counters["annotation_conflicts"],
+    )

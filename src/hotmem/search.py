@@ -16,7 +16,7 @@ Purpose:
      never canonical.
 
 Interface:
-      search_memories(db, query, top_k, max_chars?, include_archived?, vector_index?)
+      search_memories(db, query, top_k, max_chars?, include_archived?, vector_index?, embedder?)
 
 Deps: hotmem.db, hotmem.embed, hotmem.trace
 Extension: add reranking, decay weighting, or MMR diversity here.
@@ -27,7 +27,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hotmem.db import MemoryDB
-from hotmem.embed import embed_text, pack_embedding
+from hotmem.embed import DEFAULT_EMBEDDER, Embedder, EmbeddingDescriptor, pack_embedding
+from hotmem.rerank import IdentityReranker, Reranker, SearchCandidate, validate_rerank_output
 from hotmem.trace import Timer, get_tracer
 
 if TYPE_CHECKING:
@@ -70,6 +71,8 @@ def _fetch_candidates(
     fts_rows: list[dict[str, Any]],
     include_archived: bool,
     vector_index: VectorIndex | None,
+    embedding_model: str | None = None,
+    embedding_dim: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return candidate rows with cosine scores for hybrid ranking.
 
@@ -83,10 +86,19 @@ def _fetch_candidates(
     (already fetched once by the caller) so text-only matches are never
     lost. Ranking is recomputed downstream either way, so both paths produce
     identical results.
+
+    Mixed-space safety (issue #78): ``embedding_model``/``embedding_dim``
+    describe the query's embedding space. The SQL candidate fetch filters
+    rows stored under other descriptors out of cosine scoring (they still
+    surface via FTS/importance), and an index whose rebuild marker was
+    stamped under a different descriptor reads stale — switching models
+    never silently serves foreign-space candidates.
     """
     if (
         vector_index is not None
-        and not vector_index.is_stale(db)
+        and not vector_index.is_stale(
+            db, embedding_model=embedding_model, embedding_dim=embedding_dim
+        )
         # Rows with searchable text but no embedding rank via importance in
         # the full scan but can never be vector candidates — use the exact
         # scan while any exist so ranking parity is preserved.
@@ -103,11 +115,64 @@ def _fetch_candidates(
             # Dedupe, preserving order (index ranking first, FTS additions after).
             seen: set[str] = set()
             unique_ids = [i for i in candidate_ids if not (i in seen or seen.add(i))]
-            rows = db.search_by_ids(query_blob, unique_ids, include_archived=include_archived)
+            rows = db.search_by_ids(
+                query_blob,
+                unique_ids,
+                include_archived=include_archived,
+                embedding_model=embedding_model,
+            )
             # Rows re-fetched by id already carry canonical cosine scores from
             # the SQLite UDF — the index's own scores are advisory only.
             return rows
-    return db.search_with_cosine(query_blob, include_archived=include_archived)
+    return db.search_with_cosine(
+        query_blob, include_archived=include_archived, embedding_model=embedding_model
+    )
+
+
+def _apply_reranker(
+    db: MemoryDB,
+    reranker: Reranker,
+    query: str,
+    scored: list[dict[str, Any]],
+    top_k: int,
+    *,
+    active_descriptor: EmbeddingDescriptor,
+) -> list[dict[str, Any]]:
+    """Run the bounded second stage over the first-stage ranking (#80).
+
+    The reranker sees the narrow candidate view only; its vectors come
+    from ONE batched ``db.fetch_embedding_blobs`` call restricted to the
+    active embedding space (foreign or missing vectors read as absent and
+    contribute zero similarity). Any failure or contract violation falls
+    back to the first-stage order — search never fails because of a
+    reranker.
+    """
+    candidates = [
+        SearchCandidate(memory_id=row["id"], score=row["final_score"], content=row["_search_text"])
+        for row in scored
+    ]
+
+    def fetch(memory_ids: list[str]) -> dict[str, bytes]:
+        return db.fetch_embedding_blobs(memory_ids, embedding_model=active_descriptor.key)
+
+    try:
+        ordered = reranker.rerank(query, candidates, top_k=top_k, fetch_embeddings=fetch)
+    except Exception as err:
+        _trace.warn(
+            "rerank",
+            "reranker raised; falling back to first-stage order",
+            detail={"error": type(err).__name__},
+        )
+        return scored
+    if not validate_rerank_output(ordered, candidates, top_k=top_k):
+        _trace.warn(
+            "rerank",
+            "invalid reranker output; falling back to first-stage order",
+            detail={"count": len(ordered) if isinstance(ordered, list) else -1},
+        )
+        return scored
+    by_id = {row["id"]: row for row in scored}
+    return [by_id[memory_id] for memory_id in ordered]
 
 
 def search_memories(
@@ -118,6 +183,8 @@ def search_memories(
     *,
     include_archived: bool = False,
     vector_index: VectorIndex | None = None,
+    embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
 ) -> list[dict[str, Any]]:
     """Search memories and return ranked, LLM-ready message objects.
 
@@ -129,18 +196,36 @@ def search_memories(
     hybrid formula — the response shape and ranking are byte-identical to the
     fallback. Otherwise the deterministic full-scan path runs unchanged.
 
+    ``embedder`` owns the query embedding (issue #78): ``None`` means the
+    hash default. Pass the same runtime-owned embedder used for writes; rows
+    stored under a different descriptor score zero cosine (mixed-space
+    guard) and still surface via FTS/importance.
+
+    ``reranker`` is the optional bounded second stage (issue #80):
+    ``None`` (and ``IdentityReranker``) preserve the exact first-stage order
+    and response shape with zero extra work. A reranker violating its output
+    contract falls back to the first-stage top-k with a trace diagnostic.
+
     Returns:
         List of dicts with keys: role, content, memory_id, identifier, score
     """
+    active = embedder if embedder is not None else DEFAULT_EMBEDDER
     with Timer() as t:
-        # Embed the query
-        query_vec = embed_text(query)
+        # Embed the query under the active runtime embedder
+        query_vec = active.embed(query)
         query_blob = pack_embedding(query_vec)
 
         # One FTS pass serves both candidate unioning and BM25 scoring (#92).
         fts_rows = db.fts_search(query, include_archived=include_archived)
         candidates = _fetch_candidates(
-            db, query_vec, query_blob, fts_rows, include_archived, vector_index
+            db,
+            query_vec,
+            query_blob,
+            fts_rows,
+            include_archived,
+            vector_index,
+            embedding_model=active.descriptor.key,
+            embedding_dim=active.descriptor.dimension,
         )
         fts_scores = _normalize_bm25(fts_rows)
 
@@ -161,6 +246,14 @@ def search_memories(
 
         # Sort by final score descending, take top_k
         scored.sort(key=lambda x: x["final_score"], reverse=True)
+
+        # Optional bounded second-stage selection (#80): disabled/identity is
+        # the zero-work fast path — the pre-#80 order and response shape are
+        # exactly preserved. Truncation to top_k happens AFTER selection.
+        if reranker is not None and not isinstance(reranker, IdentityReranker):
+            scored = _apply_reranker(
+                db, reranker, query, scored, top_k, active_descriptor=active.descriptor
+            )
         top = scored[:top_k]
 
         # Build message objects

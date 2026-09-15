@@ -5,8 +5,8 @@ Purpose:
     and other MCP clients can use a local HotMem instance.
 
 Interface:
-    create_server(db_path, swap_path?) -> Server
-    run(db_path, swap_path?) -> coroutine — starts the stdio server
+    create_server(db_path, swap_path?, embedder?) -> Server
+    run(db_path, swap_path?, embedder?) -> coroutine — starts the stdio server
 
 Tools:
     - add_memory(identifier, fact, importance?, ttl_seconds?)
@@ -32,7 +32,8 @@ from mcp.server.stdio import stdio_server
 from mcp.types import CallToolResult, TextContent, Tool
 
 from hotmem.db import MemoryDB
-from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
+from hotmem.rerank import Reranker
 from hotmem.search import search_memories
 from hotmem.swap import compute_content_hash
 from hotmem.swap import hydrate as swap_hydrate
@@ -87,15 +88,30 @@ class _ServerState:
     db_path: str
     swap_path: str | None
     start_time: float
+    embedder: Embedder = DEFAULT_EMBEDDER  # runtime-owned (issue #78)
+    reranker: Reranker | None = None  # optional second stage (#80)
 
 
 _state = _ServerState()
 
 
-def create_server(db_path: str | Path, swap_path: str | Path | None = None) -> Server:
-    """Create and configure the HotMem MCP server."""
+def create_server(
+    db_path: str | Path,
+    swap_path: str | Path | None = None,
+    *,
+    embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
+) -> Server:
+    """Create and configure the HotMem MCP server.
+
+    ``embedder`` is the runtime-owned embedding implementation (issue #78);
+    ``None`` means the hash default. ``reranker`` is the optional bounded
+    second stage (issue #80); ``None`` preserves the first-stage ranking.
+    """
     db_path = str(db_path)
     swap_path = str(swap_path) if swap_path else None
+    _state.embedder = embedder if embedder is not None else DEFAULT_EMBEDDER
+    _state.reranker = reranker
 
     server = Server("hotmem")
 
@@ -158,7 +174,13 @@ def create_server(db_path: str | Path, swap_path: str | Path | None = None) -> S
     return server
 
 
-async def run(db_path: str | Path, swap_path: str | Path | None = None) -> None:
+async def run(
+    db_path: str | Path,
+    swap_path: str | Path | None = None,
+    *,
+    embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
+) -> None:
     """Start the HotMem MCP server on stdio transport."""
     db_path = str(db_path)
     swap_path = str(swap_path) if swap_path else None
@@ -170,7 +192,7 @@ async def run(db_path: str | Path, swap_path: str | Path | None = None) -> None:
     _ServerState.start_time = time.time()
 
     if swap_path and Path(swap_path).exists():
-        result = swap_hydrate(db, swap_path)
+        result = swap_hydrate(db, swap_path, embedder=embedder)
         _trace.info(
             "startup",
             f"auto-hydrated {result.loaded} memories",
@@ -183,7 +205,7 @@ async def run(db_path: str | Path, swap_path: str | Path | None = None) -> None:
         detail={"db_path": db_path, "swap_path": swap_path},
     )
 
-    server = create_server(db_path, swap_path)
+    server = create_server(db_path, swap_path, embedder=embedder, reranker=reranker)
 
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -207,9 +229,10 @@ def _handle_add_memory(state: _ServerState, arguments: dict[str, Any]) -> CallTo
         ttl_seconds = int(ttl_seconds)
 
     with Timer() as t:
+        active = state.embedder
         memory_id = uuid.uuid4().hex
         content_hash = compute_content_hash(identifier, fact)
-        vec = embed_text(fact)
+        vec = active.embed(fact)
         blob = pack_embedding(vec)
 
         state.db.insert(
@@ -217,8 +240,8 @@ def _handle_add_memory(state: _ServerState, arguments: dict[str, Any]) -> CallTo
             identifier=identifier,
             fact_text=fact,
             embedding=blob,
-            embedding_dim=EMBEDDING_DIM,
-            embedding_model=EMBEDDING_MODEL,
+            embedding_dim=active.descriptor.dimension,
+            embedding_model=active.descriptor.key,
             source="mcp",
             importance=importance,
             metadata_json="{}",
@@ -244,7 +267,14 @@ def _handle_search_memories(state: _ServerState, arguments: dict[str, Any]) -> C
         max_chars = int(max_chars)
 
     with Timer() as t:
-        messages = search_memories(state.db, query=query, top_k=top_k, max_chars=max_chars)
+        messages = search_memories(
+            state.db,
+            query=query,
+            top_k=top_k,
+            max_chars=max_chars,
+            embedder=state.embedder,
+            reranker=state.reranker,
+        )
 
     payload = {
         "memories": messages,
@@ -257,11 +287,14 @@ def _handle_search_memories(state: _ServerState, arguments: dict[str, Any]) -> C
 
 def _handle_memory_health(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
     """Return memory count, uptime, and database path."""
+    descriptor = state.embedder.descriptor
     payload = {
         "status": "ok",
         "memory_count": state.db.count(),
         "db_path": state.db_path,
         "uptime_s": round(time.time() - state.start_time, 1),
+        # Sanitized active embedding descriptor (issue #78; additive).
+        "embedding": {"model": descriptor.key, "dim": descriptor.dimension},
     }
     _trace.info("tool", "health check", detail={"memory_count": payload["memory_count"]})
     return _ok(payload)
@@ -277,9 +310,18 @@ def _handle_snapshot(state: _ServerState, arguments: dict[str, Any]) -> CallTool
 def _handle_hydrate(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
     """Load memories from a JSONL swap file into the database."""
     swap = arguments.get("file") or state.swap_path or "swap.jsonl"
-    result = swap_hydrate(state.db, swap)
+    result = swap_hydrate(state.db, swap, embedder=state.embedder)
     return _ok(
-        {"loaded": result.loaded, "skipped_dupes": result.skipped_dupes, "invalid": result.invalid}
+        {
+            "loaded": result.loaded,
+            "skipped_dupes": result.skipped_dupes,
+            "invalid": result.invalid,
+            # Embedding disposition (issue #78; additive).
+            "embedding_reused": result.embedding_reused,
+            "embedding_rebuilt": result.embedding_rebuilt,
+            "embedding_missing": result.embedding_missing,
+            "embedding_failed": result.embedding_failed,
+        }
     )
 
 

@@ -108,8 +108,20 @@ class VectorIndex(Protocol):
         """
         ...
 
-    def is_stale(self, db: Any) -> bool:
-        """True when the index does not match the canonical store fingerprint."""
+    def is_stale(
+        self,
+        db: Any,
+        *,
+        embedding_model: str | None = None,
+        embedding_dim: int | None = None,
+    ) -> bool:
+        """True when the index does not match the canonical store fingerprint.
+
+        ``embedding_model``/``embedding_dim`` describe the query's embedding
+        space (issue #78): a marker stamped under a different descriptor —
+        or one that predates descriptor stamping — reads stale, so switching
+        embedders never serves foreign-space candidates.
+        """
         ...
 
     def apply_rebuild_marker(self, marker: dict[str, Any]) -> None:
@@ -151,18 +163,34 @@ class _MarkerMixin:
         with _suppress_oserror():
             self.marker_path.unlink()
 
-    def _stale_vs_marker(self, db: Any) -> bool:
+    def _stale_vs_marker(
+        self,
+        db: Any,
+        *,
+        embedding_model: str | None = None,
+        embedding_dim: int | None = None,
+    ) -> bool:
         marker = self._read_marker()
         if marker is None:
             return True
         try:
-            return db_fingerprint(db) != (
+            if db_fingerprint(db) != (
                 marker.get("db_count"),
                 marker.get("max_rowid"),
                 marker.get("max_event_seq"),
-            )
+            ):
+                return True
         except (TypeError, AttributeError):
             return True
+        # Mixed-space safety (#78): the marker must have been stamped under
+        # the querying descriptor. An unstamped marker (empty model, dim 0)
+        # cannot prove compatibility and reads stale — the safe direction.
+        marked_model = str(marker.get("embedding_model") or "")
+        if embedding_model is not None and marked_model != embedding_model:
+            return True
+        if embedding_dim is not None:
+            return marker.get("embedding_dim") != embedding_dim
+        return False
 
 
 class NullVectorIndex(_MarkerMixin):
@@ -202,8 +230,14 @@ class NullVectorIndex(_MarkerMixin):
     def oversample(self) -> int:
         return self._oversample
 
-    def is_stale(self, db: Any) -> bool:
-        return True
+    def is_stale(
+        self,
+        db: Any,
+        *,
+        embedding_model: str | None = None,
+        embedding_dim: int | None = None,
+    ) -> bool:
+        return True  # null index is always stale; descriptor args are irrelevant
 
     def status(self, db: Any) -> dict[str, Any]:
         return {
@@ -298,8 +332,16 @@ class ChromaVectorIndex(_MarkerMixin):
     def oversample(self) -> int:
         return self._oversample
 
-    def is_stale(self, db: Any) -> bool:
-        return self._stale_vs_marker(db)
+    def is_stale(
+        self,
+        db: Any,
+        *,
+        embedding_model: str | None = None,
+        embedding_dim: int | None = None,
+    ) -> bool:
+        return self._stale_vs_marker(
+            db, embedding_model=embedding_model, embedding_dim=embedding_dim
+        )
 
     def status(self, db: Any) -> dict[str, Any]:
         marker = self._read_marker() or {}
@@ -429,6 +471,7 @@ def rebuild_vector_index(
                 "indexed_count": 0,
                 "db_count": fingerprint[0],
                 "skipped_no_embedding": fingerprint[0],
+                "skipped_foreign_space": 0,
                 "rebuilt_at": _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "trace_ms": round(t.ms, 2),
             }
@@ -443,10 +486,22 @@ def rebuild_vector_index(
         rows = db.all_rows(include_embedding=True)
         records = []
         indexed = 0
+        skipped_foreign_space = 0
         for row in rows:
             blob = row.get("embedding")
             if not blob:
                 continue
+            # Mixed-space safety (#78): one index serves one embedding space.
+            # Rows stored under a different descriptor are never indexed —
+            # they cannot be cosine-scored against this space's queries. An
+            # unstamped rebuild (no model passed) indexes everything; its
+            # marker cannot prove any space, so descriptor-aware search reads
+            # it stale and falls back to the scan either way.
+            if embedding_model:
+                row_model = str(row.get("embedding_model") or "")
+                if row_model not in (embedding_model, ""):
+                    skipped_foreign_space += 1
+                    continue
             embedding = unpack_embedding(blob)
             if not embedding:
                 continue
@@ -482,7 +537,9 @@ def rebuild_vector_index(
     result = {
         "indexed_count": indexed,
         "db_count": fingerprint[0],
-        "skipped_no_embedding": fingerprint[0] - indexed,
+        "skipped_no_embedding": fingerprint[0] - indexed - skipped_foreign_space,
+        # Rows stored under a different descriptor key — never indexed (#78).
+        "skipped_foreign_space": skipped_foreign_space,
         "rebuilt_at": marker["rebuilt_at"],
         "trace_ms": round(t.ms, 2),
     }

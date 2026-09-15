@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from hotmem.db import MemoryDB, MemoryRecord
-from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.swap import HydrateResult, compute_content_hash
 from hotmem.trace import Timer, get_tracer
 
@@ -94,11 +94,18 @@ class BundleResult:
     loaded: int = 0
     skipped_dupes: int = 0
     warnings: list[BundleWarning] = field(default_factory=list)
+    # Inline bundle records are embedded fresh under the active embedder at
+    # parse time, so every loaded row is an active-space embedding (issue #78).
+    embedding_rebuilt: int = 0
 
     @property
     def as_hydrate_result(self) -> HydrateResult:
         """Compatibility with the snapshot dispatch HydrateResult."""
-        return HydrateResult(loaded=self.loaded, skipped_dupes=self.skipped_dupes)
+        return HydrateResult(
+            loaded=self.loaded,
+            skipped_dupes=self.skipped_dupes,
+            embedding_rebuilt=self.embedding_rebuilt,
+        )
 
 
 def detect_bundle(path: str | Path) -> bool:
@@ -151,22 +158,25 @@ def _build_inline_record(
     provenance: dict[str, Any] | None = None,
     summary: str | None = None,
     record_id: str | None = None,
+    embedder: Embedder | None = None,
 ) -> MemoryRecord:
     """Build an inline MemoryRecord with the canonical hash→embed→pack sequence.
 
     Centralizes record construction so bundle body, facts, and events share
-    one code path — no default drift across the three parsers.
+    one code path — no default drift across the three parsers. ``embedder``
+    owns the embedding (issue #78; ``None`` = the hash default).
     """
+    active = embedder if embedder is not None else DEFAULT_EMBEDDER
     if content_hash is None:
         content_hash = compute_content_hash(identifier, fact_text)
-    blob = pack_embedding(embed_text(fact_text))
+    blob = pack_embedding(active.embed(fact_text))
     return MemoryRecord(
         id=record_id or uuid.uuid4().hex,
         identifier=identifier,
         fact_text=fact_text,
         embedding=blob,
-        embedding_dim=EMBEDDING_DIM,
-        embedding_model=EMBEDDING_MODEL,
+        embedding_dim=active.descriptor.dimension,
+        embedding_model=active.descriptor.key,
         source=source,
         importance=importance,
         metadata_json=json.dumps(metadata or {}),
@@ -184,6 +194,7 @@ def parse_bundle(
     *,
     base_dir: str | Path | None = None,
     strict: bool = False,
+    embedder: Embedder | None = None,
 ) -> tuple[list[MemoryRecord], list[BundleWarning]]:
     """Parse a bundle directory into MemoryRecord objects without DB insertion.
 
@@ -195,6 +206,8 @@ def parse_bundle(
             Defaults to the bundle directory itself.
         strict: when True, fail on unknown files and missing attachments
             (deferred — currently raises NotImplementedError).
+        embedder: owns the inline-record embeddings (issue #78; ``None`` =
+            the hash default).
     """
     if strict:
         raise NotImplementedError("strict bundle validation is not yet implemented")
@@ -235,20 +248,25 @@ def parse_bundle(
                     tags=tags,
                     provenance=provenance,
                     summary=metadata.get("summary"),
+                    embedder=embedder,
                 )
             )
 
     # --- facts.json → additional inline facts ---
-    records.extend(_parse_facts(bundle_dir, identifier, ns, tier, tags, provenance, warnings))
+    records.extend(
+        _parse_facts(bundle_dir, identifier, ns, tier, tags, provenance, warnings, embedder)
+    )
 
     # --- events.jsonl → event memories ---
-    records.extend(_parse_events(bundle_dir, identifier, ns, tier, tags, provenance, warnings))
+    records.extend(
+        _parse_events(bundle_dir, identifier, ns, tier, tags, provenance, warnings, embedder)
+    )
 
     # --- attachments/ → file-backed references ---
     attach_base = Path(base_dir) if base_dir else bundle_dir
     records.extend(
         _parse_attachments(
-            bundle_dir, identifier, ns, tier, tags, provenance, attach_base, warnings
+            bundle_dir, identifier, ns, tier, tags, provenance, attach_base, warnings, embedder
         )
     )
 
@@ -271,18 +289,21 @@ def read_bundle(
     bundle_dir: str | Path,
     *,
     base_dir: str | Path | None = None,
+    embedder: Embedder | None = None,
 ) -> BundleResult:
     """Read a loose local markdown bundle into HotMem.
 
     Thin wrapper around ``parse_bundle()`` that inserts records via
-    ``db.insert_many_ignore()``. Returns a ``BundleResult`` with loaded
-    count, skipped dupes, and warnings.
+    ``db.insert_many_ignore()``. ``embedder`` owns the inline-record
+    embeddings (issue #78; ``None`` = the hash default). Returns a
+    ``BundleResult`` with loaded count, skipped dupes, and warnings.
     """
     bundle_dir = Path(bundle_dir)
     with Timer() as t:
-        records, warnings = parse_bundle(bundle_dir, base_dir=base_dir)
+        records, warnings = parse_bundle(bundle_dir, base_dir=base_dir, embedder=embedder)
         loaded = db.insert_many_ignore(records)
         skipped = len(records) - loaded
+        embedded = sum(1 for r in records if r.embedding)
 
     _trace.info(
         "read_bundle",
@@ -293,7 +314,9 @@ def read_bundle(
             "ms": round(t.ms, 2),
         },
     )
-    return BundleResult(loaded=loaded, skipped_dupes=skipped, warnings=warnings)
+    return BundleResult(
+        loaded=loaded, skipped_dupes=skipped, warnings=warnings, embedding_rebuilt=embedded
+    )
 
 
 def _load_metadata(bundle_dir: Path, warnings: list[BundleWarning]) -> dict[str, Any]:
@@ -345,6 +368,7 @@ def _parse_facts(
     default_tags: list,
     default_provenance: dict | None,
     warnings: list[BundleWarning],
+    embedder: Embedder | None = None,
 ) -> list[MemoryRecord]:
     """Parse ``facts.json`` into MemoryRecord objects (no DB insertion)."""
     facts_path = bundle_dir / FACTS_JSON
@@ -388,6 +412,7 @@ def _parse_facts(
                 tags=fact.get("tags", default_tags),
                 provenance=fact.get("provenance", default_provenance),
                 record_id=fact.get("id"),
+                embedder=embedder,
             )
         )
     return records
@@ -401,6 +426,7 @@ def _parse_events(
     default_tags: list,
     default_provenance: dict | None,
     warnings: list[BundleWarning],
+    embedder: Embedder | None = None,
 ) -> list[MemoryRecord]:
     """Parse ``events.jsonl`` into MemoryRecord objects (no DB insertion)."""
     events_path = bundle_dir / EVENTS_JSONL
@@ -446,6 +472,7 @@ def _parse_events(
                         tags=event.get("tags", default_tags),
                         provenance=event.get("provenance", default_provenance),
                         record_id=event.get("id"),
+                        embedder=embedder,
                     )
                 )
     except OSError as err:
@@ -463,16 +490,21 @@ def _parse_attachments(
     default_provenance: dict | None,
     base_dir: Path,
     warnings: list[BundleWarning],
+    embedder: Embedder | None = None,
 ) -> list[MemoryRecord]:
     """Create file-backed MemoryRecord objects for files in ``attachments/``.
 
     Attachments are referenced by URI/path, NOT copied into SQLite
     (reference-not-duplicate principle, #38). Symlinks that escape the
-    bundle directory are rejected (path-traversal protection).
+    bundle directory are rejected (path-traversal protection). Attachment
+    rows keep the NULL-embedding convention; the stored dimension follows
+    the active embedder (issue #78).
     """
     att_dir = bundle_dir / ATTACHMENTS_DIR
     if not att_dir.is_dir():
         return []
+
+    active = embedder if embedder is not None else DEFAULT_EMBEDDER
 
     base_resolved = base_dir.resolve()
     records: list[MemoryRecord] = []
@@ -517,7 +549,7 @@ def _parse_attachments(
                 identifier=f"{default_identifier}:{att.name}",
                 fact_text="",
                 embedding=b"",
-                embedding_dim=EMBEDDING_DIM,
+                embedding_dim=active.descriptor.dimension,
                 embedding_model="",
                 source="bundle:attachments",
                 content_hash=content_hash,

@@ -22,7 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hotmem.db import MemoryDB
-from hotmem.embed import embed_text, pack_embedding
+from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
 from hotmem.memory import FileRef, add_file_backed
 from hotmem.search import search_memories
 from hotmem.vector_index import (
@@ -49,6 +49,8 @@ class FakeVectorIndex:
         self.vectors: dict[str, list[float]] = {}
         self.metadata: dict[str, dict[str, Any]] = {}
         self.marker: tuple[int, ...] | None = None
+        self.marker_model: str | None = None
+        self.marker_dim: int | None = None
         self.upsert_calls = 0
 
     def upsert(self, records: list[dict[str, Any]]) -> None:
@@ -59,6 +61,8 @@ class FakeVectorIndex:
 
     def apply_rebuild_marker(self, marker: dict[str, Any]) -> None:
         self.marker = (marker["db_count"], marker["max_rowid"], marker["max_event_seq"])
+        self.marker_model = str(marker.get("embedding_model") or "") or None
+        self.marker_dim = marker.get("embedding_dim") or None
         self.rebuilt_at = marker.get("rebuilt_at")
 
     def search(self, query_embedding: list[float], top_k: int) -> list[dict[str, Any]]:
@@ -83,8 +87,22 @@ class FakeVectorIndex:
     def oversample(self) -> int:
         return 1000
 
-    def is_stale(self, db: MemoryDB) -> bool:
-        return self.marker != db_fingerprint(db)
+    def is_stale(
+        self,
+        db: MemoryDB,
+        *,
+        embedding_model: str | None = None,
+        embedding_dim: int | None = None,
+    ) -> bool:
+        """Fingerprint staleness plus the #78 descriptor check: a marker
+        stamped under a different (or unstamped) embedding space reads stale."""
+        if self.marker != db_fingerprint(db):
+            return True
+        if embedding_model is not None and self.marker_model != embedding_model:
+            return True
+        if embedding_dim is not None:
+            return self.marker_dim != embedding_dim
+        return False
 
     def status(self, db: MemoryDB) -> dict[str, Any]:
         return {
@@ -224,7 +242,9 @@ def test_search_with_null_index_equals_plain_search(tmp_db: MemoryDB, tmp_path: 
 def test_rebuild_indexes_rows_with_embeddings_only(tmp_db: MemoryDB):
     _seed_store(tmp_db)
     index = FakeVectorIndex()
-    result = rebuild_vector_index(tmp_db, index)
+    result = rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )
 
     # f1..f3 + arch + expired (expired still has an embedding; TTL applies at
     # query time) + fs1 (summary embedding). fs2 has no summary -> no embedding.
@@ -238,7 +258,9 @@ def test_rebuild_indexes_rows_with_embeddings_only(tmp_db: MemoryDB):
 def test_rebuild_parity_accelerated_equals_fallback(tmp_db: MemoryDB):
     _seed_store(tmp_db)
     index = FakeVectorIndex()
-    rebuild_vector_index(tmp_db, index)
+    rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )
 
     for query in ("invoice", "payment terms", "duplicate invoice risk", "Q3 revenue", "zzz"):
         fallback = search_memories(tmp_db, query, top_k=5)
@@ -249,7 +271,9 @@ def test_rebuild_parity_accelerated_equals_fallback(tmp_db: MemoryDB):
 def test_rebuild_parity_includes_archived_when_requested(tmp_db: MemoryDB):
     _seed_store(tmp_db)
     index = FakeVectorIndex()
-    rebuild_vector_index(tmp_db, index)
+    rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )
 
     fallback = search_memories(tmp_db, "invoice policy", top_k=5, include_archived=True)
     accelerated = search_memories(
@@ -278,7 +302,9 @@ def test_accelerated_search_runs_single_fts_pass(tmp_db: MemoryDB, monkeypatch: 
     """#92: candidate unioning and BM25 normalization share one FTS query."""
     _seed_store(tmp_db)
     index = FakeVectorIndex()
-    rebuild_vector_index(tmp_db, index)
+    rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )
 
     calls = {"n": 0}
     original = tmp_db.fts_search
@@ -300,7 +326,9 @@ def test_accelerated_search_runs_single_fts_pass(tmp_db: MemoryDB, monkeypatch: 
 def test_rebuild_on_null_index_is_noop(tmp_db: MemoryDB, tmp_path: Path):
     _add_fact(tmp_db, "1", "hello")
     index = get_vector_index(None, base_dir=tmp_path)
-    result = rebuild_vector_index(tmp_db, index)
+    result = rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )
     assert result["indexed_count"] == 0
     assert result["db_count"] == 1
 
@@ -323,7 +351,9 @@ def test_concurrent_insert_during_rebuild_marks_index_stale(
 
     monkeypatch.setattr(tmp_db, "all_rows", all_rows_with_insert)
     index = FakeVectorIndex()
-    rebuild_vector_index(tmp_db, index)
+    rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )
 
     assert index.is_stale(tmp_db) is True
 
@@ -334,7 +364,9 @@ def test_concurrent_insert_during_rebuild_marks_index_stale(
 def test_stale_index_falls_back_and_still_finds_new_memory(tmp_db: MemoryDB):
     _seed_store(tmp_db)
     index = FakeVectorIndex()
-    rebuild_vector_index(tmp_db, index)
+    rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )
 
     # Mutate canonical storage without updating the index.
     _add_fact(tmp_db, "new", "fresh invoice fact after rebuild")
@@ -384,7 +416,9 @@ def test_missing_index_directory_search_still_works(tmp_db: MemoryDB, tmp_path: 
 def test_index_loss_does_not_lose_memory(tmp_db: MemoryDB, tmp_path: Path):
     _seed_store(tmp_db)
     index = FakeVectorIndex()
-    rebuild_vector_index(tmp_db, index)
+    rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )
     assert index.count() == 6
 
     index.clear()  # simulate total index loss
@@ -394,7 +428,9 @@ def test_index_loss_does_not_lose_memory(tmp_db: MemoryDB, tmp_path: Path):
     results = search_memories(tmp_db, "invoice validation", top_k=5, vector_index=index)
     assert results, "search falls back to the SQLite scan"
 
-    rebuild_vector_index(tmp_db, index)  # rebuild restores acceleration
+    rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )  # rebuild restores acceleration
     assert index.count() == 6
 
 
@@ -428,7 +464,9 @@ def test_fallback_search_is_deterministic(tmp_db: MemoryDB):
 def test_stale_index_results_equal_fallback_results(tmp_db: MemoryDB):
     _seed_store(tmp_db)
     index = FakeVectorIndex()
-    rebuild_vector_index(tmp_db, index)
+    rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )
     _add_fact(tmp_db, "late", "late arriving invoice fact")
     stale = search_memories(tmp_db, "invoice fact", top_k=5, vector_index=index)
     fallback = search_memories(tmp_db, "invoice fact", top_k=5)
@@ -455,7 +493,9 @@ def test_rebuild_performs_no_file_reads(
     monkeypatch.setitem(storage_module.ADAPTERS, "file", spy)
 
     index = FakeVectorIndex()
-    result = rebuild_vector_index(tmp_db, index)
+    result = rebuild_vector_index(
+        tmp_db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+    )
 
     assert result["indexed_count"] == 2
     assert spy.total_file_reads == 0  # no read/read_range/checksum ever
@@ -643,7 +683,9 @@ def test_chroma_rebuild_and_search_parity(tmp_path: Path):
     try:
         _seed_store(db)
         index = ChromaVectorIndex(base_dir=tmp_path)
-        result = rebuild_vector_index(db, index)
+        result = rebuild_vector_index(
+            db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+        )
 
         assert result["indexed_count"] == 6
         assert index.count() == 6
@@ -667,7 +709,9 @@ def test_chroma_stale_after_insert(tmp_path: Path):
     try:
         _add_fact(db, "1", "invoice validation")
         index = ChromaVectorIndex(base_dir=tmp_path)
-        rebuild_vector_index(db, index)
+        rebuild_vector_index(
+            db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+        )
         assert index.is_stale(db) is False
 
         _add_fact(db, "2", "another fact")
@@ -686,14 +730,18 @@ def test_chroma_clear_and_delete(tmp_path: Path):
     try:
         _add_fact(db, "1", "invoice validation")
         index = ChromaVectorIndex(base_dir=tmp_path)
-        rebuild_vector_index(db, index)
+        rebuild_vector_index(
+            db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+        )
         assert index.count() == 1
 
         index.clear()
         assert index.count() == 0
         assert index.is_stale(db) is True
 
-        rebuild_vector_index(db, index)
+        rebuild_vector_index(
+            db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+        )
         assert index.count() == 1
         index.delete(["1"])
         assert index.count() == 0
@@ -708,7 +756,9 @@ def test_chroma_persistence_across_instances(tmp_path: Path):
     try:
         _add_fact(db, "1", "invoice validation")
         first = ChromaVectorIndex(base_dir=tmp_path)
-        rebuild_vector_index(db, first)
+        rebuild_vector_index(
+            db, first, embedding_model=EMBEDDING_MODEL, embedding_dim=EMBEDDING_DIM
+        )
         first.close()
 
         second = ChromaVectorIndex(base_dir=tmp_path)

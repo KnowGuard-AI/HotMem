@@ -120,6 +120,28 @@ def test_v2_provenance_columns_are_optional_and_defaulted(client, tmp_path):
     assert first["schema_version"] == 1
 
 
+def test_hydrate_embedding_disposition_fields_are_additive(client, tmp_path):
+    """#78: the four embedding-status response fields are additive.
+
+    A repeat hydrate of the same swap loads zero records and reports zero
+    embedding work — the fields extend the response without changing any
+    pre-existing key's meaning.
+    """
+    import json
+
+    swap = tmp_path / "disposition.jsonl"
+    swap.write_text(json.dumps({"identifier": "d", "fact_text": "disposition fact"}) + "\n")
+    first = client.post("/v1/hydrate", json={"file": str(swap)}).json()
+    assert first["loaded"] == 1
+    assert first["embedding_rebuilt"] == 1
+    assert first["embedding_reused"] == 0
+    second = client.post("/v1/hydrate", json={"file": str(swap)}).json()
+    assert second["loaded"] == 0
+    assert second["skipped_dupes"] == 1
+    assert second["embedding_rebuilt"] == 0
+    assert second["embedding_reused"] == 0
+
+
 def test_search_identical_with_and_without_vector_acceleration(tmp_path):
     """#49: enabling the derived vector index must not change search results.
 
