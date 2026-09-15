@@ -6,19 +6,57 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-### Added — portable embedding descriptor contract (#78)
-- `hotmem.embed` now defines the minimal `Embedder` protocol, the immutable
-  `EmbeddingDescriptor` (implementation, model, revision, dimension,
-  normalization, metric, preprocessing), and `HashEmbedder` — the exact
-  `hotmem-hash-v1` default, unchanged. The descriptor's canonical key is
-  persisted as the record `embedding_model` value (the hash key stays
-  `hotmem-hash-v1`: zero migration, existing packages valid), and
-  interchange-v1 §5 compatibility is now descriptor-based: equal dimension
-  alone never establishes compatibility, absent legacy fields keep hash
-  semantics, and blobs are validated for length, finite values, and
-  normalization policy. `resolve_embedding` reports four statuses —
-  reused/rebuilt/missing/failed — with rebuilds stamped by the active
-  descriptor and provider failures preserving the canonical record.
+### Added — portable embeddings, lossless annotations, gated reranking (#78/#79/#80)
+- **Portable embedding boundary (#78).** `Embedder` protocol + immutable
+  `EmbeddingDescriptor` whose canonical key persists as the record
+  `embedding_model` (the hash default stays exactly `hotmem-hash-v1`: zero
+  migration, existing packages valid). Descriptor-based compatibility:
+  equal dimensions never establish compatibility; absent legacy fields keep
+  hash semantics; blobs are validated for length, finite values, and
+  normalization policy. Rehydration reports reused/rebuilt/missing/failed
+  dispositions; rebuilds stamp the active descriptor, provider failures
+  preserve the canonical record. The runtime embedder injects through every
+  write/search/hydrate/reindex path (CLI `--embedder`/`--embedder-model-path`
+  + env fallback, validated before serving; sanitized descriptor in
+  `/v1/health`). Mixed-space safety: foreign-descriptor rows score zero
+  cosine and still surface lexically; the vector index stamps its marker
+  from the active descriptor and reads stale across embedder switches. One
+  optional local semantic adapter (`[semantic]` extra, model2vec) loads an
+  explicitly provisioned, pinned local artifact — never downloads.
+  Committed evidence (`bench/retrieval/semantic-local-m2v.json`,
+  potion-base-8M): the #77 66.7pp semantic gap closed at zero lexical cost
+  (Recall@5 0.333 → 1.000, lexical parity 1.000), MRR@5 0.537 → 0.882,
+  nDCG@5 0.586 → 0.925, clone equivalence 1.000 under the semantic space.
+- **Lossless annotation envelope (#79).** Reserved `metadata.annotations`
+  envelope (schema 1): namespaced items with pinned ids, confidence bounds,
+  local evidence references (resolved against package + target, forward
+  references supported, dangling = actionable errors) and external URIs
+  (preserved verbatim, never fetched). Unknown namespaces/keys preserved
+  losslessly; malformed known structure fails with actionable errors
+  (400 on `/v1/add`, counted-invalid records on interchange paths). Limits:
+  128 KiB, 1000 items, depth 8. Deterministic merge on every
+  content-hash-duplicate path — the case that silently dropped
+  annotation-only changes: disjoint items combine, same-id/same-content
+  replays are no-ops, same-id/different-content is an explicit conflict
+  retaining both versions; never last-write-wins. Annotation-only delta
+  changes ride the existing CAS. Contract: `docs/okf/annotations-v1.md`;
+  reference fixture: `bench/annotations/mapping-fixture.json`.
+- **Gated reranking (#80).** `Reranker` protocol + deterministic bounded
+  MMR (evidence-driven lambda 0.5, pool 50) behind
+  `--reranker`/`--reranker-lambda`/`--reranker-pool` (default off — the
+  default ranking is byte-identical to the single-stage path). Invalid or
+  failing reranker output falls back to the first-stage order; selection
+  never enters canonical identity. The gate evidence
+  (`bench/retrieval/post-p2-gate-80.md`) reads: diversity duplicate-slot
+  rate 0.300 hash / 0.400 semantic, both above the 20% gate. Measured
+  outcome (`bench/retrieval/rerank-mmr.json`): 0.400 → 0.167, clone
+  equivalence 1.0 under the reranker, bounded overhead (~13ms p50 at
+  50-pool/256-dim), and the documented recall allowance (overall Recall@5
+  1.000 → 0.885; lexical parity unchanged).
+- Compatibility matrix (#78/#79/#80): every transfer format × embedder
+  scenario, canonical-vs-derived independence, and idempotent replay —
+  including a fix for delta records whose embeddings were serialized as
+  python reprs, forcing rebuilds on every same-space apply.
 
 ### Changed — reconciled #80 duplicate-slot gate denominator (#77/#80)
 - The #77 guide read the 48-query aggregate duplicate-slot rate (7.5%) while
