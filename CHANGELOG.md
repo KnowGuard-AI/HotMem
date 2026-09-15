@@ -6,6 +6,59 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — deterministic retrieval evaluation harness (#77)
+- `scripts/retrieval_eval.py` + `bench/retrieval/{corpus,queries,baseline}.json`:
+  one offline command measures Recall@1/5, MRR@5, graded nDCG@5, negative-query
+  false-positive rate, duplicate-slot rate, per-category metrics, clone
+  equivalence (verified package -> clean hydration, per-query drift),
+  latency p50/p95, package verify/hydrate throughput, and fresh-process
+  cold start — all through the production ingest/search path, never a
+  copied ranking formula. 60 synthetic memories / 48 graded queries cover
+  all eight required categories with frozen clocks and deterministic bytes.
+  Committed baseline from the unchanged stack is CI-guarded; the
+  deterministic recommendation rule measured a 66.7pp semantic-vs-lexical
+  Recall@5 gap (clone equivalence 1.0, duplicate slots 7.5%) pointing at
+  #78. docs/retrieval-quality.md explains interpretation and limits.
+
+### Added — verified incremental sync implementation (#73)
+- `hotmem delta produce|apply` and `hotmem.interchange.delta`: verified
+  one-way incremental transfer. The producer diffs a verified base package
+  against current canonical state into deterministic compare-and-swap
+  upserts (byte-stable, plain or gz); the applier verifies everything
+  before any write, applies in one transaction with the sync checkpoint
+  and a `sync.applied` receipt event, skips already-applied operations
+  (idempotent replay), and reports every conflict (base_missing,
+  state_divergence, id_reuse, invalid_record) with expected/actual
+  fingerprints and recovery instructions — a conflicted or failing apply
+  leaves the target byte-identical.
+- New `interchange.fingerprint` state fingerprints (versioned, documented
+  exclusions) detect every sync-relevant mutation including promotion
+  transitions — which now round-trip through clone packages, deltas, and
+  v2 snapshots (previously a clone silently resurrected archived memories
+  as HOT).
+- Event-log correctness fixes: `replay(after_seq=...)` honors its cursor
+  (was silently restarting at 0); `replay_into` batches inserts and
+  reports actually-applied counts; `memory.created` payloads carry the
+  full canonical column set. The tested boundary stands: non-server
+  ingestion emits no per-record events, so v1 sync uses verified state
+  comparison, not event replay.
+- `bench/sync/`: delta apply of a 1% change set costs ~10-30ms at ~0.06MB
+  peak vs 0.22-1.07s at 5.7-7.5MB for the re-clone fallback (~20x faster,
+  gap widens with store size); idempotent replay is nearly free; zero
+  embedding calls across every scenario.
+- End-to-end gate: wiki -> JSONL -> instance -> base package -> mutations
+  -> delta -> receiver convergence (state + retrieval parity) -> repeat
+  apply loads zero -> diverged receiver recovers via whole-brain clone.
+
+### Added — verified incremental sync contract (#73)
+- Added `docs/okf/delta-v1.md` — the normative `hotmem-delta-v1` contract:
+  verified one-way incremental transfer built on the interchange clone
+  format. Compare-and-swap upsert operations with per-record state
+  fingerprints (versioned exclusions per ADR-003), explicit conflict
+  taxonomy, no inferred deletion or tombstones in v1, atomic
+  checkpoint/receipt commits, and whole-brain clone-and-restore as the
+  recovery path.
+
 ### Added — deterministic OKF wiki importer (#68)
 - `hotmem import --from okf <bundle-dir> [--out review.jsonl]` converts a
   Google Open Knowledge Format v0.2 bundle (markdown pages with YAML

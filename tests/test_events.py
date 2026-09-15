@@ -267,9 +267,9 @@ def test_migration_adds_events_table(tmp_path: Path):
         assert listing["next_seq"] is None
         # Existing memories count is unaffected.
         assert db.count() == 0
-        # user_version bumped to 3.
+        # user_version bumped to 3 (events), then to 4 (#73 sync checkpoints).
         version = db._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == 4
     finally:
         db.close()
 
@@ -280,11 +280,11 @@ def test_migration_is_idempotent_for_events(tmp_path: Path):
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
-    # Opening again must not error and must keep user_version at 3.
+    # Opening again must not error and must keep user_version at 4.
     db = MemoryDB(db_path)
     try:
         version = db._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == 4
     finally:
         db.close()
 
@@ -510,3 +510,178 @@ def test_trim_events_by_count_zero_clears(tmp_db: MemoryDB):
 def test_trim_events_by_count_negative_rejected(tmp_db: MemoryDB):
     with pytest.raises(ValueError):
         tmp_db.trim_events_by_count(keep=-1)
+
+
+# ── replay correctness (#73) ────────────────────────────────────────────────
+
+
+def _seed_created_events(db, n: int) -> list[dict]:
+    """Append n memory.created events with distinct ids; return the events."""
+    from hotmem.events import EventType, append_event
+
+    events = []
+    for i in range(n):
+        events.append(
+            append_event(
+                db,
+                event_type=EventType.MEMORY_CREATED,
+                memory_id=f"r{i}",
+                namespace="replay",
+                payload={
+                    "id": f"r{i}",
+                    "identifier": f"ident-{i}",
+                    "fact_text": f"fact {i}",
+                    "content_hash": f"hash-{i}",
+                },
+            )
+        )
+    return events
+
+
+def test_replay_respects_after_seq_cursor(tmp_db):
+    """Regression (#73): replay(after_seq=N) previously restarted at seq 0."""
+    from hotmem.events import replay
+
+    events = _seed_created_events(tmp_db, 5)
+    yielded = [e["seq"] for e in replay(tmp_db, after_seq=events[1]["seq"])]
+    assert yielded == [events[2]["seq"], events[3]["seq"], events[4]["seq"]]
+
+
+def test_replay_into_reports_applied_not_attempted(tmp_db, tmp_path):
+    """A record already present in the target is skipped and not counted."""
+    from hotmem.db import MemoryDB, MemoryRecord
+    from hotmem.embed import embed_text, pack_embedding
+    from hotmem.events import replay_into
+
+    source = MemoryDB(tmp_path / "src.sqlite")
+    _seed_created_events(source, 3)
+
+    target = MemoryDB(tmp_path / "dst.sqlite")
+    # Pre-insert one duplicate content_hash: content hash is "hash-1".
+    target.insert_many_ignore(
+        [
+            MemoryRecord(
+                id="different-id",
+                identifier="ident-1",
+                fact_text="fact 1",
+                embedding=pack_embedding(embed_text("fact 1")),
+                content_hash="hash-1",
+            )
+        ]
+    )
+
+    applied = replay_into(source, target)
+    assert applied == 2  # hash-1 skipped, two others applied
+    assert target.count() == 3
+
+
+def test_replay_into_batches_inserts(tmp_db, tmp_path, monkeypatch):
+    from hotmem.db import MemoryDB
+    from hotmem.events import replay_into
+
+    source = MemoryDB(tmp_path / "src.sqlite")
+    _seed_created_events(source, 5)
+
+    calls: list[int] = []
+    original = MemoryDB.insert_many_ignore
+
+    def spy(self, records, **kwargs):
+        materialized = list(records)
+        calls.append(len(materialized))
+        return original(self, materialized, **kwargs)
+
+    monkeypatch.setattr(MemoryDB, "insert_many_ignore", spy)
+
+    target = MemoryDB(tmp_path / "t.sqlite")
+    replay_into(source, target)
+    assert calls and all(c <= 1000 for c in calls)
+
+
+# ── event payload fidelity + coverage boundary (#73) ────────────────────────
+
+
+def test_created_payload_replay_fidelity(tmp_path: Path):
+    """Every canonical column survives add -> event -> replay_into (#73).
+
+    Previously the payload omitted created_at/updated_at/parent_memory/
+    related_memories, so replayed rows silently lost temporal and
+    relationship fields.
+    """
+    from hotmem.db import MemoryDB
+    from hotmem.events import replay_into
+    from hotmem.server import create_app
+
+    src_db = tmp_path / "src.sqlite"
+    app = create_app(db_path=src_db)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/add",
+            json={
+                "identifier": "acme",
+                "fact": "acme renews the contract",
+                "source": "erp",
+                "importance": 0.9,
+                "metadata": {"deal": "renewal"},
+                "ttl_seconds": 3600,
+                "namespace": "finance",
+            },
+        )
+        assert resp.status_code == 200
+
+    source = MemoryDB(src_db)
+    original = source.all_rows()[0]
+    original_created_at = original["created_at"]
+
+    target = MemoryDB(tmp_path / "dst.sqlite")
+    applied = replay_into(source, target)
+    assert applied == 1
+
+    replayed = target.all_rows()[0]
+    for col in (
+        "id",
+        "identifier",
+        "fact_text",
+        "embedding_dim",
+        "embedding_model",
+        "source",
+        "importance",
+        "metadata_json",
+        "content_hash",
+        "namespace",
+        "tier",
+        "memory_type",
+        "created_at",
+        "parent_memory",
+        "related_memories",
+    ):
+        assert replayed[col] == original[col], col
+    assert replayed["created_at"] == original_created_at
+    source.close()
+    target.close()
+
+
+def test_import_ingestion_emits_no_per_record_events(tmp_db, tmp_path: Path):
+    """Documented completeness boundary (#73): non-server ingestion paths
+    (hydrate/import) emit no per-record memory.created events — only the
+    import summary event. This is why #73's v1 delta producer uses verified
+    base-to-current state comparison instead of event replay.
+    """
+    from hotmem.events import query_events, replay_into
+    from hotmem.swap import hydrate
+
+    source = MemoryDB(tmp_path / "src.sqlite")
+    swap_file = tmp_path / "in.jsonl"
+    with open(swap_file, "w") as f:
+        f.write('{"identifier": "a", "fact_text": "fact a"}\n')
+        f.write('{"identifier": "b", "fact_text": "fact b"}\n')
+    hydrate(source, swap_file)
+    assert source.count() == 2
+
+    events = query_events(source, limit=100)["events"]
+    created = [e for e in events if e["event_type"] == EventType.MEMORY_CREATED]
+    assert created == []  # no per-record events for hydrate ingestion
+
+    # Consequence: replaying the log cannot reconstruct imported state.
+    target = MemoryDB(tmp_path / "dst.sqlite")
+    assert replay_into(source, target) == 0
+    assert target.count() == 0

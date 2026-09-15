@@ -209,3 +209,23 @@ def test_package_empty_db(tmp_db: MemoryDB, tmp_path: Path):
     manifest = json.loads((out / MANIFEST_NAME).read_text())
     assert manifest["record_count"] == 0
     assert (out / PAYLOAD_PLAIN).read_text() == ""
+
+
+def test_package_roundtrip_preserves_promotion_state(src_db: MemoryDB, tmp_path: Path):
+    """Promotion state is canonical access state (#73 amendment): an archived
+    memory must survive clone -> restore as ARCHIVED, not be silently
+    resurrected to HOT."""
+    src_db.update_promotion_state("m1", "ARCHIVED")
+    out = tmp_path / "pkg"
+    write_package(src_db, out)
+    records = [json.loads(line) for line in (out / PAYLOAD_PLAIN).read_text().splitlines()]
+    record = next(r for r in records if r["id"] == "m1")
+    assert record["promotion_state"] == "ARCHIVED"
+
+    target = MemoryDB(tmp_path / "fresh.sqlite")
+    from hotmem.interchange.hydrate import hydrate_package
+
+    hydrate_package(target, out)
+    row = next(r for r in target.all_rows() if r["id"] == "m1")
+    assert row["promotion_state"] == "ARCHIVED"
+    target.close()

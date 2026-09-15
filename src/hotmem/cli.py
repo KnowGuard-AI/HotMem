@@ -628,3 +628,109 @@ def candidates(db_path: str, namespace: str | None, state: str | None, as_json: 
     else:
         for r in rows:
             click.echo(f"{r['id']}\t{r['identifier']}\t{r.get('promotion_state', 'HOT')}")
+
+
+@main.group()
+def delta():
+    """Verified one-way incremental sync between HotMem instances (#73)."""
+
+
+@delta.command("produce")
+@click.option(
+    "--base",
+    "base_pkg",
+    required=True,
+    type=click.Path(exists=True),
+    help="Base package directory (hotmem-interchange-v1 clone).",
+)
+@click.option("--db", "db_path", required=True, type=click.Path(), help="Source database path.")
+@click.option(
+    "--out",
+    "out_dir",
+    required=True,
+    type=click.Path(),
+    help="Delta package output directory.",
+)
+@click.option(
+    "--gz",
+    "gz",
+    is_flag=True,
+    default=False,
+    help="Gzip the operations payload (byte-stable, mtime=0).",
+)
+def delta_produce(base_pkg: str, db_path: str, out_dir: str, gz: bool):
+    """Produce a verified delta package: base package -> current state.
+
+    Deterministic compare-and-swap upserts sorted by record id; removals
+    since the base are counted in the manifest and never applied (v1
+    deletion policy). Re-run with no further changes yields an empty delta.
+    """
+    from hotmem.db import MemoryDB
+    from hotmem.interchange.delta import produce_delta as do_produce
+    from hotmem.interchange.hydrate import PackageError
+
+    db = MemoryDB(db_path)
+    try:
+        result = do_produce(db, base_pkg, out_dir, gz=gz)
+    except PackageError as err:
+        db.close()
+        raise click.ClickException(
+            f"Base package verification failed ({err.reason}): {err}"
+        ) from err
+    db.close()
+    ui = get_renderer()
+    ui.summary(
+        "delta-produce",
+        added=result.added,
+        changed=result.changed,
+        removed_since_base=result.removed_since_base,
+        total_ops=result.total_ops,
+        path=result.path,
+    )
+
+
+@delta.command("apply")
+@click.option(
+    "--delta",
+    "delta_dir",
+    required=True,
+    type=click.Path(exists=True),
+    help="Delta package directory (hotmem-delta-v1).",
+)
+@click.option("--db", "db_path", required=True, type=click.Path(), help="Receiver database path.")
+def delta_apply(delta_dir: str, db_path: str):
+    """Apply a verified delta to a receiver instance (all-or-nothing).
+
+    Conflicts (diverged receiver, missing base) abort the whole delta and
+    exit non-zero — the target is unchanged. Re-applying an applied delta
+    loads zero changes.
+    """
+    from hotmem.db import MemoryDB
+    from hotmem.interchange.delta import DeltaConflictError
+    from hotmem.interchange.delta import apply_delta as do_apply
+    from hotmem.interchange.hydrate import PackageError
+
+    db = MemoryDB(db_path)
+    try:
+        result = do_apply(db, delta_dir)
+    except DeltaConflictError as err:
+        db.close()
+        for conflict in err.conflicts:
+            click.echo(
+                f"conflict {conflict.reason}: record={conflict.record_id} "
+                f"op={conflict.op_id} expected={conflict.expected} actual={conflict.actual} "
+                f"recovery={conflict.recovery}",
+                err=True,
+            )
+        raise click.ClickException(f"Delta not applied — {len(err.conflicts)} conflict(s)") from err
+    except PackageError as err:
+        db.close()
+        raise click.ClickException(f"Delta verification failed ({err.reason}): {err}") from err
+    db.close()
+    ui = get_renderer()
+    ui.summary(
+        "delta-apply",
+        applied=result.applied,
+        skipped=result.skipped,
+        conflicts=len(result.conflicts),
+    )

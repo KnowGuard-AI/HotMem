@@ -91,6 +91,11 @@ def row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "source_format": row["source_format"],
         "provenance": _parse_json(row.get("provenance_json")),
         "created_at": row["created_at"],
+        # Promotion state is canonical access state (it changes retrieval
+        # behavior — archived memories are excluded by default) and must
+        # round-trip through clones and deltas (#73 amendment to §1.2).
+        "promotion_state": row["promotion_state"],
+        "promotion_candidate": row["promotion_candidate"],
     }
     return {k: v for k, v in record.items() if v is not None}
 

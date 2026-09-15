@@ -26,7 +26,7 @@ One JSON object per line. Fields are **required**, **conditionally required**,
 | --- | --- |
 | Required | `schema_version`, `id`, `identifier`, `content_hash`, `memory_type` |
 | Conditionally required | `fact_text` — non-inline records without a usable `fact_summary`; `source_uri`, `byte_offset`, `byte_length` — `memory_type: "file"` records |
-| Optional | `fact_summary`, `source`, `importance`, `metadata`, `ttl_seconds`, `created_at`, `namespace`, `tier`, `tags`, `source_format`, `source_checksum`, `provenance`, `embedding`, `embedding_dim`, `embedding_model` |
+| Optional | `fact_summary`, `source`, `importance`, `metadata`, `ttl_seconds`, `created_at`, `namespace`, `tier`, `tags`, `source_format`, `source_checksum`, `provenance`, `embedding` (b64), `embedding_dim`, `embedding_model`, `promotion_state`, `promotion_candidate` |
 | Forward-compatible | any other top-level key |
 
 ### 1.1 Field semantics
@@ -63,8 +63,11 @@ One JSON object per line. Fields are **required**, **conditionally required**,
 - HotMem preserves unknown top-level keys on hydrate under
   `metadata["_interchange_unknown"]` so a round-trip never silently drops
   producer fields.
-- Runtime lifecycle state (promotion state, event-log position, index markers)
-  is **not** part of the canonical record and is not exported.
+- Promotion state (`promotion_state`, `promotion_candidate`) **is** canonical
+  access state — it changes retrieval behavior (archived memories are
+  excluded by default) — and round-trips through clones and deltas
+  (amended by #73). Event-log position, index markers, and other runtime
+  bookkeeping remain outside the canonical record and are not exported.
 
 ## 2. Canonical serialization
 

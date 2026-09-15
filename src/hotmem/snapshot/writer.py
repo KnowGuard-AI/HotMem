@@ -107,6 +107,8 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "source_format": row["source_format"],
         "provenance": _parse_json_field(row["provenance_json"]),
         "created_at": row["created_at"],
+        "promotion_state": row["promotion_state"],
+        "promotion_candidate": row["promotion_candidate"],
     }
 
 
