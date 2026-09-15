@@ -595,3 +595,93 @@ def test_replay_into_batches_inserts(tmp_db, tmp_path, monkeypatch):
     target = MemoryDB(tmp_path / "t.sqlite")
     replay_into(source, target)
     assert calls and all(c <= 1000 for c in calls)
+
+
+# ── event payload fidelity + coverage boundary (#73) ────────────────────────
+
+
+def test_created_payload_replay_fidelity(tmp_path: Path):
+    """Every canonical column survives add -> event -> replay_into (#73).
+
+    Previously the payload omitted created_at/updated_at/parent_memory/
+    related_memories, so replayed rows silently lost temporal and
+    relationship fields.
+    """
+    from hotmem.db import MemoryDB
+    from hotmem.events import replay_into
+    from hotmem.server import create_app
+
+    src_db = tmp_path / "src.sqlite"
+    app = create_app(db_path=src_db)
+    with TestClient(app) as client:
+        resp = client.post(
+            "/v1/add",
+            json={
+                "identifier": "acme",
+                "fact": "acme renews the contract",
+                "source": "erp",
+                "importance": 0.9,
+                "metadata": {"deal": "renewal"},
+                "ttl_seconds": 3600,
+                "namespace": "finance",
+            },
+        )
+        assert resp.status_code == 200
+
+    source = MemoryDB(src_db)
+    original = source.all_rows()[0]
+    original_created_at = original["created_at"]
+
+    target = MemoryDB(tmp_path / "dst.sqlite")
+    applied = replay_into(source, target)
+    assert applied == 1
+
+    replayed = target.all_rows()[0]
+    for col in (
+        "id",
+        "identifier",
+        "fact_text",
+        "embedding_dim",
+        "embedding_model",
+        "source",
+        "importance",
+        "metadata_json",
+        "content_hash",
+        "namespace",
+        "tier",
+        "memory_type",
+        "created_at",
+        "parent_memory",
+        "related_memories",
+    ):
+        assert replayed[col] == original[col], col
+    assert replayed["created_at"] == original_created_at
+    source.close()
+    target.close()
+
+
+def test_import_ingestion_emits_no_per_record_events(tmp_db, tmp_path: Path):
+    """Documented completeness boundary (#73): non-server ingestion paths
+    (hydrate/import) emit no per-record memory.created events — only the
+    import summary event. This is why #73's v1 delta producer uses verified
+    base-to-current state comparison instead of event replay.
+    """
+    from hotmem.events import query_events, replay_into
+    from hotmem.swap import hydrate
+
+    source = MemoryDB(tmp_db)
+    swap_file = tmp_path / "in.jsonl"
+    with open(swap_file, "w") as f:
+        f.write('{"identifier": "a", "fact_text": "fact a"}\n')
+        f.write('{"identifier": "b", "fact_text": "fact b"}\n')
+    hydrate(source, swap_file)
+    assert source.count() == 2
+
+    events = query_events(source, limit=100)["events"]
+    created = [e for e in events if e["event_type"] == EventType.MEMORY_CREATED]
+    assert created == []  # no per-record events for hydrate ingestion
+
+    # Consequence: replaying the log cannot reconstruct imported state.
+    target = MemoryDB(tmp_path / "dst.sqlite")
+    assert replay_into(source, target) == 0
+    assert target.count() == 0

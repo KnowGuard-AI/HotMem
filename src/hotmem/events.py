@@ -102,6 +102,10 @@ def _build_memory_created_payload(record: dict[str, Any]) -> dict[str, Any]:
         "fact_summary": record.get("fact_summary"),
         "provenance_json": record.get("provenance_json"),
         "snapshot_id": record.get("snapshot_id") or "",
+        "parent_memory": record.get("parent_memory") or "",
+        "related_memories": record.get("related_memories") or "[]",
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
     }
     emb = record.get("embedding")
     if emb:
@@ -267,6 +271,10 @@ def replay_into(db: MemoryDB, target_db: MemoryDB) -> int:
             fact_summary=p.get("fact_summary"),
             provenance_json=p.get("provenance_json"),
             snapshot_id=p.get("snapshot_id") or "",
+            parent_memory=p.get("parent_memory") or "",
+            related_memories=p.get("related_memories") or "[]",
+            created_at=p.get("created_at"),
+            updated_at=p.get("updated_at"),
         )
         pending.append(record)
         if len(pending) >= _REPLAY_BATCH:
