@@ -16,6 +16,8 @@ harden into final API or format specifications.
 
 - [Interchange Contract v1](interchange-v1.md) — normative `hotmem-interchange-v1`
   record, manifest, and hydration contract (#67).
+- [Delta Contract v1](delta-v1.md) — normative `hotmem-delta-v1` verified
+  one-way incremental transfer (#73).
 - [Company-Brain Interchange Strategy](company-brain-interchange.md) — the
   accepted strategy behind #67–#73.
 - [Format and Maintenance](format-and-maintenance.md)

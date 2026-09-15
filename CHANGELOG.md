@@ -6,6 +6,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — verified incremental sync contract (#73)
+- Added `docs/okf/delta-v1.md` — the normative `hotmem-delta-v1` contract:
+  verified one-way incremental transfer built on the interchange clone
+  format. Compare-and-swap upsert operations with per-record state
+  fingerprints (versioned exclusions per ADR-003), explicit conflict
+  taxonomy, no inferred deletion or tombstones in v1, atomic
+  checkpoint/receipt commits, and whole-brain clone-and-restore as the
+  recovery path.
+
 ### Added — deterministic OKF wiki importer (#68)
 - `hotmem import --from okf <bundle-dir> [--out review.jsonl]` converts a
   Google Open Knowledge Format v0.2 bundle (markdown pages with YAML
