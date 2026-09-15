@@ -284,3 +284,98 @@ def test_snapshot_dispatch_preserves_injected_embedder_across_formats(tmp_path: 
     assert result.embedding_rebuilt == 0
     db.close()
     target.close()
+
+
+# ── mixed-space safety (issue #78, C6) ───────────────────────────────────────
+
+
+def _make_same_dim_foreign_row(db: MemoryDB, fact: str) -> None:
+    """Insert a 64-dim row stamped with a foreign descriptor key.
+
+    Same dimension as the hash space — the cosine UDF would happily compute
+    a (meaningless) similarity without the descriptor guard.
+    """
+    import uuid
+
+    from hotmem.interchange.canonical import compute_content_hash
+
+    vec = _stable_vec(fact, 64)
+    db.insert(
+        id=uuid.uuid4().hex,
+        identifier="foreign",
+        fact_text=fact,
+        embedding=pack_embedding(vec),
+        embedding_dim=64,
+        embedding_model="foreign/model-v9",
+        content_hash=compute_content_hash("foreign", fact),
+    )
+
+
+def test_mixed_space_same_dim_rows_score_zero_cosine(tmp_path: Path):
+    """A foreign 64-dim row is never cosine-scored against a hash query."""
+    db = MemoryDB(tmp_path / "mixed.sqlite")
+    add_memory(db, "vendor", "hash space fact")
+    _make_same_dim_foreign_row(db, "foreign space fact that matches invoice")
+
+    rows = db.search_with_cosine(
+        pack_embedding(_stable_vec("foreign space fact that matches invoice", 64)),
+        embedding_model=EMBEDDING_MODEL,
+    )
+    by_text = {r["fact_text"]: r["cosine_score"] for r in rows}
+    assert by_text["foreign space fact that matches invoice"] == 0.0
+    assert by_text["hash space fact"] >= 0.0  # hash rows still score normally
+    # Unfiltered call (direct callers) keeps the historical behavior.
+    unguarded = db.search_with_cosine(
+        pack_embedding(_stable_vec("foreign space fact that matches invoice", 64))
+    )
+    by_text_unguarded = {r["fact_text"]: r["cosine_score"] for r in unguarded}
+    assert by_text_unguarded["foreign space fact that matches invoice"] > 0.0
+    db.close()
+
+
+def test_mixed_space_lexical_hits_still_surface(tmp_path: Path):
+    """Foreign-space rows remain retrievable via FTS/importance — lexical-only."""
+    db = MemoryDB(tmp_path / "lexical.sqlite")
+    add_memory(db, "vendor", "payment terms are net 30")
+    _make_same_dim_foreign_row(db, "invoice approval requires a PO")
+
+    # The foreign record still surfaces lexically (cosine forced to 0).
+    hits = search_memories(db, "invoice approval requires a PO", top_k=2)
+    assert hits[0]["content"] == "invoice approval requires a PO"
+    db.close()
+
+
+def test_vector_index_stale_on_descriptor_change_at_equal_fingerprint(tmp_path: Path):
+    """Switching embedders invalidates acceleration even when rows are unchanged."""
+    from test_vector_index import FakeVectorIndex
+
+    from hotmem.vector_index import rebuild_vector_index
+
+    db = MemoryDB(tmp_path / "stale.sqlite")
+    add_memory(db, "vendor", "descriptor staleness fact")
+    index = FakeVectorIndex()
+    rebuild_vector_index(db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=64)
+    # Fresh under the hash descriptor...
+    assert index.is_stale(db, embedding_model=EMBEDDING_MODEL, embedding_dim=64) is False
+    # ...stale under any other descriptor, at an identical store fingerprint.
+    assert index.is_stale(db, embedding_model="local/semantic-fake/rev:r1/norm:l2/pp:pp1") is True
+    assert index.is_stale(db, embedding_model=EMBEDDING_MODEL, embedding_dim=128) is True
+    db.close()
+
+
+def test_vector_index_rebuild_skips_foreign_space_rows(tmp_path: Path):
+    """One index serves one embedding space; foreign rows are never indexed."""
+    from test_vector_index import FakeVectorIndex
+
+    from hotmem.vector_index import rebuild_vector_index
+
+    db = MemoryDB(tmp_path / "rebuild.sqlite")
+    add_memory(db, "vendor", "hash space fact")
+    _make_same_dim_foreign_row(db, "foreign space fact")
+    index = FakeVectorIndex()
+    result = rebuild_vector_index(db, index, embedding_model=EMBEDDING_MODEL, embedding_dim=64)
+    assert result["indexed_count"] == 1
+    assert result["skipped_foreign_space"] == 1
+    assert result["skipped_no_embedding"] == 0
+    assert index.count() == 1
+    db.close()

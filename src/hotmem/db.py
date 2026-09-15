@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hotmem.embed import EMBEDDING_DIM
+from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL
 from hotmem.trace import get_tracer
 
 _trace = get_tracer("db")
@@ -81,6 +81,31 @@ def _ttl_live(alias: str = "") -> str:
     return (
         f"({alias}ttl_seconds IS NULL OR "
         f"(strftime('%s', 'now') - strftime('%s', {alias}created_at)) < {alias}ttl_seconds)"
+    )
+
+
+def _cosine_guard(embedding_model: str | None) -> tuple[str, list[str]]:
+    """Mixed-space safety (issue #78): the cosine expression guarded by descriptor.
+
+    Returns the SQL expression computing ``cosine_score`` and its bound
+    parameters. Rows stored under a different descriptor key than the
+    active one score exactly 0.0 — they stay candidates for FTS/importance
+    ranking (lexical-only, explicit) but never mis-score across spaces;
+    equal dimensions are never evidence of compatibility. The hash default
+    also admits legacy empty-model rows (interchange-v1 §5). ``None`` keeps
+    the historical unguarded cosine for direct callers.
+    """
+    if embedding_model is None:
+        return "cosine_sim(embedding, ?)", []
+    if embedding_model == EMBEDDING_MODEL:
+        return (
+            "(CASE WHEN (embedding_model = ? OR embedding_model = '') "
+            "THEN cosine_sim(embedding, ?) ELSE 0.0 END)",
+            [embedding_model],
+        )
+    return (
+        "(CASE WHEN embedding_model = ? THEN cosine_sim(embedding, ?) ELSE 0.0 END)",
+        [embedding_model],
     )
 
 
@@ -809,22 +834,33 @@ class MemoryDB:
         return inserted
 
     def search_with_cosine(
-        self, query_embedding: bytes, *, include_archived: bool = False
+        self,
+        query_embedding: bytes,
+        *,
+        include_archived: bool = False,
+        embedding_model: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return all memories with their cosine similarity to the query embedding.
 
         Archived memories are excluded by default; pass ``include_archived=True``
         for audit/full profiles.
+
+        ``embedding_model`` is mixed-space safety (issue #78): when given, rows
+        stored under a different descriptor key keep a cosine score of exactly
+        0.0 — they still surface through FTS/importance, never mis-score.
+        ``None`` keeps the historical unguarded cosine for direct callers.
         """
         archived_clause = "" if include_archived else " AND promotion_state != 'ARCHIVED'"
+        cosine_expr, cosine_params = _cosine_guard(embedding_model)
         rows = self._conn.execute(
             f"""SELECT id, identifier, fact_text, fact_summary, importance,
                        metadata_json, source, created_at,
-                       cosine_sim(embedding, ?) AS cosine_score
+                       {cosine_expr} AS cosine_score
                 FROM memories
                 WHERE {_ttl_live()}{archived_clause}
                 ORDER BY cosine_score DESC, id ASC""",
-            (query_embedding,),
+            # Bind in statement-text order: the cosine ?s precede the WHERE ?s.
+            (*cosine_params, query_embedding),
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -898,6 +934,7 @@ class MemoryDB:
         memory_ids: list[str],
         *,
         include_archived: bool = False,
+        embedding_model: str | None = None,
     ) -> list[dict[str, Any]]:
         """Return the given memories with cosine scores — same predicates as search.
 
@@ -905,6 +942,7 @@ class MemoryDB:
         ``search_with_cosine``, so ids that expired, were archived, or were
         deleted since indexing are filtered out here. Used by the accelerated
         search path (#49) to re-score vector-index candidates in SQLite.
+        ``embedding_model`` applies the same mixed-space guard (issue #78).
 
         Ids are bound in chunks of ``_SEARCH_BIND_CHUNK`` so any configured
         ``oversample`` stays under SQLite's legacy 999-variable cap; chunk
@@ -913,6 +951,7 @@ class MemoryDB:
         if not memory_ids:
             return []
         archived_clause = "" if include_archived else " AND promotion_state != 'ARCHIVED'"
+        cosine_expr, cosine_params = _cosine_guard(embedding_model)
         results: list[dict[str, Any]] = []
         for start in range(0, len(memory_ids), _SEARCH_BIND_CHUNK):
             chunk = memory_ids[start : start + _SEARCH_BIND_CHUNK]
@@ -920,11 +959,12 @@ class MemoryDB:
             rows = self._conn.execute(
                 f"""SELECT id, identifier, fact_text, fact_summary, importance,
                            metadata_json, source, created_at,
-                           cosine_sim(embedding, ?) AS cosine_score
+                           {cosine_expr} AS cosine_score
                     FROM memories
                     WHERE id IN ({placeholders})
                       AND {_ttl_live()}{archived_clause}""",
-                (query_embedding, *chunk),
+                # Bind in statement-text order: cosine ?s, then id IN ?s.
+                (*cosine_params, query_embedding, *chunk),
             ).fetchall()
             results.extend(dict(r) for r in rows)
         # Same total order as the per-chunk SQL ORDER BY: ids are unique, so

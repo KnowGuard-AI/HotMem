@@ -70,6 +70,8 @@ def _fetch_candidates(
     fts_rows: list[dict[str, Any]],
     include_archived: bool,
     vector_index: VectorIndex | None,
+    embedding_model: str | None = None,
+    embedding_dim: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return candidate rows with cosine scores for hybrid ranking.
 
@@ -83,10 +85,19 @@ def _fetch_candidates(
     (already fetched once by the caller) so text-only matches are never
     lost. Ranking is recomputed downstream either way, so both paths produce
     identical results.
+
+    Mixed-space safety (issue #78): ``embedding_model``/``embedding_dim``
+    describe the query's embedding space. The SQL candidate fetch filters
+    rows stored under other descriptors out of cosine scoring (they still
+    surface via FTS/importance), and an index whose rebuild marker was
+    stamped under a different descriptor reads stale — switching models
+    never silently serves foreign-space candidates.
     """
     if (
         vector_index is not None
-        and not vector_index.is_stale(db)
+        and not vector_index.is_stale(
+            db, embedding_model=embedding_model, embedding_dim=embedding_dim
+        )
         # Rows with searchable text but no embedding rank via importance in
         # the full scan but can never be vector candidates — use the exact
         # scan while any exist so ranking parity is preserved.
@@ -103,11 +114,18 @@ def _fetch_candidates(
             # Dedupe, preserving order (index ranking first, FTS additions after).
             seen: set[str] = set()
             unique_ids = [i for i in candidate_ids if not (i in seen or seen.add(i))]
-            rows = db.search_by_ids(query_blob, unique_ids, include_archived=include_archived)
+            rows = db.search_by_ids(
+                query_blob,
+                unique_ids,
+                include_archived=include_archived,
+                embedding_model=embedding_model,
+            )
             # Rows re-fetched by id already carry canonical cosine scores from
             # the SQLite UDF — the index's own scores are advisory only.
             return rows
-    return db.search_with_cosine(query_blob, include_archived=include_archived)
+    return db.search_with_cosine(
+        query_blob, include_archived=include_archived, embedding_model=embedding_model
+    )
 
 
 def search_memories(
@@ -147,7 +165,14 @@ def search_memories(
         # One FTS pass serves both candidate unioning and BM25 scoring (#92).
         fts_rows = db.fts_search(query, include_archived=include_archived)
         candidates = _fetch_candidates(
-            db, query_vec, query_blob, fts_rows, include_archived, vector_index
+            db,
+            query_vec,
+            query_blob,
+            fts_rows,
+            include_archived,
+            vector_index,
+            embedding_model=active.descriptor.key,
+            embedding_dim=active.descriptor.dimension,
         )
         fts_scores = _normalize_bm25(fts_rows)
 
