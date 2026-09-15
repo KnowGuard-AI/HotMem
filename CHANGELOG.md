@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — deterministic retrieval evaluation harness (#77)
+- `scripts/retrieval_eval.py` + `bench/retrieval/{corpus,queries,baseline}.json`:
+  one offline command measures Recall@1/5, MRR@5, graded nDCG@5, negative-query
+  false-positive rate, duplicate-slot rate, per-category metrics, clone
+  equivalence (verified package -> clean hydration, per-query drift),
+  latency p50/p95, package verify/hydrate throughput, and fresh-process
+  cold start — all through the production ingest/search path, never a
+  copied ranking formula. 60 synthetic memories / 48 graded queries cover
+  all eight required categories with frozen clocks and deterministic bytes.
+  Committed baseline from the unchanged stack is CI-guarded; the
+  deterministic recommendation rule measured a 66.7pp semantic-vs-lexical
+  Recall@5 gap (clone equivalence 1.0, duplicate slots 7.5%) pointing at
+  #78. docs/retrieval-quality.md explains interpretation and limits.
+
 ### Added — verified incremental sync contract (#73)
 - Added `docs/okf/delta-v1.md` — the normative `hotmem-delta-v1` contract:
   verified one-way incremental transfer built on the interchange clone

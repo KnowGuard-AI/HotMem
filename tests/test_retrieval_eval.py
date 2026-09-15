@@ -369,3 +369,54 @@ def test_main_writes_output_and_report_files(tmp_path: Path):
     assert code == 0
     assert out.is_file()
     assert report.is_file() and report.read_text(encoding="utf-8").startswith("# Retrieval")
+
+
+# ── committed baseline regression guard (#77) ───────────────────────────────
+
+BASELINE_PATH = FIXTURE_DIR / "baseline.json"
+
+
+def test_baseline_regression_guard(tmp_path: Path):
+    """CI guard: unacknowledged changes to ordered ids or metrics fail.
+
+    Compares a fresh in-process run (timings normalized) against the
+    committed baseline. Intentional changes require regenerating the
+    baseline AND category-level before/after evidence in the PR (#77
+    regen policy).
+    """
+    baseline = json.loads(BASELINE_PATH.read_text())
+    fresh = retrieval_eval.normalize_for_baseline(
+        retrieval_eval.run_eval(
+            FIXTURE_DIR / "corpus.jsonl", FIXTURE_DIR / "queries.jsonl", work_dir=tmp_path
+        )
+    )
+    assert fresh == baseline, (
+        "retrieval behavior changed vs the committed baseline. If intentional, "
+        'regenerate with: uv run python -c "<see bench/retrieval/README.md>" '
+        "and include category-level before/after metrics in the PR."
+    )
+
+
+def test_recommendation_decision_rule(tmp_path: Path):
+    """The deterministic rule fires in the documented order, from measured values."""
+    doc = retrieval_eval.run_eval(
+        FIXTURE_DIR / "corpus.jsonl", FIXTURE_DIR / "queries.jsonl", work_dir=tmp_path
+    )
+    rec = doc["recommendation"]
+    # Measured on the committed fixtures: clone equivalence is 1.0 and the
+    # semantic gap is 66.7pp (>= 15pp), so the rule must point at #78.
+    assert rec["measured"]["clone_equivalence_rate"] == 1.0
+    assert rec["action"] == "pursue_semantic_embedding_boundary_78"
+    assert "15" in rec["rationale"] or "percentage points" in rec["rationale"]
+
+    # Rule order: a clone regression overrides everything else.
+    broken = json.loads(json.dumps(doc))
+    broken["clone_equivalence"]["clone_equivalence_rate"] = 0.9
+    assert retrieval_eval.build_recommendation(broken)["action"] == "fix_clone_index_compatibility"
+    # Duplicate-slot rule only fires when the semantic gap is closed.
+    narrowed = json.loads(json.dumps(doc))
+    narrowed["categories"]["semantic_paraphrase"]["recall_at_5"]["mean"] = 0.95
+    narrowed["overall"]["duplicate_slot_rate"]["mean"] = 0.25
+    assert retrieval_eval.build_recommendation(narrowed)["action"] == "pursue_reranking_hook_80"
+    narrowed["overall"]["duplicate_slot_rate"]["mean"] = 0.1
+    assert retrieval_eval.build_recommendation(narrowed)["action"] == "retain_current_stack"

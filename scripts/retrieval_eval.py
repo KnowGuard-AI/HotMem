@@ -612,7 +612,66 @@ def run_eval(
         "clone_equivalence": clone,
         "cold_start": cold,
     }
+    doc["recommendation"] = build_recommendation(doc)
     return doc
+
+
+def build_recommendation(doc: dict) -> dict:
+    """Deterministic next-investment rule (issue #77): evidence, not opinion.
+
+    Order: clone equivalence below 100% -> fix clone/index compatibility;
+    else semantic Recall@5 at least 15pp below lexical -> #78 (portable
+    derived-index / optional semantic embedder boundary); else duplicate
+    slots above 20% -> #80 (optional reranking hook); else retain the
+    stack and expand fixtures. These prioritize work; they are not release
+    thresholds. Never recommend entity extraction from this benchmark.
+    """
+    overall = doc["overall"]
+    categories = doc["categories"]
+    clone_rate = (doc.get("clone_equivalence") or {}).get("clone_equivalence_rate")
+
+    def cat_mean(category: str, metric: str) -> float | None:
+        block = categories.get(category, {}).get(metric) or {}
+        return block.get("mean")
+
+    sem = cat_mean("semantic_paraphrase", "recall_at_5")
+    lex = cat_mean("exact_lexical", "recall_at_5")
+    dup = (overall.get("duplicate_slot_rate") or {}).get("mean") or 0.0
+
+    measured = {
+        "clone_equivalence_rate": clone_rate,
+        "semantic_recall_at_5": sem,
+        "exact_lexical_recall_at_5": lex,
+        "duplicate_slot_rate": dup,
+    }
+    if clone_rate is not None and clone_rate < 1.0:
+        return {
+            "action": "fix_clone_index_compatibility",
+            "rationale": f"clone equivalence {clone_rate:.3f} is below 1.0: restored instances "
+            "do not retrieve identically; fix that before any ranking change.",
+            "measured": measured,
+        }
+    if sem is not None and lex is not None and (lex - sem) >= 0.15:
+        return {
+            "action": "pursue_semantic_embedding_boundary_78",
+            "rationale": f"semantic Recall@5 ({sem:.3f}) trails exact-lexical Recall@5 ({lex:.3f}) "
+            f"by {(lex - sem) * 100:.1f} percentage points (threshold: 15pp) — the deterministic "
+            "hash embedder cannot bridge wording differences; pursue #78.",
+            "measured": measured,
+        }
+    if dup > 0.20:
+        return {
+            "action": "pursue_reranking_hook_80",
+            "rationale": f"duplicate-slot rate {dup:.3f} exceeds 20%: near-duplicates consume "
+            "diverse top-k slots; pursue #80 (evidence-gated optional reranking hook).",
+            "measured": measured,
+        }
+    return {
+        "action": "retain_current_stack",
+        "rationale": "no category shows a gap above the decision thresholds; retain the stack "
+        "and expand fixture coverage before changing ranking.",
+        "measured": measured,
+    }
 
 
 def normalize_for_baseline(doc: dict) -> dict:
@@ -723,6 +782,18 @@ def render_report(doc: dict) -> str:
             f"- `{q['query_id']}` recall@5={q['recall_at_5']} mrr@5={q['mrr_at_5']} "
             f'— "{q["query"]}"'
         )
+    lines.append("")
+    rec = doc.get("recommendation") or {}
+    lines.append("## Recommendation")
+    lines.append("")
+    lines.append(f"- **{rec.get('action')}** — {rec.get('rationale')}")
+    m = rec.get("measured") or {}
+    lines.append(
+        f"  - measured: clone equivalence {m.get('clone_equivalence_rate')}, "
+        f"semantic Recall@5 {m.get('semantic_recall_at_5')}, "
+        f"exact-lexical Recall@5 {m.get('exact_lexical_recall_at_5')}, "
+        f"duplicate-slot rate {m.get('duplicate_slot_rate')}"
+    )
     lines.append("")
     lines.append("## What this benchmark does not prove")
     lines.append("")
