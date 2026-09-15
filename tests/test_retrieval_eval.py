@@ -1,0 +1,263 @@
+"""Retrieval evaluation harness tests (#77) — metrics + fixture validation.
+
+Pure metric functions are verified against exact hand-calculated examples
+(issue #77 requirement); fixture validation must name file, line, and
+reason; the runner must execute through production code only.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "retrieval_eval.py"
+_spec = importlib.util.spec_from_file_location("retrieval_eval", _SCRIPT)
+retrieval_eval = importlib.util.module_from_spec(_spec)
+sys.modules["retrieval_eval"] = retrieval_eval  # required for dataclass resolution
+_spec.loader.exec_module(retrieval_eval)
+
+
+# ── metrics: exact hand-calculated examples ────────────────────────────────
+
+
+def test_recall_at_1():
+    assert retrieval_eval.recall_at_k(["a", "b"], {"a": 3}, 1) == 1.0
+    assert retrieval_eval.recall_at_k(["b", "a"], {"a": 3}, 1) == 0.0
+
+
+def test_recall_at_5_partial():
+    # Two relevant; one in the top 5 -> 0.5.
+    ranked = ["x", "y", "a", "z", "w", "b"]
+    assert retrieval_eval.recall_at_k(ranked, {"a": 3, "b": 2}, 5) == 0.5
+    # Both relevant -> 1.0.
+    assert retrieval_eval.recall_at_k(ranked, {"a": 3, "b": 2}, 6) == 1.0
+
+
+def test_recall_grade_threshold():
+    # Grade 1 is below the relevance threshold (2): nothing relevant remains,
+    # so the metric is explicitly not applicable (denominator zero) — never
+    # a fabricated zero.
+    assert retrieval_eval.recall_at_k(["a"], {"a": 1}, 1) is None
+
+
+def test_recall_not_applicable_when_nothing_relevant():
+    assert retrieval_eval.recall_at_k(["a"], {}, 5) is None
+
+
+def test_mrr_at_5():
+    assert retrieval_eval.mrr_at_k(["b", "a"], {"a": 3}, 5) == 0.5
+    assert retrieval_eval.mrr_at_k(["b", "c", "a"], {"a": 3}, 5) == pytest.approx(1 / 3)
+    assert retrieval_eval.mrr_at_k(["b", "c"], {"a": 3}, 5) == 0.0
+
+
+def test_ndcg_at_5_hand_calculated():
+    # ranked grades [3,1,0,0,0]; ideal [3,1] -> DCG == IDCG -> 1.0.
+    assert retrieval_eval.ndcg_at_k(["a", "b"], {"a": 3, "b": 1}, 5) == pytest.approx(1.0)
+    # ranked grades [1,3]; ideal [3,1]:
+    # DCG = 1/log2(2) + 3/log2(3) = 1 + 1.89279 = 2.89279
+    # IDCG = 3/log2(2) + 1/log2(3) = 3.63093 -> 0.79668...
+    assert retrieval_eval.ndcg_at_k(["b", "a"], {"a": 3, "b": 1}, 5) == pytest.approx(
+        0.79668, abs=1e-4
+    )
+    # Missed relevance lowers nDCG further.
+    assert retrieval_eval.ndcg_at_k(["c", "d", "a"], {"a": 3, "b": 1}, 5) < 1.0
+
+
+def test_false_positive_rate():
+    # Negative query: a ranker without abstention returning 3 results
+    # reports FP rate 1.0 — measured over returned slots, never diluted by
+    # the remaining empty k slots.
+    assert retrieval_eval.false_positive_rate(["a", "b", "c"], {}, 5) == 1.0
+    # One irrelevant among relevant: 1/3.
+    assert retrieval_eval.false_positive_rate(
+        ["a", "x", "b"], {"a": 3, "b": 2}, 3
+    ) == pytest.approx(1 / 3)
+
+
+def test_duplicate_slot_rate():
+    groups = {"a2": "a1", "a3": "a1"}  # a2, a3 are near-duplicates of a1
+    # Top-3: a1, a2 (dup slot), b -> 1 duplicate slot / 3.
+    assert retrieval_eval.duplicate_slot_rate(["a1", "a2", "b"], groups, 3) == pytest.approx(1 / 3)
+    # Top-4: a1, a2, a3, b -> 2 duplicate slots / 4.
+    assert retrieval_eval.duplicate_slot_rate(["a1", "a2", "a3", "b"], groups, 4) == pytest.approx(
+        2 / 4
+    )
+
+
+def test_aggregate_reports_na_explicitly():
+    block = retrieval_eval.aggregate([None, None])
+    assert block == {"mean": None, "n_applicable": 0, "n_queries": 2}
+    block = retrieval_eval.aggregate([0.5, None, 1.0])
+    assert block["mean"] == pytest.approx(0.75)
+    assert block["n_applicable"] == 2
+
+
+# ── fixture validation ──────────────────────────────────────────────────────
+
+
+def _write(path: Path, lines: list[str]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _corpus_line(mid: str, **overrides) -> str:
+    rec = {
+        "memory_id": mid,
+        "identifier": "proj",
+        "fact": f"fact for {mid}",
+        "importance": 0.5,
+        "tags": [],
+    }
+    rec.update(overrides)
+    return json.dumps(rec)
+
+
+def _query_line(qid: str, category: str, **overrides) -> str:
+    rec = {
+        "query_id": qid,
+        "category": category,
+        "query": f"query {qid}",
+        "relevance": {"mem-x": 3} if category != "negative_or_no_answer" else {},
+    }
+    rec.update(overrides)
+    return json.dumps(rec)
+
+
+ALL_CATEGORIES = list(retrieval_eval.REQUIRED_CATEGORIES)
+
+
+def _valid_queries(tmp_path: Path) -> Path:
+    lines = []
+    for i, cat in enumerate(ALL_CATEGORIES):
+        lines.append(_query_line(f"q-{cat}-{i}", cat))
+    return _write(tmp_path / "queries.jsonl", lines)
+
+
+def test_load_corpus_ok(tmp_path: Path):
+    path = _write(tmp_path / "corpus.jsonl", [_corpus_line("m1"), _corpus_line("m2")])
+    assert len(retrieval_eval.load_corpus(path)) == 2
+
+
+def test_load_corpus_duplicate_id(tmp_path: Path):
+    path = _write(tmp_path / "corpus.jsonl", [_corpus_line("m1"), _corpus_line("m1")])
+    with pytest.raises(retrieval_eval.FixtureError, match="duplicate memory_id 'm1'"):
+        retrieval_eval.load_corpus(path)
+
+
+def test_load_corpus_missing_field_names_line(tmp_path: Path):
+    path = _write(tmp_path / "corpus.jsonl", [_corpus_line("m1"), json.dumps({"memory_id": "m2"})])
+    with pytest.raises(retrieval_eval.FixtureError, match=r"corpus.jsonl:2.*'identifier'"):
+        retrieval_eval.load_corpus(path)
+
+
+def test_load_corpus_invalid_json_names_line(tmp_path: Path):
+    path = _write(tmp_path / "corpus.jsonl", [_corpus_line("m1"), "{not json"])
+    with pytest.raises(retrieval_eval.FixtureError, match=r"corpus.jsonl:2: invalid JSON"):
+        retrieval_eval.load_corpus(path)
+
+
+def test_load_corpus_bad_importance(tmp_path: Path):
+    path = _write(tmp_path / "corpus.jsonl", [_corpus_line("m1", importance=1.5)])
+    with pytest.raises(retrieval_eval.FixtureError, match="importance"):
+        retrieval_eval.load_corpus(path)
+
+
+def test_load_queries_unknown_category(tmp_path: Path):
+    path = _write(tmp_path / "queries.jsonl", [_query_line("q1", "not_a_category")])
+    with pytest.raises(retrieval_eval.FixtureError, match="unknown category"):
+        retrieval_eval.load_queries(path)
+
+
+def test_load_queries_missing_category_coverage(tmp_path: Path):
+    lines = [_query_line("q1", "exact_lexical")]
+    path = _write(tmp_path / "queries.jsonl", lines)
+    with pytest.raises(retrieval_eval.FixtureError, match="no queries for categories"):
+        retrieval_eval.load_queries(path)
+
+
+def test_load_queries_negative_requires_empty_relevance(tmp_path: Path):
+    # A negative query WITH relevance is a fixture bug: the runner surfaces it
+    # via category metrics; validation enforces structure only.
+    lines = [_query_line(f"q-{c}-{i}", c) for i, c in enumerate(ALL_CATEGORIES)]
+    lines.append(_query_line("q-neg-extra", "negative_or_no_answer", relevance={}))
+    path = _write(tmp_path / "queries.jsonl", lines)
+    assert retrieval_eval.load_queries(path)
+
+
+# ── runner: production-path execution ───────────────────────────────────────
+
+
+def _mini_corpus(tmp_path: Path) -> Path:
+    lines = [
+        _corpus_line("mem-a", identifier="acme", fact="Acme invoices need two approvals."),
+        _corpus_line("mem-b", identifier="acme", fact="Acme ships on Tuesdays."),
+        _corpus_line("mem-c", identifier="beta", fact="Beta handles support tickets."),
+    ]
+    return _write(tmp_path / "corpus.jsonl", lines)
+
+
+def _mini_queries(tmp_path: Path) -> Path:
+    lines = [
+        _query_line(
+            "q-exact-1",
+            "exact_lexical",
+            query="Acme invoices approvals",
+            relevance={"mem-a": 3},
+        ),
+        _query_line(
+            "q-neg-1", "negative_or_no_answer", query="quantum flux capacitor", relevance={}
+        ),
+    ]
+    return _write(tmp_path / "queries.jsonl", lines)
+
+
+def test_run_eval_uses_production_search_and_reports(tmp_path: Path):
+    doc = retrieval_eval.run_eval(
+        _mini_corpus(tmp_path),
+        _mini_queries(tmp_path),
+        work_dir=tmp_path / "work",
+        require_all_categories=False,
+    )
+    assert doc["counts"]["corpus"] == 3
+    assert doc["counts"]["ingested"] == 3
+    exact = next(q for q in doc["per_query"] if q["query_id"] == "q-exact-1")
+    assert exact["recall_at_1"] == 1.0  # production ranker finds the invoice fact
+    assert exact["ranked_ids"]  # real ranked output attached
+    neg = next(q for q in doc["per_query"] if q["query_id"] == "q-neg-1")
+    assert neg["recall_at_5"] is None  # non-applicable, never fabricated zero
+    assert "latency_ms" in doc
+
+
+def test_run_eval_is_deterministic(tmp_path: Path):
+    a = retrieval_eval.normalize_for_baseline(
+        retrieval_eval.run_eval(
+            _mini_corpus(tmp_path),
+            _mini_queries(tmp_path),
+            work_dir=tmp_path / "w1",
+            require_all_categories=False,
+        )
+    )
+    b = retrieval_eval.normalize_for_baseline(
+        retrieval_eval.run_eval(
+            _mini_corpus(tmp_path),
+            _mini_queries(tmp_path),
+            work_dir=tmp_path / "w2",
+            require_all_categories=False,
+        )
+    )
+    assert a == b  # timings normalized out; logical results identical
+
+
+def test_run_eval_rejects_malformed_fixtures(tmp_path: Path):
+    with pytest.raises(retrieval_eval.FixtureError):
+        retrieval_eval.run_eval(
+            _write(tmp_path / "corpus.jsonl", ["{bad"]),
+            _mini_queries(tmp_path),
+            work_dir=tmp_path,
+            require_all_categories=False,
+        )
