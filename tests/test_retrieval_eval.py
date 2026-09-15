@@ -300,3 +300,72 @@ def test_committed_fixture_files_are_byte_stable(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert (FIXTURE_DIR / "corpus.jsonl").read_bytes() == before["corpus"]
     assert (FIXTURE_DIR / "queries.jsonl").read_bytes() == before["queries"]
+
+
+# ── clone-equivalence stage + report (#77) ──────────────────────────────────
+
+
+def test_run_eval_full_fixtures_clone_equivalence_perfect(tmp_path: Path):
+    """The #77/#69 gate: every query's ordered ids and scores survive a
+    verified package export and clean hydration, byte for byte."""
+    doc = retrieval_eval.run_eval(
+        FIXTURE_DIR / "corpus.jsonl", FIXTURE_DIR / "queries.jsonl", work_dir=tmp_path
+    )
+    clone = doc["clone_equivalence"]
+    assert clone["queries_compared"] == len(doc["per_query"])
+    assert clone["clone_equivalence_rate"] == 1.0
+    assert clone["drift"] == []
+    pkg = clone["package"]
+    assert pkg["gz_bytes"] > 0
+    assert pkg["verify_records_per_s"] > 0
+    assert pkg["hydrate_records_per_s"] > 0
+    assert "not cross-machine" in clone["note"]
+
+
+def test_render_report_contains_required_sections(tmp_path: Path):
+    doc = retrieval_eval.run_eval(
+        FIXTURE_DIR / "corpus.jsonl",
+        FIXTURE_DIR / "queries.jsonl",
+        work_dir=tmp_path,
+    )
+    report = retrieval_eval.render_report(doc)
+    for section in (
+        "# Retrieval evaluation report",
+        "## Overall metrics",
+        "## Per category",
+        "## Clone equivalence",
+        "## Latency",
+        "## Missed relevance",
+        "## Five worst queries",
+        "## What this benchmark does not prove",
+    ):
+        assert section in report, section
+    assert "hotmem-hash-v1" in report
+
+
+def test_measure_cold_start_subprocess(tmp_path: Path):
+    result = retrieval_eval.measure_cold_start(
+        _mini_corpus(tmp_path), _mini_queries(tmp_path), top_k=5
+    )
+    assert result.get("error") is None, result
+    assert result["cold_start_seconds"] > 0
+
+
+def test_main_writes_output_and_report_files(tmp_path: Path):
+    out = tmp_path / "out" / "metrics.json"
+    report = tmp_path / "out" / "report.md"
+    code = retrieval_eval.main(
+        [
+            "--corpus",
+            str(FIXTURE_DIR / "corpus.jsonl"),
+            "--queries",
+            str(FIXTURE_DIR / "queries.jsonl"),
+            "--output",
+            str(out),
+            "--report",
+            str(report),
+        ]
+    )
+    assert code == 0
+    assert out.is_file()
+    assert report.is_file() and report.read_text(encoding="utf-8").startswith("# Retrieval")

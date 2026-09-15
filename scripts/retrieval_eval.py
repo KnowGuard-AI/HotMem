@@ -390,6 +390,133 @@ def build_duplicate_groups(corpus: list[dict]) -> dict[str, str]:
     return groups
 
 
+def run_clone_equivalence(
+    corpus: list[dict],
+    queries: list[dict],
+    duplicate_groups: dict[str, str],
+    per_query: list[QueryResult],
+    tmp: Path,
+) -> dict:
+    """Clone stage (#77 snapshot_hydration_equivalence): export the ingested
+    instance as a verified package, hydrate a CLEAN target, re-run every
+    query, and compare ordered ids + scores with per-query drift."""
+    import time
+
+    from hotmem.db import MemoryDB
+    from hotmem.interchange.hydrate import hydrate_package, verify_package
+    from hotmem.interchange.package import write_package
+
+    source_db = MemoryDB(Path(tmp) / "eval.sqlite")
+    pkg = Path(tmp) / "clone-pkg"
+    started = time.perf_counter()
+    write_package(source_db, pkg, gz=True)
+    export_seconds = time.perf_counter() - started
+
+    started = time.perf_counter()
+    verified = verify_package(pkg)
+    verified.cleanup()
+    verify_seconds = time.perf_counter() - started
+    package_bytes = (pkg / "memories.jsonl.gz").stat().st_size
+
+    target_db = MemoryDB(Path(tmp) / "clone-target.sqlite")
+    started = time.perf_counter()
+    hydrate_package(target_db, pkg)
+    hydrate_seconds = time.perf_counter() - started
+
+    drift: list[dict] = []
+    identical = 0
+    for base in per_query:
+        rerun = evaluate_query(
+            target_db,
+            {"query_id": base.query_id, "category": base.category, "query": base.query},
+            top_k=DEFAULT_TOP_K,
+            duplicate_groups=duplicate_groups,
+        )
+        ids_match = rerun.ranked_ids == base.ranked_ids
+        scores_match = rerun.ranked_scores == base.ranked_scores
+        identical += 1 if (ids_match and scores_match) else 0
+        if not (ids_match and scores_match):
+            drift.append(
+                {
+                    "query_id": base.query_id,
+                    "before_ids": base.ranked_ids,
+                    "after_ids": rerun.ranked_ids,
+                    "before_scores": base.ranked_scores,
+                    "after_scores": rerun.ranked_scores,
+                }
+            )
+
+    source_db.close()
+    target_db.close()
+    package_count = len(corpus)
+    return {
+        "clone_equivalence_rate": identical / len(per_query) if per_query else None,
+        "queries_compared": len(per_query),
+        "drift": drift,
+        "package": {
+            "gz_bytes": package_bytes,
+            "records": package_count,
+            "export_seconds": round(export_seconds, 4),
+            "verify_seconds": round(verify_seconds, 4),
+            "verify_records_per_s": round(package_count / verify_seconds, 1)
+            if verify_seconds
+            else None,
+            "hydrate_seconds": round(hydrate_seconds, 4),
+            "hydrate_records_per_s": round(package_count / hydrate_seconds, 1)
+            if hydrate_seconds
+            else None,
+        },
+        "note": "local diagnostics on one machine — not cross-machine guarantees",
+    }
+
+
+def measure_cold_start(corpus_path: Path, queries_path: Path, *, top_k: int) -> dict:
+    """Fresh-process cold-start-to-first-query time (issue #77).
+
+    Re-invokes this script in a subprocess with a small internal mode:
+    ingest + first query + exit. Wall time is the parent's measurement.
+    """
+    import subprocess
+
+    started = time.perf_counter()
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--cold-start-internal",
+            "--corpus",
+            str(corpus_path),
+            "--queries",
+            str(queries_path),
+            "--top-k",
+            str(top_k),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    elapsed = time.perf_counter() - started
+    if proc.returncode != 0:
+        return {"cold_start_seconds": None, "error": proc.stderr.strip()[-200:]}
+    return {"cold_start_seconds": round(elapsed, 3)}
+
+
+def run_cold_start_internal(corpus_path: Path, queries_path: Path, *, top_k: int) -> int:
+    """Internal mode for measure_cold_start: ingest + first query + exit."""
+    corpus = load_corpus(corpus_path)
+    queries = load_queries(queries_path, require_all_categories=False)
+    from hotmem.db import MemoryDB
+
+    with tempfile.TemporaryDirectory(prefix="hotmem-cold-start-") as tmp:
+        db = MemoryDB(Path(tmp) / "eval.sqlite")
+        ingest_corpus(corpus, db)
+        if queries:
+            from hotmem.search import search_memories
+
+            search_memories(db, queries[0]["query"], top_k=top_k)
+        db.close()
+    return 0
+
+
 def run_eval(
     corpus_path: Path,
     queries_path: Path,
@@ -426,6 +553,9 @@ def run_eval(
                 evaluate_query(db, rec, top_k=top_k, duplicate_groups=duplicate_groups)
             )
         latency = measure_latency(db, queries, top_k=top_k, repeat=repeat)
+
+        clone = run_clone_equivalence(corpus, queries, duplicate_groups, per_query, Path(tmp))
+        cold = measure_cold_start(corpus_path, queries_path, top_k=top_k)
         db.close()
     finally:
         if own_tmp:
@@ -479,15 +609,136 @@ def run_eval(
             for q in per_query
         ],
         "latency_ms": latency,
+        "clone_equivalence": clone,
+        "cold_start": cold,
     }
     return doc
 
 
 def normalize_for_baseline(doc: dict) -> dict:
-    """Strip volatile fields (timings) for deterministic baseline comparison."""
+    """Strip volatile fields (timings, sizes) for deterministic comparison."""
     trimmed = json.loads(json.dumps(doc))  # deep copy
     trimmed.pop("latency_ms", None)
+    trimmed.pop("cold_start", None)
+    clone = trimmed.get("clone_equivalence")
+    if isinstance(clone, dict):
+        clone.pop("package", None)
     return trimmed
+
+
+def render_report(doc: dict) -> str:
+    """Render the human-readable Markdown report (issue #77 user outcome)."""
+    lines: list[str] = []
+    overall = doc["overall"]
+
+    def fmt(block: dict, key: str) -> str:
+        entry = block.get(key) or {}
+        mean = entry.get("mean")
+        return "n/a" if mean is None else f"{mean:.3f} (n={entry.get('n_applicable', 0)})"
+
+    lines.append("# Retrieval evaluation report")
+    lines.append("")
+    lines.append(
+        f"Corpus: {doc['counts']['corpus']} memories ({doc['counts']['ingested']} ingested), "
+        f"{doc['counts']['queries']} queries. "
+        f"Stack: {doc['runtime']['fusion']} over {doc['runtime']['embedding_model']} "
+        f"({doc['runtime']['embedding_dim']}-dim)."
+    )
+    lines.append("")
+    lines.append("## Overall metrics")
+    lines.append("")
+    lines.append("| Metric | Value |")
+    lines.append("|---|---|")
+    for label, key in (
+        ("Recall@1", "recall_at_1"),
+        ("Recall@5", "recall_at_5"),
+        ("MRR@5", "mrr_at_5"),
+        ("nDCG@5", "ndcg_at_5"),
+        ("False-positive rate", "false_positive_rate"),
+        ("Duplicate-slot rate", "duplicate_slot_rate"),
+    ):
+        lines.append(f"| {label} | {fmt(overall, key)} |")
+    lines.append("")
+    lines.append("## Per category")
+    lines.append("")
+    lines.append("| Category | Recall@5 | MRR@5 | nDCG@5 | FP rate | Queries |")
+    lines.append("|---|---|---|---|---|---|")
+    for cat, block in doc["categories"].items():
+        lines.append(
+            f"| {cat} | {fmt(block, 'recall_at_5')} | {fmt(block, 'mrr_at_5')} | "
+            f"{fmt(block, 'ndcg_at_5')} | {fmt(block, 'false_positive_rate')} "
+            f"| {block['queries']} |"
+        )
+    lines.append("")
+
+    clone = doc.get("clone_equivalence") or {}
+    lines.append("## Clone equivalence (verified package -> clean hydration)")
+    lines.append("")
+    rate = clone.get("clone_equivalence_rate")
+    lines.append(
+        f"- Identical ordered ids + scores after restore: "
+        f"{clone.get('queries_compared')}/{clone.get('queries_compared')} "
+        f"= {rate if rate is None else f'{rate:.3f}'}"
+    )
+    pkg = clone.get("package") or {}
+    lines.append(
+        f"- Package: {pkg.get('gz_bytes')} bytes gz, "
+        f"verify {pkg.get('verify_records_per_s')} rec/s, "
+        f"hydrate {pkg.get('hydrate_records_per_s')} rec/s (local diagnostics)"
+    )
+    lines.append("")
+
+    latency = doc.get("latency_ms") or {}
+    cold = doc.get("cold_start") or {}
+    lines.append("## Latency (separate sampling, not quality)")
+    lines.append("")
+    lines.append(
+        f"- Query latency p50/p95: {latency.get('p50_ms')} / {latency.get('p95_ms')} ms "
+        f"({latency.get('samples')} samples)"
+    )
+    lines.append(f"- Fresh-process cold start to first query: {cold.get('cold_start_seconds')} s")
+    lines.append("")
+
+    failures = [q for q in doc["per_query"] if q["missed_relevant"]]
+    lines.append("## Missed relevance (per-query failures)")
+    lines.append("")
+    if failures:
+        for q in failures:
+            lines.append(
+                f"- `{q['query_id']}` ({q['category']}): missed {q['missed_relevant']} "
+                f'— "{q["query"]}"'
+            )
+    else:
+        lines.append("- None: every graded-relevant memory appeared in the top 5.")
+    lines.append("")
+
+    worst = sorted(
+        (q for q in doc["per_query"] if q["recall_at_5"] is not None),
+        key=lambda q: (q["recall_at_5"], q["mrr_at_5"] or 0),
+    )[:5]
+    lines.append("## Five worst queries")
+    lines.append("")
+    for q in worst:
+        lines.append(
+            f"- `{q['query_id']}` recall@5={q['recall_at_5']} mrr@5={q['mrr_at_5']} "
+            f'— "{q["query"]}"'
+        )
+    lines.append("")
+    lines.append("## What this benchmark does not prove")
+    lines.append("")
+    lines.append(
+        "- These are synthetic fixtures on one machine: no cross-machine guarantees, "
+        "no tenant authorization claims, and no enterprise-scale performance claims."
+    )
+    lines.append(
+        "- The hash-vector embedder is deterministic and portable, but it is NOT a "
+        "learned semantic embedding; weighted score fusion is not a second-stage reranker."
+    )
+    lines.append(
+        "- Entity extraction, MMR, and rerankers remain optional future work "
+        "(gated by #78 / #80 evidence), not core requirements."
+    )
+    return "\n".join(lines) + "\n"
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -501,7 +752,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, default=None, help="Markdown report path")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     parser.add_argument("--repeat", type=int, default=1, help="Latency sampling only")
+    parser.add_argument("--cold-start-internal", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+
+    if args.cold_start_internal:
+        return run_cold_start_internal(args.corpus, args.queries, top_k=args.top_k)
 
     try:
         doc = run_eval(args.corpus, args.queries, top_k=args.top_k, repeat=args.repeat)
@@ -512,7 +767,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
-    else:
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(render_report(doc), encoding="utf-8")
+    if not args.output and not args.report:
         print(json.dumps(doc, indent=2, sort_keys=True))
     return 0
 
