@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hotmem.embed import Embedder
 from hotmem.interchange.compat import resolve_embedding
 from hotmem.interchange.package import (
     FORMAT_ID,
@@ -242,14 +243,20 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
     )
 
 
-def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
+def hydrate_package(
+    db,
+    pkg_dir: str | Path,
+    *,
+    embedder: Embedder | None = None,
+) -> HydrateResult:
     """Verify, then restore a package in one transaction (#69).
 
     All-or-nothing: verification finishes before any write, inserts run in
     bounded batches inside a single transaction, and any error rolls back —
     the target remains byte-identical. Compatible stored embeddings are
-    reused; incompatible ones are re-embedded from text; records without
-    usable text count invalid (contract §5/§7) and are never stored.
+    reused; incompatible ones are re-embedded under ``embedder`` (issue #78;
+    ``None`` = the hash default) from text; records without usable text
+    count invalid (contract §5/§7) and are never stored.
     Idempotent: a repeated restore loads zero records.
     """
     pkg_dir = Path(pkg_dir)
@@ -277,7 +284,7 @@ def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
 
             records = []
             for rec in todo:
-                blob, model, dim, status = resolve_embedding(rec)
+                blob, model, dim, status = resolve_embedding(rec, embedder=embedder)
                 counters[f"embedding_{status}"] += 1
                 records.append(
                     record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
@@ -335,4 +342,12 @@ def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
             **{k: counters[k] for k in counters},
         },
     )
-    return HydrateResult(loaded=loaded, skipped_dupes=skipped, invalid=invalid)
+    return HydrateResult(
+        loaded=loaded,
+        skipped_dupes=skipped,
+        invalid=invalid,
+        embedding_reused=counters["embedding_reused"],
+        embedding_rebuilt=counters["embedding_rebuilt"],
+        embedding_missing=counters["embedding_missing"],
+        embedding_failed=counters["embedding_failed"],
+    )

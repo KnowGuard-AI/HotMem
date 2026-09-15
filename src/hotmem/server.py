@@ -631,6 +631,11 @@ def create_app(
             "skipped_dupes": result.skipped_dupes,
             "invalid": result.invalid,
             "path": target,
+            # Embedding disposition (issue #78; additive response fields).
+            "embedding_reused": result.embedding_reused,
+            "embedding_rebuilt": result.embedding_rebuilt,
+            "embedding_missing": result.embedding_missing,
+            "embedding_failed": result.embedding_failed,
         }
 
     @app.post("/v1/snapshot")

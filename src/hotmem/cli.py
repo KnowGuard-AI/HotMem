@@ -154,6 +154,10 @@ def hydrate(swap_file: str, db_path: str):
             loaded=result.loaded,
             skipped_dupes=result.skipped_dupes,
             invalid=result.invalid,
+            embedding_reused=result.embedding_reused,
+            embedding_rebuilt=result.embedding_rebuilt,
+            embedding_missing=result.embedding_missing,
+            embedding_failed=result.embedding_failed,
         )
         return
 
@@ -169,7 +173,14 @@ def hydrate(swap_file: str, db_path: str):
     db.close()
 
     ui.summary(
-        "hydrate", loaded=result.loaded, skipped_dupes=result.skipped_dupes, invalid=result.invalid
+        "hydrate",
+        loaded=result.loaded,
+        skipped_dupes=result.skipped_dupes,
+        invalid=result.invalid,
+        embedding_reused=result.embedding_reused,
+        embedding_rebuilt=result.embedding_rebuilt,
+        embedding_missing=result.embedding_missing,
+        embedding_failed=result.embedding_failed,
     )
 
 
@@ -733,4 +744,8 @@ def delta_apply(delta_dir: str, db_path: str):
         applied=result.applied,
         skipped=result.skipped,
         conflicts=len(result.conflicts),
+        embedding_reused=result.embedding_reused,
+        embedding_rebuilt=result.embedding_rebuilt,
+        embedding_missing=result.embedding_missing,
+        embedding_failed=result.embedding_failed,
     )

@@ -16,7 +16,7 @@ Purpose:
      never canonical.
 
 Interface:
-      search_memories(db, query, top_k, max_chars?, include_archived?, vector_index?)
+      search_memories(db, query, top_k, max_chars?, include_archived?, vector_index?, embedder?)
 
 Deps: hotmem.db, hotmem.embed, hotmem.trace
 Extension: add reranking, decay weighting, or MMR diversity here.
@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hotmem.db import MemoryDB
-from hotmem.embed import embed_text, pack_embedding
+from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.trace import Timer, get_tracer
 
 if TYPE_CHECKING:
@@ -118,6 +118,7 @@ def search_memories(
     *,
     include_archived: bool = False,
     vector_index: VectorIndex | None = None,
+    embedder: Embedder | None = None,
 ) -> list[dict[str, Any]]:
     """Search memories and return ranked, LLM-ready message objects.
 
@@ -129,12 +130,18 @@ def search_memories(
     hybrid formula — the response shape and ranking are byte-identical to the
     fallback. Otherwise the deterministic full-scan path runs unchanged.
 
+    ``embedder`` owns the query embedding (issue #78): ``None`` means the
+    hash default. Pass the same runtime-owned embedder used for writes; rows
+    stored under a different descriptor are excluded from cosine scoring by
+    the mixed-space filter (db.search_with_cosine).
+
     Returns:
         List of dicts with keys: role, content, memory_id, identifier, score
     """
+    active = embedder if embedder is not None else DEFAULT_EMBEDDER
     with Timer() as t:
-        # Embed the query
-        query_vec = embed_text(query)
+        # Embed the query under the active runtime embedder
+        query_vec = active.embed(query)
         query_blob = pack_embedding(query_vec)
 
         # One FTS pass serves both candidate unioning and BM25 scoring (#92).

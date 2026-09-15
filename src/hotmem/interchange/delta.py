@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from hotmem.db import _MEMORY_COLUMNS, MemoryDB
+from hotmem.embed import Embedder
 from hotmem.interchange.canonical import canonical_line, sha256_bytes, sha256_file
 from hotmem.interchange.fingerprint import (
     FINGERPRINT_VERSION,
@@ -280,6 +281,11 @@ class ApplyResult:
     skipped: int  # already-applied operations (idempotent replay)
     resulting_state_fingerprint: str | None
     conflicts: list[Conflict] = field(default_factory=list)
+    # Embedding disposition for applied upserts (issue #78; additive — defaults 0).
+    embedding_reused: int = 0
+    embedding_rebuilt: int = 0
+    embedding_missing: int = 0
+    embedding_failed: int = 0
 
 
 @dataclass
@@ -461,7 +467,12 @@ def verify_delta(delta_dir: str | Path) -> VerifiedDelta:
     return VerifiedDelta(dir=pkg, manifest=manifest, ops_name=ops_name, _spool=spool)
 
 
-def apply_delta(db: MemoryDB, delta_dir: str | Path) -> ApplyResult:
+def apply_delta(
+    db: MemoryDB,
+    delta_dir: str | Path,
+    *,
+    embedder: Embedder | None = None,
+) -> ApplyResult:
     """Verify, then apply a delta atomically with compare-and-swap semantics.
 
     Per operation (delta-v1 §6): the receiver's current record fingerprint
@@ -471,9 +482,10 @@ def apply_delta(db: MemoryDB, delta_dir: str | Path) -> ApplyResult:
     and the target, checkpoint, and receipt are unchanged.
 
     Records + checkpoint + sync.applied receipt commit in one transaction.
-    Compatible stored embeddings are reused; incompatible ones re-embed from
-    text; records without usable text are reported as invalid_record
-    conflicts and never stored.
+    Compatible stored embeddings are reused; incompatible ones re-embed
+    from text under ``embedder`` (issue #78; ``None`` = the hash default);
+    records without usable text are reported as invalid_record conflicts
+    and never stored.
     """
     from hotmem.events import EventType, append_event
     from hotmem.interchange.compat import resolve_embedding
@@ -490,6 +502,12 @@ def apply_delta(db: MemoryDB, delta_dir: str | Path) -> ApplyResult:
         applied = 0
         skipped = 0
         receiver_was_empty = db.count() == 0
+        embedding_counts = {
+            "embedding_reused": 0,
+            "embedding_rebuilt": 0,
+            "embedding_missing": 0,
+            "embedding_failed": 0,
+        }
 
         try:
             for line in verified.stream():
@@ -556,12 +574,13 @@ def apply_delta(db: MemoryDB, delta_dir: str | Path) -> ApplyResult:
                         )
                     )
                     continue
-                blob, model, dim, _status = resolve_embedding(rec)
+                blob, model, dim, status = resolve_embedding(rec, embedder=embedder)
                 memory = record_to_memory_record(
                     rec, blob, embedding_model=model, embedding_dim=dim
                 )
                 db.insert(**{c: getattr(memory, c) for c in _MEMORY_COLUMNS}, _commit=False)
                 applied += 1
+                embedding_counts[f"embedding_{status}"] += 1
 
             if conflicts:
                 raise DeltaConflictError(conflicts)
@@ -602,11 +621,12 @@ def apply_delta(db: MemoryDB, delta_dir: str | Path) -> ApplyResult:
         skipped=skipped,
         resulting_state_fingerprint=manifest.get("resulting_state_fingerprint"),
         conflicts=conflicts,
+        **embedding_counts,
     )
     _trace.info(
         "delta_apply",
         f"applied {applied}, skipped {skipped}, conflicts {len(conflicts)}",
-        detail={"path": str(delta_dir), "ms": round(t.ms, 2)},
+        detail={"path": str(delta_dir), "ms": round(t.ms, 2), **embedding_counts},
     )
     return result
 

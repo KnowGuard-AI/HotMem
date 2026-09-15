@@ -14,7 +14,10 @@ Extension: richer panels, pagination, or a full textual app live here.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from hotmem.embed import Embedder
 
 
 def _import_rich():
@@ -33,29 +36,31 @@ def _import_rich():
 class _DirectBackend:
     """Backend that operates directly against a SQLite DB file."""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, embedder: Embedder | None = None) -> None:
         from hotmem.db import MemoryDB
 
         self._db = MemoryDB(db_path)
+        self._embedder = embedder
         self.db_path = db_path
 
     def add(self, identifier: str, fact: str, **kwargs: Any) -> dict[str, Any]:
         import uuid
 
-        from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+        from hotmem.embed import DEFAULT_EMBEDDER, pack_embedding
         from hotmem.swap import compute_content_hash
 
+        active = self._embedder if self._embedder is not None else DEFAULT_EMBEDDER
         memory_id = uuid.uuid4().hex
         content_hash = compute_content_hash(identifier, fact)
-        vec = embed_text(fact)
+        vec = active.embed(fact)
         blob = pack_embedding(vec)
         self._db.insert(
             id=memory_id,
             identifier=identifier,
             fact_text=fact,
             embedding=blob,
-            embedding_dim=EMBEDDING_DIM,
-            embedding_model=EMBEDDING_MODEL,
+            embedding_dim=active.descriptor.dimension,
+            embedding_model=active.descriptor.key,
             source=kwargs.get("source", ""),
             importance=kwargs.get("importance", 0.5),
             content_hash=content_hash,
@@ -65,7 +70,7 @@ class _DirectBackend:
     def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
         from hotmem.search import search_memories
 
-        return search_memories(self._db, query=query, top_k=top_k)
+        return search_memories(self._db, query=query, top_k=top_k, embedder=self._embedder)
 
     def count(self) -> int:
         return self._db.count()
@@ -101,10 +106,13 @@ class _HttpBackend:
         self._client.close()
 
 
-def run_playground(*, db_path: str | None = None, url: str | None = None) -> None:
+def run_playground(
+    *, db_path: str | None = None, url: str | None = None, embedder: Embedder | None = None
+) -> None:
     """Run the interactive playground loop.
 
-    Exactly one of db_path or url must be provided.
+    Exactly one of db_path or url must be provided. ``embedder`` applies to
+    the direct backend only (issue #78; ``None`` = the hash default).
     """
     if db_path and url:
         raise ValueError("specify either db_path or url, not both")
@@ -117,7 +125,7 @@ def run_playground(*, db_path: str | None = None, url: str | None = None) -> Non
         backend: _DirectBackend | _HttpBackend = _HttpBackend(url)
         where = f"server @ {url}"
     else:
-        backend = _DirectBackend(db_path)  # type: ignore[arg-type]
+        backend = _DirectBackend(db_path, embedder=embedder)  # type: ignore[arg-type]
         where = f"db @ {db_path}"
 
     console.print(

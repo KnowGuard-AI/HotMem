@@ -223,7 +223,19 @@ def test_sync_client_return_shapes(tmp_path):
 
         hydrated = client.hydrate()
         assert_keys_exact(
-            hydrated, {"loaded", "skipped_dupes", "invalid", "path"}, "client.hydrate()"
+            hydrated,
+            {
+                "loaded",
+                "skipped_dupes",
+                "invalid",
+                "path",
+                # Embedding disposition (issue #78) — additive response fields.
+                "embedding_reused",
+                "embedding_rebuilt",
+                "embedding_missing",
+                "embedding_failed",
+            },
+            "client.hydrate()",
         )
 
         snap = client.snapshot()

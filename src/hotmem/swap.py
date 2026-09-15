@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import TextIO
 
 from hotmem.db import MemoryDB, MemoryRecord
-from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.interchange.canonical import compute_content_hash
 from hotmem.interchange.compat import resolve_embedding
 from hotmem.interchange.record import normalize_record, validate_record
@@ -54,6 +54,11 @@ class HydrateResult:
     loaded: int
     skipped_dupes: int
     invalid: int = 0
+    # Embedding disposition per run (issue #78; additive — defaults 0).
+    embedding_reused: int = 0
+    embedding_rebuilt: int = 0
+    embedding_missing: int = 0
+    embedding_failed: int = 0
 
 
 @dataclass
@@ -157,6 +162,7 @@ def _flush_batch(
     pending: list[dict],
     *,
     counters: dict,
+    embedder: Embedder | None = None,
 ) -> None:
     """Resolve embeddings and insert one bounded batch; update counters in place.
 
@@ -164,6 +170,7 @@ def _flush_batch(
     before any embedding work, then insert_many_ignore handles residual
     races. loaded/skipped plus the four embedding-status counters
     (reused/rebuilt/missing/failed, issue #78) live in ``counters``.
+    ``embedder`` owns rebuilds (``None`` = the call-time hash default).
     """
     existing = db.batch_existing_hashes([r["content_hash"] for r in pending])
     todo = [r for r in pending if r["content_hash"] not in existing]
@@ -171,7 +178,7 @@ def _flush_batch(
 
     records: list[MemoryRecord] = []
     for rec in todo:
-        blob, model, dim, status = resolve_embedding(rec)
+        blob, model, dim, status = resolve_embedding(rec, embedder=embedder)
         counters[f"embedding_{status}"] += 1
         records.append(record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim))
 
@@ -185,6 +192,7 @@ def hydrate(
     swap_path: str | Path,
     *,
     on_progress: Callable[[int], None] | None = None,
+    embedder: Embedder | None = None,
 ) -> HydrateResult:
     """Load memories from a swap file into the database.
 
@@ -195,7 +203,8 @@ def hydrate(
     Every record goes through the shared interchange normalization (issue
     #67): all v2 fields (namespace, tier, tags, provenance, fact_summary,
     file references) survive the round-trip, embeddings are reused only when
-    compatible, and parsing is bounded-batch with database-backed dedup.
+    compatible (issue #78: ``embedder`` owns rebuilds; ``None`` = the hash
+    default), and parsing is bounded-batch with database-backed dedup.
 
     on_progress, if given, is invoked once per parsed line with the byte
     length of that line — enabling byte-based progress reporting without
@@ -227,7 +236,7 @@ def hydrate(
 
         def flush() -> None:
             if pending:
-                _flush_batch(db, pending, counters=counters)
+                _flush_batch(db, pending, counters=counters, embedder=embedder)
                 pending.clear()
                 batch_seen.clear()
 
@@ -281,7 +290,15 @@ def hydrate(
             **{k: counters[k] for k in counters},
         },
     )
-    return HydrateResult(loaded=loaded, skipped_dupes=skipped, invalid=invalid)
+    return HydrateResult(
+        loaded=loaded,
+        skipped_dupes=skipped,
+        invalid=invalid,
+        embedding_reused=counters["embedding_reused"],
+        embedding_rebuilt=counters["embedding_rebuilt"],
+        embedding_missing=counters["embedding_missing"],
+        embedding_failed=counters["embedding_failed"],
+    )
 
 
 def write_record(f: TextIO, record: dict) -> None:
@@ -302,26 +319,30 @@ def add_memory(
     importance: float = 0.5,
     metadata: dict | None = None,
     ttl_seconds: int | None = None,
+    embedder: Embedder | None = None,
 ) -> tuple[str, str]:
     """Insert one memory into the DB using the canonical add contract.
 
     Centralizes the uuid → content_hash → embed → pack → insert sequence so
-    callers (server, mcp, playground, examples) cannot drift apart. Returns
+    callers (server, mcp, playground, examples) cannot drift apart.
+    ``embedder`` owns the write embedding (issue #78; ``None`` = the hash
+    default — bit-identical to the previous behavior). Returns
     (memory_id, content_hash).
     """
     import uuid
 
+    active = embedder if embedder is not None else DEFAULT_EMBEDDER
     memory_id = uuid.uuid4().hex
     content_hash = compute_content_hash(identifier, fact)
-    vec = embed_text(fact)
+    vec = active.embed(fact)
     blob = pack_embedding(vec)
     db.insert(
         id=memory_id,
         identifier=identifier,
         fact_text=fact,
         embedding=blob,
-        embedding_dim=EMBEDDING_DIM,
-        embedding_model=EMBEDDING_MODEL,
+        embedding_dim=active.descriptor.dimension,
+        embedding_model=active.descriptor.key,
         source=source,
         importance=importance,
         metadata_json=json.dumps(metadata or {}),

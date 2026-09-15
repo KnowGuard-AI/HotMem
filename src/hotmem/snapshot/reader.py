@@ -32,6 +32,7 @@ import os
 from pathlib import Path
 
 from hotmem.db import MemoryDB
+from hotmem.embed import Embedder
 from hotmem.interchange.compat import resolve_embedding
 from hotmem.interchange.paths import confined_relpath
 from hotmem.interchange.record import normalize_record, validate_record
@@ -121,13 +122,19 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
     return manifest
 
 
-def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
+def hydrate_v2(
+    db: MemoryDB,
+    snapshot_dir: str | Path,
+    *,
+    embedder: Embedder | None = None,
+) -> HydrateResult:
     """Verify the manifest and load all memories into the DB.
 
     Deduplicates by ``content_hash`` (skips rows that already exist). Never
     touches backing files for file-backed memories — references are preserved.
-    Uses stored embeddings only when compatible (model/dim/blob); otherwise
-    re-embeds fact_text or fact_summary, or stores NULL embedding for
+    Uses stored embeddings only when compatible (descriptor/dim/blob);
+    otherwise re-embeds fact_text or fact_summary under ``embedder`` (issue
+    #78; ``None`` = the hash default), or stores NULL embedding for
     file-backed without summary. Records that fail validation are counted
     invalid and skipped (interchange-v1 §7).
     """
@@ -159,7 +166,7 @@ def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
 
             records = []
             for rec in todo:
-                blob, model, dim, status = resolve_embedding(rec)
+                blob, model, dim, status = resolve_embedding(rec, embedder=embedder)
                 counters[f"embedding_{status}"] += 1
                 records.append(
                     record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
@@ -207,4 +214,12 @@ def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
             **{k: counters[k] for k in counters},
         },
     )
-    return HydrateResult(loaded=loaded, skipped_dupes=skipped, invalid=invalid)
+    return HydrateResult(
+        loaded=loaded,
+        skipped_dupes=skipped,
+        invalid=invalid,
+        embedding_reused=counters["embedding_reused"],
+        embedding_rebuilt=counters["embedding_rebuilt"],
+        embedding_missing=counters["embedding_missing"],
+        embedding_failed=counters["embedding_failed"],
+    )

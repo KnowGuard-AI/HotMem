@@ -1,0 +1,286 @@
+"""Runtime embedder injection — issue #78 acceptance tests.
+
+Two runtimes in one process, explicit injection through every library path
+(writes, search, package restore, snapshot v2 hydration, delta apply), and
+the four embedding-disposition statuses.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import random
+from pathlib import Path
+
+from hotmem.db import MemoryDB
+from hotmem.embed import (
+    EMBEDDING_MODEL,
+    EmbeddingDescriptor,
+    pack_embedding,
+)
+from hotmem.interchange.delta import apply_delta, produce_delta
+from hotmem.interchange.hydrate import hydrate_package
+from hotmem.interchange.package import write_package
+from hotmem.search import search_memories
+from hotmem.snapshot import hydrate as snapshot_hydrate
+from hotmem.snapshot import snapshot as snapshot_write
+from hotmem.snapshot.writer import write_snapshot_v2
+from hotmem.swap import add_memory
+
+
+def _stable_vec(text: str, dim: int) -> list[float]:
+    seed = hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
+    rng = random.Random(seed)
+    vec = [rng.uniform(-1.0, 1.0) for _ in range(dim)]
+    norm = math.sqrt(sum(x * x for x in vec)) or 1.0
+    return [x / norm for x in vec]
+
+
+class SemanticFake:
+    """Deterministic 128-dim stand-in for the optional local semantic adapter."""
+
+    def __init__(self, dim: int = 128) -> None:
+        self._descriptor = EmbeddingDescriptor(
+            implementation="local",
+            model="semantic-fake",
+            dimension=dim,
+            revision="r1",
+            preprocessing="pp1",
+        )
+        self.calls = 0
+
+    @property
+    def descriptor(self) -> EmbeddingDescriptor:
+        return self._descriptor
+
+    def embed(self, text: str) -> list[float]:
+        self.calls += 1
+        return _stable_vec(text, self._descriptor.dimension)
+
+
+def test_two_runtimes_one_process_isolated(tmp_path: Path):
+    """#78: hash and semantic runtimes coexist; each stamps its own space."""
+    hash_db = MemoryDB(tmp_path / "hash.sqlite")
+    sem_db = MemoryDB(tmp_path / "sem.sqlite")
+    semantic = SemanticFake()
+    fact = "invoice risk for vendor x"
+
+    add_memory(hash_db, "vendor", fact)
+    add_memory(sem_db, "vendor", fact, embedder=semantic)
+
+    hash_row = hash_db.all_rows(include_embedding=True)[0]
+    sem_row = sem_db.all_rows(include_embedding=True)[0]
+    assert hash_row["embedding_model"] == EMBEDDING_MODEL
+    assert hash_row["embedding_dim"] == 64
+    assert sem_row["embedding_model"] == semantic.descriptor.key
+    assert sem_row["embedding_dim"] == 128
+
+    # Each runtime finds its own record via its own query embedding.
+    assert search_memories(hash_db, fact, top_k=1)[0]["content"] == fact
+    assert search_memories(sem_db, fact, top_k=1, embedder=semantic)[0]["content"] == fact
+
+    # Cross-runtime cosine is inert (mismatched dims score 0); lexical still
+    # finds the record — mixed spaces never crash or mis-score.
+    cross = search_memories(sem_db, fact, top_k=1)
+    assert cross[0]["content"] == fact
+    hash_db.close()
+    sem_db.close()
+
+
+def test_hydrate_reuses_semantic_vectors_within_same_space(tmp_path: Path):
+    """A semantic package restored with its own embedder reuses every vector."""
+    src = MemoryDB(tmp_path / "src.sqlite")
+    semantic = SemanticFake()
+    add_memory(src, "vendor", "semantic hydration fact", embedder=semantic)
+    pkg = tmp_path / "pkg"
+    write_package(src, pkg)
+
+    target = MemoryDB(tmp_path / "target.sqlite")
+    before = semantic.calls
+    result = hydrate_package(target, pkg, embedder=semantic)
+    assert result.loaded == 1
+    assert result.embedding_reused == 1
+    assert result.embedding_rebuilt == 0
+    assert semantic.calls == before  # zero embed work on the restore path
+    row = target.all_rows(include_embedding=True)[0]
+    assert row["embedding_model"] == semantic.descriptor.key
+    src.close()
+    target.close()
+
+
+def test_hydrate_rebuilds_semantic_vectors_under_hash_default(tmp_path: Path):
+    """The same package restored with the hash default rebuilds and restamps."""
+    src = MemoryDB(tmp_path / "src.sqlite")
+    semantic = SemanticFake()
+    add_memory(src, "vendor", "semantic hydration fact", embedder=semantic)
+    pkg = tmp_path / "pkg"
+    write_package(src, pkg)
+
+    target = MemoryDB(tmp_path / "target.sqlite")
+    result = hydrate_package(target, pkg)
+    assert result.embedding_rebuilt == 1
+    row = target.all_rows(include_embedding=True)[0]
+    assert row["embedding_model"] == EMBEDDING_MODEL
+    assert row["embedding_dim"] == 64
+    src.close()
+    target.close()
+
+
+def test_hydrate_provider_failure_preserves_canonical_record(tmp_path: Path):
+    """#78: a failing provider loads the record without a vector, reported."""
+
+    class Exploding(SemanticFake):
+        def embed(self, text: str) -> list[float]:
+            self.calls += 1
+            raise RuntimeError("provider down")
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    add_memory(src, "vendor", "provider failure fact")
+    pkg = tmp_path / "pkg"
+    write_package(src, pkg)
+    # Corrupt the stored vector's descriptor so the restore path must re-embed;
+    # update the manifest's file entry so verification still passes.
+    payload = pkg / "memories.jsonl"
+    lines = []
+    for line in payload.read_text().splitlines():
+        rec = json.loads(line)
+        rec["embedding_model"] = "foreign-v9"
+        lines.append(json.dumps(rec))
+    payload.write_text("\n".join(lines) + "\n")
+    manifest = json.loads((pkg / "manifest.json").read_text())
+    manifest["files"]["memories.jsonl"] = {
+        "size": payload.stat().st_size,
+        "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+    }
+    (pkg / "manifest.json").write_text(json.dumps(manifest))
+
+    target = MemoryDB(tmp_path / "target.sqlite")
+    result = hydrate_package(target, pkg, embedder=Exploding())
+    assert result.loaded == 1
+    assert result.embedding_failed == 1
+    row = target.all_rows(include_embedding=True)[0]
+    assert row["fact_text"] == "provider failure fact"  # canonical record intact
+    assert row["embedding"] == b""  # NULL-embedding convention
+    src.close()
+    target.close()
+
+
+def test_v2_snapshot_hydration_reports_embedding_disposition(tmp_path: Path):
+    """Snapshot v2 hydration reports reuse/rebuild under injected embedders."""
+    src = MemoryDB(tmp_path / "src.sqlite")
+    semantic = SemanticFake()
+    add_memory(src, "vendor", "v2 disposition fact", embedder=semantic)
+    snap_dir = tmp_path / "snap"
+    write_snapshot_v2(src, snap_dir)
+
+    same = MemoryDB(tmp_path / "same.sqlite")
+    reused = snapshot_hydrate(same, snap_dir, embedder=semantic)
+    assert reused.embedding_reused == 1
+    assert reused.embedding_rebuilt == 0
+
+    other = MemoryDB(tmp_path / "other.sqlite")
+    rebuilt = snapshot_hydrate(other, snap_dir)
+    assert rebuilt.embedding_rebuilt == 1
+    assert rebuilt.embedding_reused == 0
+    src.close()
+    same.close()
+    other.close()
+
+
+def test_delta_apply_rebuilds_incompatible_vectors_under_active_embedder(tmp_path: Path):
+    """Delta apply re-embeds upserts under the injected runtime and reports it."""
+    base = MemoryDB(tmp_path / "base.sqlite")
+    semantic = SemanticFake()
+    add_memory(base, "vendor", "delta baseline fact", embedder=semantic)
+    base_pkg = tmp_path / "base.pkg"
+    write_package(base, base_pkg)
+
+    producer = MemoryDB(tmp_path / "producer.sqlite")
+    hydrate_package(producer, base_pkg, embedder=semantic)
+    add_memory(producer, "vendor", "delta updated fact", embedder=semantic)
+    delta_dir = tmp_path / "delta"
+    produce_delta(producer, base_pkg, delta_dir)
+
+    receiver = MemoryDB(tmp_path / "receiver.sqlite")
+    apply_result = apply_delta(receiver, delta_dir, embedder=semantic)
+    assert apply_result.applied >= 1
+    assert apply_result.embedding_rebuilt >= 1
+    rows = {r["fact_text"]: r for r in receiver.all_rows(include_embedding=True)}
+    assert rows["delta updated fact"]["embedding_model"] == semantic.descriptor.key
+
+    # Replay is idempotent: zero applies, zero embed work.
+    replay = apply_delta(receiver, delta_dir, embedder=semantic)
+    assert replay.applied == 0
+    assert replay.embedding_rebuilt == 0
+    for db in (base, producer, receiver):
+        db.close()
+
+
+def test_hydrate_result_embedding_fields_default_zero():
+    """The four disposition fields are additive — existing callers unaffected."""
+    from hotmem.interchange.delta import ApplyResult
+    from hotmem.swap import HydrateResult
+
+    result = HydrateResult(loaded=2, skipped_dupes=1)
+    assert (result.embedding_reused, result.embedding_rebuilt) == (0, 0)
+    assert (result.embedding_missing, result.embedding_failed) == (0, 0)
+    apply_result = ApplyResult(applied=1, skipped=0, resulting_state_fingerprint=None)
+    assert apply_result.embedding_rebuilt == 0
+
+
+def test_write_and_search_through_injected_embedder(tmp_path: Path):
+    """The semantic runtime's write+search path works end to end in the library."""
+    db = MemoryDB(tmp_path / "e2e.sqlite")
+    semantic = SemanticFake()
+    add_memory(db, "vendors", "payment terms are net 30", embedder=semantic)
+    add_memory(db, "vendors", "invoice approval requires a PO", embedder=semantic)
+    hits = search_memories(db, "invoice approval requires a PO", top_k=1, embedder=semantic)
+    assert hits[0]["content"] == "invoice approval requires a PO"
+    assert hits[0]["score"] > 0
+    db.close()
+
+
+def test_swap_hydrate_injects_embedder_for_foreign_vectors(tmp_path: Path):
+    """Legacy swap hydration rebuilds foreign-model rows under the active embedder."""
+    swap = tmp_path / "foreign.jsonl"
+    blob = pack_embedding(_stable_vec("foreign stored fact", 64))
+    import base64
+
+    swap.write_text(
+        json.dumps(
+            {
+                "identifier": "foreign",
+                "fact_text": "foreign stored fact",
+                "embedding_model": "foreign/v9",
+                "embedding_dim": 64,
+                "embedding_b64": base64.b64encode(blob).decode("ascii"),
+            }
+        )
+        + "\n"
+    )
+    db = MemoryDB(tmp_path / "h.sqlite")
+    semantic = SemanticFake()
+    result = snapshot_hydrate(db, swap, embedder=semantic)
+    assert result.embedding_rebuilt == 1
+    row = db.all_rows(include_embedding=True)[0]
+    assert row["embedding_model"] == semantic.descriptor.key
+    assert row["embedding_dim"] == 128
+    db.close()
+
+
+def test_snapshot_dispatch_preserves_injected_embedder_across_formats(tmp_path: Path):
+    """The unified snapshot hydrate dispatcher threads the embedder everywhere."""
+    db = MemoryDB(tmp_path / "dispatch.sqlite")
+    semantic = SemanticFake()
+    add_memory(db, "vendor", "dispatch disposition fact", embedder=semantic)
+
+    legacy = tmp_path / "legacy.jsonl"
+    snapshot_write(db, legacy)
+    target = MemoryDB(tmp_path / "t1.sqlite")
+    result = snapshot_hydrate(target, legacy, embedder=semantic)
+    # Legacy export carries the semantic vector; same-space restore reuses it.
+    assert result.embedding_reused == 1
+    assert result.embedding_rebuilt == 0
+    db.close()
+    target.close()

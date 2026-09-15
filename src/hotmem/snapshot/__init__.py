@@ -37,6 +37,7 @@ from pathlib import Path
 
 from hotmem.bundle import detect_bundle, read_bundle
 from hotmem.db import MemoryDB
+from hotmem.embed import Embedder
 from hotmem.interchange.hydrate import PackageError, hydrate_package, verify_package
 from hotmem.interchange.package import FORMAT_ID as PACKAGE_FORMAT_ID
 from hotmem.interchange.package import MANIFEST_NAME as PACKAGE_MANIFEST_NAME
@@ -133,7 +134,12 @@ def snapshot(
     return write_snapshot_v2(db, path, copy_attachments=copy_attachments, base_dir=base_dir)
 
 
-def hydrate(db: MemoryDB, path: str | Path) -> HydrateResult:
+def hydrate(
+    db: MemoryDB,
+    path: str | Path,
+    *,
+    embedder: Embedder | None = None,
+) -> HydrateResult:
     """Import memories from ``path`` using the format inferred from the path.
 
     ``.jsonl``/``.jsonl.gz`` file, or a directory with only ``memories.jsonl``
@@ -141,6 +147,9 @@ def hydrate(db: MemoryDB, path: str | Path) -> HydrateResult:
     package reader (#69, verify-then-hydrate transactional restore). A
     directory with a v2 manifest -> v2 reader (with manifest checksum
     verification).
+
+    ``embedder`` owns any re-embedding the format needs (issue #78;
+    ``None`` = the hash default — stored compatible vectors are reused).
 
     When a directory has both a bundle marker (memory.md) AND a v2 manifest,
     the v2 manifest takes precedence (stricter, checksummed format) and a
@@ -163,26 +172,26 @@ def hydrate(db: MemoryDB, path: str | Path) -> HydrateResult:
             is_bundle = False
         if is_bundle:
             _trace.info("dispatch", "bundle hydrate", detail={"path": str(p)})
-            return read_bundle(db, p).as_hydrate_result
+            return read_bundle(db, p, embedder=embedder).as_hydrate_result
         if is_manifest_dir:
             if _manifest_format(p) == PACKAGE_FORMAT_ID:
                 _trace.info("dispatch", "package hydrate", detail={"path": str(p)})
-                return hydrate_package(db, p)
+                return hydrate_package(db, p, embedder=embedder)
             _trace.info("dispatch", "v2 directory hydrate", detail={"path": str(p)})
-            return hydrate_v2(db, p)
+            return hydrate_v2(db, p, embedder=embedder)
         if (p / MEMORIES_NAME).is_file():
             _trace.info(
                 "dispatch",
                 "legacy hydrate (memories.jsonl, no manifest)",
                 detail={"path": str(p / MEMORIES_NAME)},
             )
-            return legacy_hydrate(db, p / MEMORIES_NAME)
+            return legacy_hydrate(db, p / MEMORIES_NAME, embedder=embedder)
         # Directory with neither memory.md, manifest, nor memories.jsonl.
         raise SnapshotChecksumError("missing_manifest", file=str(p / MANIFEST_NAME))
 
     # File -> legacy reader.
     _trace.info("dispatch", "legacy single-file hydrate", detail={"path": str(p)})
-    return legacy_hydrate(db, p)
+    return legacy_hydrate(db, p, embedder=embedder)
 
 
 def verify(path: str | Path) -> dict:
