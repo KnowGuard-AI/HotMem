@@ -142,8 +142,10 @@ def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
             "loaded": 0,
             "skipped": 0,
             "invalid": 0,
-            "reused_embeddings": 0,
-            "computed_embeddings": 0,
+            "embedding_reused": 0,
+            "embedding_rebuilt": 0,
+            "embedding_missing": 0,
+            "embedding_failed": 0,
         }
         pending: list[dict] = []
         batch_seen: set[str] = set()
@@ -157,8 +159,8 @@ def hydrate_v2(db: MemoryDB, snapshot_dir: str | Path) -> HydrateResult:
 
             records = []
             for rec in todo:
-                blob, model, dim, reused = resolve_embedding(rec)
-                counters["reused_embeddings" if reused else "computed_embeddings"] += 1
+                blob, model, dim, status = resolve_embedding(rec)
+                counters[f"embedding_{status}"] += 1
                 records.append(
                     record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
                 )

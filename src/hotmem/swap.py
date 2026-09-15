@@ -162,7 +162,8 @@ def _flush_batch(
 
     Database-backed dedup: one chunked SELECT finds destination duplicates
     before any embedding work, then insert_many_ignore handles residual
-    races. loaded/skipped/reused/computed counters live in ``counters``.
+    races. loaded/skipped plus the four embedding-status counters
+    (reused/rebuilt/missing/failed, issue #78) live in ``counters``.
     """
     existing = db.batch_existing_hashes([r["content_hash"] for r in pending])
     todo = [r for r in pending if r["content_hash"] not in existing]
@@ -170,11 +171,8 @@ def _flush_batch(
 
     records: list[MemoryRecord] = []
     for rec in todo:
-        blob, model, dim, reused = resolve_embedding(rec, embed_fn=embed_text)
-        if reused:
-            counters["reused_embeddings"] += 1
-        else:
-            counters["computed_embeddings"] += 1
+        blob, model, dim, status = resolve_embedding(rec)
+        counters[f"embedding_{status}"] += 1
         records.append(record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim))
 
     loaded = db.insert_many_ignore(records)
@@ -219,8 +217,10 @@ def hydrate(
             "invalid": 0,
             "parsed": 0,
             "bytes_read": 0,
-            "reused_embeddings": 0,
-            "computed_embeddings": 0,
+            "embedding_reused": 0,
+            "embedding_rebuilt": 0,
+            "embedding_missing": 0,
+            "embedding_failed": 0,
         }
         pending: list[dict] = []
         batch_seen: set[str] = set()

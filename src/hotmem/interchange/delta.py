@@ -556,7 +556,7 @@ def apply_delta(db: MemoryDB, delta_dir: str | Path) -> ApplyResult:
                         )
                     )
                     continue
-                blob, model, dim, _reused = resolve_embedding(rec)
+                blob, model, dim, _status = resolve_embedding(rec)
                 memory = record_to_memory_record(
                     rec, blob, embedding_model=model, embedding_dim=dim
                 )

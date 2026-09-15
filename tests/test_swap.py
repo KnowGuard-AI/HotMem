@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from hotmem.db import MemoryDB
-from hotmem.embed import EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.embed import EMBEDDING_MODEL, HashEmbedder, embed_text, pack_embedding
 from hotmem.swap import add_memory, compute_content_hash, hydrate, snapshot
 
 
@@ -228,7 +228,11 @@ def test_hydrate_reuses_compatible_stored_embedding(
     def fail_embed(_text: str):
         raise AssertionError("hydrate should reuse the stored embedding")
 
-    monkeypatch.setattr("hotmem.swap.embed_text", fail_embed)
+    class FailingEmbedder(HashEmbedder):
+        def embed(self, text: str):
+            fail_embed(text)
+
+    monkeypatch.setattr("hotmem.interchange.compat.DEFAULT_EMBEDDER", FailingEmbedder())
 
     result = hydrate(tmp_db, swap)
 
@@ -257,7 +261,11 @@ def test_hydrate_recomputes_incompatible_stored_embedding(
         + "\n"
     )
 
-    monkeypatch.setattr("hotmem.swap.embed_text", lambda _text: embed_text("fallback embedding"))
+    class FallbackEmbedder(HashEmbedder):
+        def embed(self, _text: str):
+            return embed_text("fallback embedding")
+
+    monkeypatch.setattr("hotmem.interchange.compat.DEFAULT_EMBEDDER", FallbackEmbedder())
 
     result = hydrate(tmp_db, swap)
 
