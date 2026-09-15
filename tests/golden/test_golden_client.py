@@ -190,7 +190,16 @@ def test_sync_client_return_shapes(tmp_path):
 
         health = client.health()
         assert_keys_exact(
-            health, {"status", "memory_count", "db_path", "uptime_s"}, "client.health()"
+            health,
+            {
+                "status",
+                "memory_count",
+                "db_path",
+                "uptime_s",
+                # Sanitized active embedding descriptor (issue #78) — additive.
+                "embedding",
+            },
+            "client.health()",
         )
 
         added = client.add("v", "invoice risk")

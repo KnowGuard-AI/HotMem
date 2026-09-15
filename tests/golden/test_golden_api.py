@@ -18,13 +18,27 @@ def test_health_shape(client):
     resp = client.get("/v1/health")
     assert resp.status_code == 200
     body = resp.json()
-    assert_keys_exact(body, {"status", "memory_count", "db_path", "uptime_s"}, "GET /v1/health")
+    assert_keys_exact(
+        body,
+        {
+            "status",
+            "memory_count",
+            "db_path",
+            "uptime_s",
+            # Sanitized active embedding descriptor (issue #78) — additive.
+            "embedding",
+        },
+        "GET /v1/health",
+    )
     assert mask(body) == {
         "status": "<str>",
         "memory_count": "<int>",
         "db_path": "<path>",
         "uptime_s": "<float>",
+        "embedding": {"model": "<str>", "dim": "<int>"},
     }
+    # The default server runs the hash space — key/dim only, no paths.
+    assert body["embedding"] == {"model": "hotmem-hash-v1", "dim": 64}
 
 
 def test_health_trace_header(client):

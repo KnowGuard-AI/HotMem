@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import struct
 from dataclasses import dataclass, fields
 from functools import lru_cache
@@ -169,6 +170,51 @@ class HashEmbedder:
 
 
 DEFAULT_EMBEDDER: Embedder = HashEmbedder()
+
+
+_EMBEDDER_CHOICES = ("hash", "local-semantic")
+
+
+def resolve_embedder_from_config(
+    spec: str | None = None,
+    *,
+    model_path: str | None = None,
+) -> Embedder:
+    """Resolve the runtime embedder from one explicit configuration path.
+
+    ``spec`` selects the embedder: "hash" (the default — the
+    zero-configuration ``hotmem-hash-v1``) or "local-semantic" (the optional
+    ``[semantic]`` extra; requires ``model_path`` — or the
+    ``HOTMEM_EMBEDDER_MODEL_PATH`` fallback — pointing at an explicitly
+    provisioned local model artifact). Flags take precedence over the
+    ``HOTMEM_EMBEDDER`` / ``HOTMEM_EMBEDDER_MODEL_PATH`` environment
+    fallbacks; omitted spec means hash, never a download (issue #78).
+
+    Resolution is meant to run BEFORE serving so an invalid selection fails
+    fast with an actionable message — never at import, hydration, or test
+    time. The optional adapter loads only when selected and never at module
+    import.
+    """
+    name = (spec or os.environ.get("HOTMEM_EMBEDDER") or "hash").strip().lower()
+    resolved_path = model_path or os.environ.get("HOTMEM_EMBEDDER_MODEL_PATH")
+    if name in ("", "hash"):
+        return HashEmbedder()
+    if name == "local-semantic":
+        try:
+            from hotmem.semantic import LocalSemanticEmbedder
+        except ImportError as err:
+            raise ValueError(
+                "embedder 'local-semantic' requires the optional [semantic] extra. "
+                "Install it with: uv pip install 'hotmem[semantic]'"
+            ) from err
+        if not resolved_path:
+            raise ValueError(
+                "embedder 'local-semantic' requires --embedder-model-path (or "
+                "HOTMEM_EMBEDDER_MODEL_PATH) pointing at an explicitly provisioned "
+                "local model artifact; HotMem never downloads models"
+            )
+        return LocalSemanticEmbedder(resolved_path)
+    raise ValueError(f"unknown embedder {name!r}; expected one of: {', '.join(_EMBEDDER_CHOICES)}")
 
 
 # ── hash implementation (unchanged; the compatibility contract) ─────────────

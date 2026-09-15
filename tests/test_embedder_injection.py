@@ -13,6 +13,8 @@ import math
 import random
 from pathlib import Path
 
+import pytest
+
 from hotmem.db import MemoryDB
 from hotmem.embed import (
     EMBEDDING_MODEL,
@@ -379,3 +381,139 @@ def test_vector_index_rebuild_skips_foreign_space_rows(tmp_path: Path):
     assert result["skipped_no_embedding"] == 0
     assert index.count() == 1
     db.close()
+
+
+# ── configuration path (issue #78, C7) ───────────────────────────────────────
+
+
+def test_config_resolution_default_is_hash(monkeypatch: pytest.MonkeyPatch):
+    from hotmem.embed import HashEmbedder, resolve_embedder_from_config
+
+    monkeypatch.delenv("HOTMEM_EMBEDDER", raising=False)
+    monkeypatch.delenv("HOTMEM_EMBEDDER_MODEL_PATH", raising=False)
+    for spec in (None, "", "hash"):
+        embedder = resolve_embedder_from_config(spec)
+        assert isinstance(embedder, HashEmbedder)
+        assert embedder.descriptor.key == EMBEDDING_MODEL
+
+
+def test_config_resolution_env_fallback(monkeypatch: pytest.MonkeyPatch):
+    from hotmem.embed import HashEmbedder, resolve_embedder_from_config
+
+    monkeypatch.setenv("HOTMEM_EMBEDDER", "hash")
+    embedder = resolve_embedder_from_config(None)
+    assert isinstance(embedder, HashEmbedder)
+    # Explicit spec wins over the environment.
+    monkeypatch.setenv("HOTMEM_EMBEDDER", "bogus")
+    assert isinstance(resolve_embedder_from_config("hash"), HashEmbedder)
+
+
+def test_config_resolution_rejects_unknown_with_choices():
+    from hotmem.embed import resolve_embedder_from_config
+
+    with pytest.raises(ValueError, match="hash, local-semantic"):
+        resolve_embedder_from_config("openai-ada")
+
+
+def test_config_resolution_semantic_requires_extra_or_model_path():
+    from hotmem.embed import resolve_embedder_from_config
+
+    # Without the [semantic] extra (this test env): actionable install hint.
+    with pytest.raises(ValueError, match=r"\[semantic\] extra"):
+        resolve_embedder_from_config("local-semantic")
+
+
+def test_server_embedder_injection_end_to_end(tmp_path: Path):
+    """create_app(embedder=...) owns add/search/hydrate/reindex in the server."""
+    from fastapi.testclient import TestClient
+
+    from hotmem.server import create_app
+
+    semantic = SemanticFake()
+    app = create_app(db_path=tmp_path / "sem.sqlite", embedder=semantic)
+    with TestClient(app) as client:
+        health = client.get("/v1/health").json()
+        assert health["embedding"] == {
+            "model": semantic.descriptor.key,
+            "dim": semantic.descriptor.dimension,
+        }
+        added = client.post(
+            "/v1/add", json={"identifier": "vendor", "fact": "semantic server fact"}
+        ).json()
+        assert added["memory_id"]
+        row = next(r for r in MemoryDB(tmp_path / "sem.sqlite").all_rows(include_embedding=True))
+        assert row["embedding_model"] == semantic.descriptor.key
+        assert row["embedding_dim"] == 128
+
+        hits = client.post("/v1/search", json={"query": "semantic server fact", "top_k": 1}).json()
+        assert hits["memories"][0]["content"] == "semantic server fact"
+
+
+def test_server_default_embedder_is_hash(tmp_path: Path):
+    """create_app() without an embedder keeps the exact historical behavior."""
+    from fastapi.testclient import TestClient
+
+    from hotmem.server import create_app
+
+    app = create_app(db_path=tmp_path / "plain.sqlite")
+    with TestClient(app) as client:
+        body = client.get("/v1/health").json()
+        assert body["embedding"] == {"model": "hotmem-hash-v1", "dim": 64}
+        client.post("/v1/add", json={"identifier": "v", "fact": "plain hash fact"})
+        rows = MemoryDB(tmp_path / "plain.sqlite").all_rows(include_embedding=True)
+        assert rows[0]["embedding_model"] == "hotmem-hash-v1"
+
+
+def test_mcp_embedder_injection(tmp_path: Path):
+    """create_server(embedder=...) owns the MCP add/search/health tools."""
+    pytest.importorskip("mcp", reason="requires the optional [mcp] extra")
+    from hotmem.mcp_server import (
+        _handle_add_memory,
+        _handle_memory_health,
+        _handle_search_memories,
+        _ServerState,
+        create_server,
+    )
+
+    semantic = SemanticFake()
+    create_server(tmp_path / "mcp.sqlite", None, embedder=semantic)
+    state = _ServerState()
+    state.db = MemoryDB(tmp_path / "mcp.sqlite")
+    state.db_path = str(tmp_path / "mcp.sqlite")
+    state.swap_path = None
+    state.start_time = 0.0
+
+    payload = _handle_add_memory(state, {"identifier": "vendor", "fact": "mcp semantic fact"})
+    assert not payload.isError
+    row = state.db.all_rows(include_embedding=True)[0]
+    assert row["embedding_model"] == semantic.descriptor.key
+
+    health = _handle_memory_health(state, {})
+    assert json.loads(health.content[0].text)["embedding"] == {
+        "model": semantic.descriptor.key,
+        "dim": 128,
+    }
+    search = _handle_search_memories(state, {"query": "mcp semantic fact", "top_k": 1})
+    hits = json.loads(search.content[0].text)
+    assert hits["memories"][0]["content"] == "mcp semantic fact"
+    state.db.close()
+
+
+def test_cli_embedder_flags_fail_fast(tmp_path: Path):
+    """Invalid embedder selections exit before the server starts."""
+    from click.testing import CliRunner
+
+    from hotmem.cli import main
+
+    runner = CliRunner()
+    # Unknown choice is rejected by the CLI itself.
+    result = runner.invoke(
+        main, ["serve", "--db", str(tmp_path / "x.sqlite"), "--embedder", "bogus"]
+    )
+    assert result.exit_code != 0
+    # local-semantic without the [semantic] extra resolves to an actionable error.
+    result = runner.invoke(
+        main, ["serve", "--db", str(tmp_path / "x.sqlite"), "--embedder", "local-semantic"]
+    )
+    assert result.exit_code != 0
+    assert "[semantic]" in (result.output + str(result.exception or ""))
