@@ -20,6 +20,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   Recall@5 gap (clone equivalence 1.0, duplicate slots 7.5%) pointing at
   #78. docs/retrieval-quality.md explains interpretation and limits.
 
+### Added — verified incremental sync implementation (#73)
+- `hotmem delta produce|apply` and `hotmem.interchange.delta`: verified
+  one-way incremental transfer. The producer diffs a verified base package
+  against current canonical state into deterministic compare-and-swap
+  upserts (byte-stable, plain or gz); the applier verifies everything
+  before any write, applies in one transaction with the sync checkpoint
+  and a `sync.applied` receipt event, skips already-applied operations
+  (idempotent replay), and reports every conflict (base_missing,
+  state_divergence, id_reuse, invalid_record) with expected/actual
+  fingerprints and recovery instructions — a conflicted or failing apply
+  leaves the target byte-identical.
+- New `interchange.fingerprint` state fingerprints (versioned, documented
+  exclusions) detect every sync-relevant mutation including promotion
+  transitions — which now round-trip through clone packages, deltas, and
+  v2 snapshots (previously a clone silently resurrected archived memories
+  as HOT).
+- Event-log correctness fixes: `replay(after_seq=...)` honors its cursor
+  (was silently restarting at 0); `replay_into` batches inserts and
+  reports actually-applied counts; `memory.created` payloads carry the
+  full canonical column set. The tested boundary stands: non-server
+  ingestion emits no per-record events, so v1 sync uses verified state
+  comparison, not event replay.
+- `bench/sync/`: delta apply of a 1% change set costs ~10-30ms at ~0.06MB
+  peak vs 0.22-1.07s at 5.7-7.5MB for the re-clone fallback (~20x faster,
+  gap widens with store size); idempotent replay is nearly free; zero
+  embedding calls across every scenario.
+- End-to-end gate: wiki -> JSONL -> instance -> base package -> mutations
+  -> delta -> receiver convergence (state + retrieval parity) -> repeat
+  apply loads zero -> diverged receiver recovers via whole-brain clone.
+
 ### Added — verified incremental sync contract (#73)
 - Added `docs/okf/delta-v1.md` — the normative `hotmem-delta-v1` contract:
   verified one-way incremental transfer built on the interchange clone
