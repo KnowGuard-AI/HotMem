@@ -261,3 +261,42 @@ def test_run_eval_rejects_malformed_fixtures(tmp_path: Path):
             work_dir=tmp_path,
             require_all_categories=False,
         )
+
+
+# ── committed fixtures (#77): counts, coverage, determinism ─────────────────
+
+FIXTURE_DIR = Path(__file__).resolve().parents[1] / "bench" / "retrieval"
+
+
+def test_committed_fixtures_meet_minimum_counts():
+    corpus = retrieval_eval.load_corpus(FIXTURE_DIR / "corpus.jsonl")
+    queries = retrieval_eval.load_queries(
+        FIXTURE_DIR / "queries.jsonl"
+    )  # all 8 categories enforced
+    assert len(corpus) >= 50
+    assert len(queries) >= 40
+    from collections import Counter
+
+    counts = Counter(q["category"] for q in queries)
+    for category in retrieval_eval.REQUIRED_CATEGORIES:
+        assert counts[category] >= 5, category
+    # Duplicate groups exist for the near_duplicate_diversity metric.
+    assert any("duplicate_of" in rec for rec in corpus)
+
+
+def test_committed_fixture_files_are_byte_stable(tmp_path: Path):
+    """Regenerating the fixtures reproduces the committed bytes exactly."""
+    before = {
+        "corpus": (FIXTURE_DIR / "corpus.jsonl").read_bytes(),
+        "queries": (FIXTURE_DIR / "queries.jsonl").read_bytes(),
+    }
+    import subprocess
+
+    result = subprocess.run(
+        ["uv", "run", "python", "bench/retrieval/gen_fixtures.py"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (FIXTURE_DIR / "corpus.jsonl").read_bytes() == before["corpus"]
+    assert (FIXTURE_DIR / "queries.jsonl").read_bytes() == before["queries"]
