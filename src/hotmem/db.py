@@ -892,6 +892,45 @@ class MemoryDB:
         row = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()
         return row[0]
 
+    def fetch_embedding_blobs(
+        self,
+        memory_ids: list[str],
+        *,
+        embedding_model: str | None = None,
+    ) -> dict[str, bytes]:
+        """Batched raw embedding fetch for second-stage reranking (#80).
+
+        ONE chunked SELECT for the whole candidate pool — never one query
+        per candidate. ``embedding_model`` applies the interchange §5.1
+        compatibility mapping (empty stored model = legacy hash): rows from
+        other embedding spaces are simply absent, which rerankers treat as
+        zero-similarity contributors, never errors. Rows without a vector
+        (file-backed without summary) are absent for the same reason.
+        """
+        if not memory_ids:
+            return {}
+        out: dict[str, bytes] = {}
+        for start in range(0, len(memory_ids), _SEARCH_BIND_CHUNK):
+            chunk = memory_ids[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"""SELECT id, embedding, embedding_model
+                    FROM memories
+                    WHERE id IN ({placeholders})
+                      AND embedding IS NOT NULL AND length(embedding) > 0""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                stored = str(row["embedding_model"] or "")
+                if embedding_model is not None:
+                    if embedding_model == EMBEDDING_MODEL:
+                        if stored not in ("", EMBEDDING_MODEL):
+                            continue
+                    elif stored != embedding_model:
+                        continue
+                out[str(row["id"])] = row["embedding"]
+        return out
+
     def fingerprint(self) -> tuple[int, int, int]:
         """Return a cheap store fingerprint: (COUNT, MAX(rowid), MAX(event seq)).
 

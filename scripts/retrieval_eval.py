@@ -314,7 +314,13 @@ def _fixture_content_hash(rec: dict) -> str:
 
 
 def evaluate_query(
-    db, query_rec: dict, *, top_k: int, duplicate_groups: dict[str, str], embedder=None
+    db,
+    query_rec: dict,
+    *,
+    top_k: int,
+    duplicate_groups: dict[str, str],
+    embedder=None,
+    reranker=None,
 ) -> QueryResult:
     """Run one query through production search and score it.
 
@@ -326,7 +332,9 @@ def evaluate_query(
     from hotmem.search import search_memories
 
     started = time.perf_counter()
-    rows = search_memories(db, query_rec["query"], top_k=top_k, embedder=embedder)
+    rows = search_memories(
+        db, query_rec["query"], top_k=top_k, embedder=embedder, reranker=reranker
+    )
     display_elapsed = time.perf_counter() - started
 
     ranked_ids = [r["memory_id"] for r in rows]
@@ -334,7 +342,9 @@ def evaluate_query(
 
     eval_top = max(EVAL_TOP_K, top_k)
     if eval_top != top_k:
-        rows = search_memories(db, query_rec["query"], top_k=eval_top, embedder=embedder)
+        rows = search_memories(
+            db, query_rec["query"], top_k=eval_top, embedder=embedder, reranker=reranker
+        )
         ranked_ids = [r["memory_id"] for r in rows]
     _ = display_elapsed  # latency is sampled separately; see measure_latency
 
@@ -358,7 +368,9 @@ def evaluate_query(
     return result
 
 
-def measure_latency(db, queries: list[dict], *, top_k: int, repeat: int, embedder=None) -> dict:
+def measure_latency(
+    db, queries: list[dict], *, top_k: int, repeat: int, embedder=None, reranker=None
+) -> dict:
     """Latency p50/p95 sampled separately from quality runs (issue #77)."""
     from hotmem.search import search_memories
 
@@ -366,7 +378,7 @@ def measure_latency(db, queries: list[dict], *, top_k: int, repeat: int, embedde
     for _ in range(max(1, repeat)):
         for rec in queries:
             started = time.perf_counter()
-            search_memories(db, rec["query"], top_k=top_k, embedder=embedder)
+            search_memories(db, rec["query"], top_k=top_k, embedder=embedder, reranker=reranker)
             samples_ms.append((time.perf_counter() - started) * 1000.0)
     if not samples_ms:
         return {"p50_ms": None, "p95_ms": None, "samples": 0}
@@ -402,6 +414,7 @@ def run_clone_equivalence(
     tmp: Path,
     *,
     embedder=None,
+    reranker=None,
 ) -> dict:
     """Clone stage (#77 snapshot_hydration_equivalence): export the ingested
     instance as a verified package, hydrate a CLEAN target, re-run every
@@ -441,6 +454,7 @@ def run_clone_equivalence(
             top_k=DEFAULT_TOP_K,
             duplicate_groups=duplicate_groups,
             embedder=embedder,
+            reranker=reranker,
         )
         ids_match = rerun.ranked_ids == base.ranked_ids
         scores_match = rerun.ranked_scores == base.ranked_scores
@@ -547,6 +561,13 @@ def run_cold_start_internal(
     return 0
 
 
+def _is_identity(reranker) -> bool:
+    """True for the zero-work identity reranker (the exact pre-#80 path)."""
+    from hotmem.rerank import IdentityReranker
+
+    return isinstance(reranker, IdentityReranker)
+
+
 def run_eval(
     corpus_path: Path,
     queries_path: Path,
@@ -558,6 +579,7 @@ def run_eval(
     embedder=None,
     embedder_spec: str | None = None,
     embedder_model_path: str | None = None,
+    reranker=None,
 ) -> dict:
     """Run the full evaluation; return the metrics document (JSON-safe).
 
@@ -594,13 +616,26 @@ def run_eval(
         for rec in queries:
             per_query.append(
                 evaluate_query(
-                    db, rec, top_k=top_k, duplicate_groups=duplicate_groups, embedder=active
+                    db,
+                    rec,
+                    top_k=top_k,
+                    duplicate_groups=duplicate_groups,
+                    embedder=active,
+                    reranker=reranker,
                 )
             )
-        latency = measure_latency(db, queries, top_k=top_k, repeat=repeat, embedder=active)
+        latency = measure_latency(
+            db, queries, top_k=top_k, repeat=repeat, embedder=active, reranker=reranker
+        )
 
         clone = run_clone_equivalence(
-            corpus, queries, duplicate_groups, per_query, Path(tmp), embedder=active
+            corpus,
+            queries,
+            duplicate_groups,
+            per_query,
+            Path(tmp),
+            embedder=active,
+            reranker=reranker,
         )
         cold = measure_cold_start(
             corpus_path,
@@ -638,6 +673,11 @@ def run_eval(
             "embedding_model": active.descriptor.key,
             "embedding_dim": active.descriptor.dimension,
             "fusion": "cosine 0.6 / fts5_bm25 0.2 / importance 0.2",
+            "reranker": (
+                reranker.descriptor.key
+                if reranker is not None and not _is_identity(reranker)
+                else "none"
+            ),
             "top_k": top_k,
             "repeat": repeat,
         },
@@ -906,6 +946,23 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Provisioned local model artifact for --embedder local-semantic.",
     )
+    parser.add_argument(
+        "--reranker",
+        dest="reranker_spec",
+        default="none",
+        choices=["none", "mmr"],
+        help="Optional bounded second stage (#80): 'none' keeps the exact "
+        "first-stage ranking; 'mmr' writes a separate report.",
+    )
+    parser.add_argument(
+        "--reranker-lambda",
+        type=float,
+        default=0.5,
+        help="MMR tradeoff in [0.0, 1.0] (default 0.5, the #80 evidence setting).",
+    )
+    parser.add_argument(
+        "--reranker-pool", type=int, default=50, help="MMR candidate pool (10..200)."
+    )
     args = parser.parse_args(argv)
 
     if args.cold_start_internal:
@@ -918,14 +975,18 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     from hotmem.embed import resolve_embedder_from_config
+    from hotmem.rerank import resolve_reranker_from_config
 
     try:
         embedder = resolve_embedder_from_config(
             args.embedder_spec,
             model_path=str(args.embedder_model_path) if args.embedder_model_path else None,
         )
+        reranker = resolve_reranker_from_config(
+            args.reranker_spec, lambda_=args.reranker_lambda, pool_limit=args.reranker_pool
+        )
     except ValueError as err:
-        print(f"embedder error: {err}", file=sys.stderr)
+        print(f"reranker error: {err}", file=sys.stderr)
         return 2
 
     try:
@@ -939,6 +1000,7 @@ def main(argv: list[str] | None = None) -> int:
             embedder_model_path=(
                 str(args.embedder_model_path) if args.embedder_model_path else None
             ),
+            reranker=reranker,
         )
     except FixtureError as err:
         print(f"fixture error: {err}", file=sys.stderr)

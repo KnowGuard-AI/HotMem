@@ -27,7 +27,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from hotmem.db import MemoryDB
-from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
+from hotmem.embed import DEFAULT_EMBEDDER, Embedder, EmbeddingDescriptor, pack_embedding
+from hotmem.rerank import IdentityReranker, Reranker, SearchCandidate, validate_rerank_output
 from hotmem.trace import Timer, get_tracer
 
 if TYPE_CHECKING:
@@ -128,6 +129,52 @@ def _fetch_candidates(
     )
 
 
+def _apply_reranker(
+    db: MemoryDB,
+    reranker: Reranker,
+    query: str,
+    scored: list[dict[str, Any]],
+    top_k: int,
+    *,
+    active_descriptor: EmbeddingDescriptor,
+) -> list[dict[str, Any]]:
+    """Run the bounded second stage over the first-stage ranking (#80).
+
+    The reranker sees the narrow candidate view only; its vectors come
+    from ONE batched ``db.fetch_embedding_blobs`` call restricted to the
+    active embedding space (foreign or missing vectors read as absent and
+    contribute zero similarity). Any failure or contract violation falls
+    back to the first-stage order — search never fails because of a
+    reranker.
+    """
+    candidates = [
+        SearchCandidate(memory_id=row["id"], score=row["final_score"], content=row["_search_text"])
+        for row in scored
+    ]
+
+    def fetch(memory_ids: list[str]) -> dict[str, bytes]:
+        return db.fetch_embedding_blobs(memory_ids, embedding_model=active_descriptor.key)
+
+    try:
+        ordered = reranker.rerank(query, candidates, top_k=top_k, fetch_embeddings=fetch)
+    except Exception as err:
+        _trace.warn(
+            "rerank",
+            "reranker raised; falling back to first-stage order",
+            detail={"error": type(err).__name__},
+        )
+        return scored
+    if not validate_rerank_output(ordered, candidates, top_k=top_k):
+        _trace.warn(
+            "rerank",
+            "invalid reranker output; falling back to first-stage order",
+            detail={"count": len(ordered) if isinstance(ordered, list) else -1},
+        )
+        return scored
+    by_id = {row["id"]: row for row in scored}
+    return [by_id[memory_id] for memory_id in ordered]
+
+
 def search_memories(
     db: MemoryDB,
     query: str,
@@ -137,6 +184,7 @@ def search_memories(
     include_archived: bool = False,
     vector_index: VectorIndex | None = None,
     embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
 ) -> list[dict[str, Any]]:
     """Search memories and return ranked, LLM-ready message objects.
 
@@ -150,8 +198,13 @@ def search_memories(
 
     ``embedder`` owns the query embedding (issue #78): ``None`` means the
     hash default. Pass the same runtime-owned embedder used for writes; rows
-    stored under a different descriptor are excluded from cosine scoring by
-    the mixed-space filter (db.search_with_cosine).
+    stored under a different descriptor score zero cosine (mixed-space
+    guard) and still surface via FTS/importance.
+
+    ``reranker`` is the optional bounded second stage (issue #80):
+    ``None`` (and ``IdentityReranker``) preserve the exact first-stage order
+    and response shape with zero extra work. A reranker violating its output
+    contract falls back to the first-stage top-k with a trace diagnostic.
 
     Returns:
         List of dicts with keys: role, content, memory_id, identifier, score
@@ -193,6 +246,14 @@ def search_memories(
 
         # Sort by final score descending, take top_k
         scored.sort(key=lambda x: x["final_score"], reverse=True)
+
+        # Optional bounded second-stage selection (#80): disabled/identity is
+        # the zero-work fast path — the pre-#80 order and response shape are
+        # exactly preserved. Truncation to top_k happens AFTER selection.
+        if reranker is not None and not isinstance(reranker, IdentityReranker):
+            scored = _apply_reranker(
+                db, reranker, query, scored, top_k, active_descriptor=active.descriptor
+            )
         top = scored[:top_k]
 
         # Build message objects

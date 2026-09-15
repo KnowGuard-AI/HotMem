@@ -472,6 +472,26 @@ def test_semantic_report_key_numbers_pinned():
     assert report["recommendation"]["action"] == "pursue_reranking_hook_80"
 
 
+def test_rerank_report_key_numbers_pinned():
+    """#80 evidence: the committed MMR report's headline numbers.
+
+    Hand-checked from the semantic+MMR run: the gate-opening diversity
+    duplicate-slot rate drops below the 20% gate (0.400 -> 0.167), clone
+    equivalence holds at 1.0 under the reranker (deterministic), and the
+    recall allowance is measured in full (overall Recall@5 1.000 -> 0.885;
+    lexical parity unchanged at 1.000). Reranking stays opt-in —
+    baseline.json default evidence is untouched.
+    """
+    report = json.loads((FIXTURE_DIR / "rerank-mmr.json").read_text())
+    assert report["runtime"]["reranker"] == "hotmem/mmr-l0.5"
+    c = report["categories"]
+    assert c["near_duplicate_diversity"]["duplicate_slot_rate"]["mean"] == pytest.approx(1 / 6)
+    assert report["overall"]["duplicate_slot_rate"]["mean"] == pytest.approx(1 / 48)
+    assert report["overall"]["recall_at_5"]["mean"] == pytest.approx(0.884920634920635)
+    assert c["exact_lexical"]["recall_at_5"]["mean"] == pytest.approx(1.0)
+    assert report["clone_equivalence"]["clone_equivalence_rate"] == pytest.approx(1.0)
+
+
 def test_run_eval_threads_injected_embedder(tmp_path: Path):
     """run_eval(embedder=...) runs the whole pipeline in the injected space."""
 

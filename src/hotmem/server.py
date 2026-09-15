@@ -45,6 +45,7 @@ from hotmem.lifecycle import (
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
+from hotmem.rerank import Reranker
 from hotmem.search import search_memories
 from hotmem.snapshot import SnapshotChecksumError
 from hotmem.snapshot import hydrate as snapshot_hydrate
@@ -277,6 +278,7 @@ def create_app(
     vector_backend: str = "none",
     vector_index: VectorIndex | None = None,
     embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -296,6 +298,9 @@ def create_app(
     ``None`` means the hash default. It owns every write, search, hydration,
     and reindex embedding in this process; rows stored under other
     descriptors stay retrievable via FTS/importance (mixed-space safety).
+
+    ``reranker`` is the optional bounded second stage (issue #80):
+    ``None`` preserves the exact first-stage ranking (zero extra work).
     """
     if vector_backend not in VALID_BACKENDS:
         raise ValueError(
@@ -307,6 +312,7 @@ def create_app(
     _state["vector_backend"] = vector_backend
     _state["vector_index_injected"] = vector_index
     _state["embedder"] = embedder if embedder is not None else DEFAULT_EMBEDDER
+    _state["reranker"] = reranker
     if base_dir is None:
         base_dir = str(Path(db_path).resolve().parent)
     _state["base_dir"] = str(base_dir)
@@ -460,6 +466,7 @@ def create_app(
                 max_chars=req.max_chars,
                 vector_index=vector_index,
                 embedder=_state["embedder"],
+                reranker=_state.get("reranker"),
             )
         return {
             "memories": messages,

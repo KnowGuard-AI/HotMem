@@ -80,3 +80,32 @@ deterministic design recorded in the PR plan:
 
 If implementation cannot meet the acceptance evidence, #80 returns to
 open without the hook — the gate decision is recorded here either way.
+
+## Outcome (implementation evidence)
+
+The hook shipped as designed and the acceptance evidence is committed in
+`rerank-mmr.json` (semantic runtime, MMR lambda 0.5, pool 50):
+
+- Gate metric: diversity duplicate-slot 0.400 -> **0.167** — below the
+  20% gate. The measured problem is solved.
+- Recall allowance (documented before acceptance, as required): overall
+  Recall@5 1.000 -> 0.885; exact-lexical parity unchanged at 1.000. The
+  cost concentrates on fixtures that grade near-duplicate cluster members
+  and revision pairs as relevant — those pairs share the duplicate
+  clusters' similarity range (relevant pairs 0.81..0.92 vs duplicate
+  clusters 0.83..0.99), so no similarity-based rule can suppress
+  duplicates without it; metadata-driven demotion is out of scope by
+  canon (annotations never rank).
+- Determinism: clone equivalence 1.000 under the reranker — the selection
+  is a pure function of its inputs.
+- Overhead (bounded, measured): p50 search latency ~2.0ms -> ~13.0ms for
+  a 50-candidate pool at 256 dims — one batched embedding fetch plus
+  in-memory selection, no second corpus pass. Disabled overhead: zero —
+  `None`/identity skips the stage entirely (byte-exact parity tests).
+- Lambda default is evidence-driven: relevance-dominant settings (>= 0.55)
+  leave the duplicate clusters in place (diversity rate stays 0.400); 0.5
+  crosses the gate. The tradeoff is recorded here so no one re-tunes it
+  against the fixture without new evidence.
+
+Reranking remains opt-in. #80 closes on this evidence; revisiting the
+recall allowance requires new fixture categories, not a lambda change.

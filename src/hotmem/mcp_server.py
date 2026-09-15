@@ -33,6 +33,7 @@ from mcp.types import CallToolResult, TextContent, Tool
 
 from hotmem.db import MemoryDB
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
+from hotmem.rerank import Reranker
 from hotmem.search import search_memories
 from hotmem.swap import compute_content_hash
 from hotmem.swap import hydrate as swap_hydrate
@@ -88,6 +89,7 @@ class _ServerState:
     swap_path: str | None
     start_time: float
     embedder: Embedder = DEFAULT_EMBEDDER  # runtime-owned (issue #78)
+    reranker: Reranker | None = None  # optional second stage (#80)
 
 
 _state = _ServerState()
@@ -98,15 +100,18 @@ def create_server(
     swap_path: str | Path | None = None,
     *,
     embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
 ) -> Server:
     """Create and configure the HotMem MCP server.
 
     ``embedder`` is the runtime-owned embedding implementation (issue #78);
-    ``None`` means the hash default.
+    ``None`` means the hash default. ``reranker`` is the optional bounded
+    second stage (issue #80); ``None`` preserves the first-stage ranking.
     """
     db_path = str(db_path)
     swap_path = str(swap_path) if swap_path else None
     _state.embedder = embedder if embedder is not None else DEFAULT_EMBEDDER
+    _state.reranker = reranker
 
     server = Server("hotmem")
 
@@ -174,6 +179,7 @@ async def run(
     swap_path: str | Path | None = None,
     *,
     embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
 ) -> None:
     """Start the HotMem MCP server on stdio transport."""
     db_path = str(db_path)
@@ -199,7 +205,7 @@ async def run(
         detail={"db_path": db_path, "swap_path": swap_path},
     )
 
-    server = create_server(db_path, swap_path, embedder=embedder)
+    server = create_server(db_path, swap_path, embedder=embedder, reranker=reranker)
 
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -262,7 +268,12 @@ def _handle_search_memories(state: _ServerState, arguments: dict[str, Any]) -> C
 
     with Timer() as t:
         messages = search_memories(
-            state.db, query=query, top_k=top_k, max_chars=max_chars, embedder=state.embedder
+            state.db,
+            query=query,
+            top_k=top_k,
+            max_chars=max_chars,
+            embedder=state.embedder,
+            reranker=state.reranker,
         )
 
     payload = {

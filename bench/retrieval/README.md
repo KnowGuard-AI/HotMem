@@ -18,6 +18,35 @@ and safe to publish: no keys, no personal data, no copied text.
 - `semantic-local-m2v.json` — the separate #78 evidence report produced by
   the optional local semantic adapter over the same fixtures. NEVER
   overwrites `baseline.json`: default-behavior evidence stays intact.
+- `post-p2-gate-80.md` — the #80 go/no-go decision record: the entry gate
+  (diversity duplicate-slot rate) measured post-#78 under both embedders.
+- `rerank-mmr.json` — the #80 evidence report: the semantic runtime plus
+  the opt-in MMR reranker (lambda 0.5, pool 50). Same rule: separate
+  artifact, never an overwrite of default-behavior evidence.
+
+## Reranking run (#80)
+
+Reranking is opt-in (default off — the exact pre-#80 ranking) and bounded.
+The gate-opening measurement and the recall tradeoff are recorded in
+`post-p2-gate-80.md`; reproduce the committed report with:
+
+```sh
+uv run python scripts/retrieval_eval.py \
+  --embedder local-semantic --embedder-model-path .models/potion-base-8M \
+  --reranker mmr --output bench/retrieval/rerank-mmr.json
+```
+
+Measured (lambda 0.5, pool 50, semantic runtime): the near-duplicate
+diversity duplicate-slot rate drops 0.400 -> 0.167 (below the 20% gate)
+and clone equivalence stays 1.0 under the reranker. The recall allowance
+is real and documented: overall Recall@5 1.000 -> 0.885 — the fixtures
+grade near-duplicate cluster members and revision pairs as relevant while
+sharing the duplicate clusters' similarity range (0.81..0.92 vs
+0.83..0.99), so similarity alone cannot suppress duplicates without that
+cost; metadata-driven demotion is out of scope by canon. Exact-lexical
+Recall@5 is unchanged at 1.000. Overhead is bounded and measured: p50
+search latency ~2.0ms -> ~13.0ms for a 50-candidate pool at 256 dims
+(one batched embedding fetch + in-memory selection; no second scan).
 
 Regenerate with `uv run python bench/retrieval/gen_fixtures.py` — the
 generator is deterministic and the committed bytes must not change (a

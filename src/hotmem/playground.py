@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from hotmem.embed import Embedder
+    from hotmem.rerank import Reranker
 
 
 def _import_rich():
@@ -36,11 +37,17 @@ def _import_rich():
 class _DirectBackend:
     """Backend that operates directly against a SQLite DB file."""
 
-    def __init__(self, db_path: str, embedder: Embedder | None = None) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        embedder: Embedder | None = None,
+        reranker: Reranker | None = None,
+    ) -> None:
         from hotmem.db import MemoryDB
 
         self._db = MemoryDB(db_path)
         self._embedder = embedder
+        self._reranker = reranker
         self.db_path = db_path
 
     def add(self, identifier: str, fact: str, **kwargs: Any) -> dict[str, Any]:
@@ -70,7 +77,13 @@ class _DirectBackend:
     def search(self, query: str, top_k: int = 5) -> list[dict[str, Any]]:
         from hotmem.search import search_memories
 
-        return search_memories(self._db, query=query, top_k=top_k, embedder=self._embedder)
+        return search_memories(
+            self._db,
+            query=query,
+            top_k=top_k,
+            embedder=self._embedder,
+            reranker=self._reranker,
+        )
 
     def count(self) -> int:
         return self._db.count()
@@ -107,12 +120,17 @@ class _HttpBackend:
 
 
 def run_playground(
-    *, db_path: str | None = None, url: str | None = None, embedder: Embedder | None = None
+    *,
+    db_path: str | None = None,
+    url: str | None = None,
+    embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
 ) -> None:
     """Run the interactive playground loop.
 
-    Exactly one of db_path or url must be provided. ``embedder`` applies to
-    the direct backend only (issue #78; ``None`` = the hash default).
+    Exactly one of db_path or url must be provided. ``embedder`` (#78) and
+    ``reranker`` (#80) apply to the direct backend only; ``None`` keeps
+    the exact default ranking.
     """
     if db_path and url:
         raise ValueError("specify either db_path or url, not both")
@@ -125,7 +143,9 @@ def run_playground(
         backend: _DirectBackend | _HttpBackend = _HttpBackend(url)
         where = f"server @ {url}"
     else:
-        backend = _DirectBackend(db_path, embedder=embedder)  # type: ignore[arg-type]
+        backend = _DirectBackend(  # type: ignore[arg-type]
+            db_path, embedder=embedder, reranker=reranker
+        )
         where = f"db @ {db_path}"
 
     console.print(
