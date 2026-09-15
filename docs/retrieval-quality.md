@@ -53,14 +53,23 @@ baseline:
 | MRR@5 / nDCG@5 | 0.537 / 0.586 |
 | Exact-lexical Recall@5 | 1.000 |
 | Semantic-paraphrase Recall@5 | 0.333 |
-| Duplicate-slot rate | 0.075 |
+| Duplicate-slot rate (all 48 queries) | 0.075 |
+| Duplicate-slot rate (near-duplicate diversity category) | 0.300 |
 | Clone equivalence | 1.000 (zero drift) |
 
 **Deterministic recommendation:** semantic Recall@5 trails exact-lexical
 by 66.7 percentage points (threshold 15pp) — the evidence points at #78
-(portable derived-index contract and optional semantic embedder), while the
-duplicate-slot rate (7.5%) stays below the 20% threshold that would justify
-#80 (optional reranking hook).
+(portable derived-index contract and optional semantic embedder).
+
+**#80 gate denominator (reconciled):** duplicate occupancy is measured on
+two denominators. The 48-query aggregate (7.5%) dilutes the
+`near_duplicate_diversity` category, where the near-duplicates actually
+live (30.0% — above the 20% threshold). #80's entry gate reads the
+`near_duplicate_diversity` category; the aggregate is reported for
+context. The recommendation rule stays semantic-first: #80 is evaluated
+only after #78 lands, when a committed post-#78 report re-measures both
+denominators and names the remaining failure. Until that report exists,
+#80 stays open and no reranking hook is added.
 
 ## What the benchmark does not prove
 
@@ -74,6 +83,9 @@ duplicate-slot rate (7.5%) stays below the 20% threshold that would justify
 
 ## Changing ranking responsibly
 
-#78 and #80 are gated by this evidence. Any ranking change must regenerate
-`baseline.json` and include category-level before/after metrics in the PR —
-the regression test makes silent drift impossible.
+#78 and #80 are gated by this evidence. #80's entry gate is the
+`near_duplicate_diversity` category duplicate-slot rate, re-measured in a
+committed post-#78 report; #80 remains open until that gate is met. Any
+ranking change must regenerate `baseline.json` and include category-level
+before/after metrics in the PR — the regression test makes silent drift
+impossible.

@@ -1595,6 +1595,7 @@
       "clone_equivalence_rate": 1.0,
       "duplicate_slot_rate": 0.07500000000000001,
       "exact_lexical_recall_at_5": 1.0,
+      "near_duplicate_diversity_duplicate_slot_rate": 0.3,
       "semantic_recall_at_5": 0.3333333333333333
     },
     "rationale": "semantic Recall@5 (0.333) trails exact-lexical Recall@5 (1.000) by 66.7 percentage points (threshold: 15pp) \u2014 the deterministic hash embedder cannot bridge wording differences; pursue #78."

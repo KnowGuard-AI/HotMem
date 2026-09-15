@@ -415,10 +415,71 @@ def test_recommendation_decision_rule(tmp_path: Path):
     broken = json.loads(json.dumps(doc))
     broken["clone_equivalence"]["clone_equivalence_rate"] = 0.9
     assert retrieval_eval.build_recommendation(broken)["action"] == "fix_clone_index_compatibility"
-    # Duplicate-slot rule only fires when the semantic gap is closed.
+    # Duplicate-slot rule only fires when the semantic gap is closed. Its
+    # gate is the near_duplicate_diversity category (#80 denominator).
     narrowed = json.loads(json.dumps(doc))
     narrowed["categories"]["semantic_paraphrase"]["recall_at_5"]["mean"] = 0.95
-    narrowed["overall"]["duplicate_slot_rate"]["mean"] = 0.25
+    narrowed["categories"]["near_duplicate_diversity"]["duplicate_slot_rate"]["mean"] = 0.25
     assert retrieval_eval.build_recommendation(narrowed)["action"] == "pursue_reranking_hook_80"
-    narrowed["overall"]["duplicate_slot_rate"]["mean"] = 0.1
+    narrowed["categories"]["near_duplicate_diversity"]["duplicate_slot_rate"]["mean"] = 0.1
     assert retrieval_eval.build_recommendation(narrowed)["action"] == "retain_current_stack"
+
+
+def test_duplicate_slot_denominators_pinned():
+    """Hand-calculated from the committed fixtures: 3.6 duplicate slots
+    over 48 query slots = 0.075 aggregate; 1.8 over 6 = 0.300 in the
+    near-duplicate diversity category. #80's entry gate reads the
+    category; the aggregate is context (guide vs issue reconciliation).
+    """
+    baseline = json.loads(BASELINE_PATH.read_text())
+    overall = baseline["overall"]["duplicate_slot_rate"]
+    diversity = baseline["categories"]["near_duplicate_diversity"]["duplicate_slot_rate"]
+    assert overall["n_applicable"] == 48
+    assert overall["mean"] == pytest.approx(0.075)
+    assert diversity["n_applicable"] == 6
+    assert diversity["mean"] == pytest.approx(0.300)
+
+
+def test_recommendation_reports_both_duplicate_denominators(tmp_path: Path):
+    doc = retrieval_eval.run_eval(
+        FIXTURE_DIR / "corpus.jsonl", FIXTURE_DIR / "queries.jsonl", work_dir=tmp_path
+    )
+    measured = doc["recommendation"]["measured"]
+    assert measured["duplicate_slot_rate"] == pytest.approx(0.075)
+    assert measured["near_duplicate_diversity_duplicate_slot_rate"] == pytest.approx(0.300)
+
+
+def test_reranking_gate_falls_back_to_aggregate_without_diversity_category():
+    """Corpora without the diversity category: the aggregate governs #80."""
+
+    def doc_with(dup_mean: float, diversity: dict | None):
+        categories = {
+            "semantic_paraphrase": {"recall_at_5": {"mean": 0.95}},
+            "exact_lexical": {"recall_at_5": {"mean": 1.0}},
+        }
+        if diversity is not None:
+            categories["near_duplicate_diversity"] = {"duplicate_slot_rate": diversity}
+        return {
+            "overall": {"duplicate_slot_rate": {"mean": dup_mean}},
+            "categories": categories,
+            "clone_equivalence": {"clone_equivalence_rate": 1.0},
+        }
+
+    # Absent category -> aggregate drives the branch.
+    assert (
+        retrieval_eval.build_recommendation(doc_with(0.25, None))["action"]
+        == "pursue_reranking_hook_80"
+    )
+    assert (
+        retrieval_eval.build_recommendation(doc_with(0.10, None))["action"]
+        == "retain_current_stack"
+    )
+    # Present category -> it overrides a lower aggregate (and vice versa).
+    assert (
+        retrieval_eval.build_recommendation(doc_with(0.075, {"mean": 0.30}))["action"]
+        == "pursue_reranking_hook_80"
+    )
+    assert (
+        retrieval_eval.build_recommendation(doc_with(0.25, {"mean": 0.10}))["action"]
+        == "retain_current_stack"
+    )

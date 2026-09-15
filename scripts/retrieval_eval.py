@@ -625,6 +625,13 @@ def build_recommendation(doc: dict) -> dict:
     slots above 20% -> #80 (optional reranking hook); else retain the
     stack and expand fixtures. These prioritize work; they are not release
     thresholds. Never recommend entity extraction from this benchmark.
+
+    #80 gate denominator (issue #80): the ``near_duplicate_diversity``
+    category measures duplicate occupancy directly and is the entry
+    gate; the aggregate over all queries dilutes it with categories that
+    have no duplicates and is reported for context only. When the
+    diversity category is absent (synthetic mini corpora), the aggregate
+    governs. Both denominators are pinned by hand-calculated tests.
     """
     overall = doc["overall"]
     categories = doc["categories"]
@@ -637,12 +644,15 @@ def build_recommendation(doc: dict) -> dict:
     sem = cat_mean("semantic_paraphrase", "recall_at_5")
     lex = cat_mean("exact_lexical", "recall_at_5")
     dup = (overall.get("duplicate_slot_rate") or {}).get("mean") or 0.0
+    diversity_dup = cat_mean("near_duplicate_diversity", "duplicate_slot_rate")
+    rerank_gate = diversity_dup if diversity_dup is not None else dup
 
     measured = {
         "clone_equivalence_rate": clone_rate,
         "semantic_recall_at_5": sem,
         "exact_lexical_recall_at_5": lex,
         "duplicate_slot_rate": dup,
+        "near_duplicate_diversity_duplicate_slot_rate": diversity_dup,
     }
     if clone_rate is not None and clone_rate < 1.0:
         return {
@@ -659,11 +669,13 @@ def build_recommendation(doc: dict) -> dict:
             "hash embedder cannot bridge wording differences; pursue #78.",
             "measured": measured,
         }
-    if dup > 0.20:
+    if rerank_gate > 0.20:
         return {
             "action": "pursue_reranking_hook_80",
-            "rationale": f"duplicate-slot rate {dup:.3f} exceeds 20%: near-duplicates consume "
-            "diverse top-k slots; pursue #80 (evidence-gated optional reranking hook).",
+            "rationale": f"near-duplicate diversity duplicate-slot rate {rerank_gate:.3f} "
+            "exceeds 20%: near-duplicates consume diverse top-k slots "
+            f"(aggregate over all queries: {dup:.3f}); pursue #80 (evidence-gated "
+            "optional reranking hook).",
             "measured": measured,
         }
     return {
@@ -792,7 +804,9 @@ def render_report(doc: dict) -> str:
         f"  - measured: clone equivalence {m.get('clone_equivalence_rate')}, "
         f"semantic Recall@5 {m.get('semantic_recall_at_5')}, "
         f"exact-lexical Recall@5 {m.get('exact_lexical_recall_at_5')}, "
-        f"duplicate-slot rate {m.get('duplicate_slot_rate')}"
+        f"duplicate-slot rate {m.get('duplicate_slot_rate')} "
+        f"(near-duplicate diversity category: "
+        f"{m.get('near_duplicate_diversity_duplicate_slot_rate')})"
     )
     lines.append("")
     lines.append("## What this benchmark does not prove")

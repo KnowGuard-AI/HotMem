@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed — reconciled #80 duplicate-slot gate denominator (#77/#80)
+- The #77 guide read the 48-query aggregate duplicate-slot rate (7.5%) while
+  the `near_duplicate_diversity` category — where the near-duplicates
+  actually live — reports 30.0%. Reconciled: #80's entry gate reads the
+  `near_duplicate_diversity` category (the category that measures duplicate
+  occupancy), with the aggregate reported for context; when the category is
+  absent the aggregate governs. The semantic-first recommendation rule is
+  unchanged and both denominators are pinned by hand-calculated tests;
+  `baseline.json` regenerated with one additive measured field (identical
+  metric values). #80 is re-evaluated only after #78 lands, via a committed
+  post-#78 report; until then it stays open.
+
 ### Added — deterministic retrieval evaluation harness (#77)
 - `scripts/retrieval_eval.py` + `bench/retrieval/{corpus,queries,baseline}.json`:
   one offline command measures Recall@1/5, MRR@5, graded nDCG@5, negative-query
