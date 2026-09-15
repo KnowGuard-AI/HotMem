@@ -30,3 +30,4 @@ corpus/
 
 # interchange benchmarks (#67-69) — generated corpora
 bench/interchange/corpus/
+bench/sync/corpus/

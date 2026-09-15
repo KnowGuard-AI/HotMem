@@ -1,0 +1,139 @@
+{
+  "runs": [
+    {
+      "meta": {
+        "label": "branch"
+      },
+      "rows": [
+        {
+          "bytes": 32186,
+          "embed_calls": 0,
+          "scenario": "delta_produce",
+          "seconds": 0.2013,
+          "size": 1000,
+          "tracemalloc_peak_mb": 1.87
+        },
+        {
+          "bytes": 15,
+          "embed_calls": 0,
+          "scenario": "delta_apply",
+          "seconds": 0.0108,
+          "size": 1000,
+          "tracemalloc_peak_mb": 0.07
+        },
+        {
+          "bytes": 0,
+          "embed_calls": 0,
+          "scenario": "delta_apply_repeat",
+          "seconds": 0.0043,
+          "size": 1000,
+          "tracemalloc_peak_mb": 0.04
+        },
+        {
+          "bytes": 32186,
+          "embed_calls": 0,
+          "scenario": "delta_verify",
+          "seconds": 0.0017,
+          "size": 1000,
+          "tracemalloc_peak_mb": 0.03
+        },
+        {
+          "bytes": 943713,
+          "embed_calls": 0,
+          "scenario": "reclone_fallback_export",
+          "seconds": 0.0867,
+          "size": 1000,
+          "tracemalloc_peak_mb": 1.5
+        },
+        {
+          "bytes": 0,
+          "embed_calls": 0,
+          "scenario": "reclone_fallback_hydrate",
+          "seconds": 0.1353,
+          "size": 1000,
+          "tracemalloc_peak_mb": 4.2
+        },
+        {
+          "bytes": 943713,
+          "embed_calls": 0,
+          "scenario": "clone_initial",
+          "seconds": 0.0802,
+          "size": 1000,
+          "tracemalloc_peak_mb": 1.5
+        },
+        {
+          "bytes": 0,
+          "embed_calls": 0,
+          "scenario": "hydrate_full_clone",
+          "seconds": 0.0501,
+          "size": 1000,
+          "tracemalloc_peak_mb": 2.32
+        },
+        {
+          "bytes": 115935,
+          "embed_calls": 0,
+          "scenario": "delta_produce",
+          "seconds": 0.9519,
+          "size": 5000,
+          "tracemalloc_peak_mb": 5.15
+        },
+        {
+          "bytes": 55,
+          "embed_calls": 0,
+          "scenario": "delta_apply",
+          "seconds": 0.0309,
+          "size": 5000,
+          "tracemalloc_peak_mb": 0.06
+        },
+        {
+          "bytes": 0,
+          "embed_calls": 0,
+          "scenario": "delta_apply_repeat",
+          "seconds": 0.0109,
+          "size": 5000,
+          "tracemalloc_peak_mb": 0.04
+        },
+        {
+          "bytes": 115935,
+          "embed_calls": 0,
+          "scenario": "delta_verify",
+          "seconds": 0.0037,
+          "size": 5000,
+          "tracemalloc_peak_mb": 0.03
+        },
+        {
+          "bytes": 4703560,
+          "embed_calls": 0,
+          "scenario": "reclone_fallback_export",
+          "seconds": 0.3805,
+          "size": 5000,
+          "tracemalloc_peak_mb": 3.31
+        },
+        {
+          "bytes": 0,
+          "embed_calls": 0,
+          "scenario": "reclone_fallback_hydrate",
+          "seconds": 0.6929,
+          "size": 5000,
+          "tracemalloc_peak_mb": 4.22
+        },
+        {
+          "bytes": 4703560,
+          "embed_calls": 0,
+          "scenario": "clone_initial",
+          "seconds": 0.3823,
+          "size": 5000,
+          "tracemalloc_peak_mb": 3.31
+        },
+        {
+          "bytes": 0,
+          "embed_calls": 0,
+          "scenario": "hydrate_full_clone",
+          "seconds": 0.2311,
+          "size": 5000,
+          "tracemalloc_peak_mb": 2.33
+        }
+      ]
+    }
+  ]
+}
