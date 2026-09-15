@@ -125,6 +125,6 @@ def test_migration_adds_events_table(v1_db_path: Path):
         rows = db._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         assert rows == 0
         # user_version bumped to 3.
-        assert db._conn.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db._conn.execute("PRAGMA user_version").fetchone()[0] == 4
     finally:
         db.close()

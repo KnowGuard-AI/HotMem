@@ -1,11 +1,13 @@
-"""hotmem-delta-v1 producer — verified base-to-current state diff (#73).
+"""hotmem-delta-v1 — verified producer and compare-and-swap applier (#73).
 
 Purpose:
-     Produce a deterministic delta package: the verified difference between
-     a base `hotmem-interchange-v1` clone and the source's current canonical
-     state. Every operation is a full-state compare-and-swap upsert
-     (contract: docs/okf/delta-v1.md §4); removals since the base are
-     counted, never applied (§7).
+     Produce and apply deterministic delta packages: the verified difference
+     between a base `hotmem-interchange-v1` clone and the source's current
+     canonical state. Every operation is a full-state compare-and-swap
+     upsert (contract: docs/okf/delta-v1.md §4); removals since the base are
+     counted, never applied (§7). Apply is all-or-nothing: records,
+     checkpoint, and receipt commit in one transaction, and any conflict or
+     integrity failure leaves the target unchanged (§6).
 
      Deterministic: operations sorted by record id, canonical serialization,
      stable op ids (sha256 of record id + resulting fingerprint) — the same
@@ -16,39 +18,47 @@ Purpose:
      producer reads the verified base payload and diffs fingerprints.
 
 Interface:
-      DeltaResult(path, added, changed, removed_since_base, total_ops,
-                  resulting_state_fingerprint)
-      produce_delta(db, base_pkg, out_dir, gz=False) -> DeltaResult
+      DeltaResult / produce_delta(db, base_pkg, out_dir, gz=False)
+      Conflict / DeltaConflictError / ApplyResult / VerifiedDelta
+      verify_delta(delta_dir) -> VerifiedDelta
+      apply_delta(db, delta_dir) -> ApplyResult
 
-Deps: hotmem.db, hotmem.interchange.{canonical,fingerprint,package,record},
-      hotmem.interchange.hydrate (verified base streaming).
-Extension: apply/verify live in apply_delta (same module); the event-based
-      fast path is reserved behind a completeness proof.
+Deps: hotmem.db, hotmem.interchange.{canonical,fingerprint,paths,package,
+      record,compat}, hotmem.interchange.hydrate, hotmem.events, hotmem.swap.
+Extension: the event-based fast path is reserved behind a completeness
+      proof; tombstones/namespace scoping are Proposed (delta-v1 §10).
 """
 
 from __future__ import annotations
 
+import contextlib
+import gzip
 import hashlib
 import json
 import os
 import shutil
+import tempfile
 import uuid
-from dataclasses import dataclass
+import zlib
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from hotmem.db import MemoryDB
+from hotmem.db import _MEMORY_COLUMNS, MemoryDB
 from hotmem.interchange.canonical import canonical_line, sha256_bytes, sha256_file
 from hotmem.interchange.fingerprint import (
     FINGERPRINT_VERSION,
     record_fingerprint,
     state_fingerprint_from_list,
 )
-from hotmem.interchange.hydrate import verify_package
+from hotmem.interchange.hydrate import PackageError, verify_package
 from hotmem.interchange.package import (
     _atomic_publish,  # internal-but-shared atomic publish helper (#69)
     _fsync_dir,
 )
+from hotmem.interchange.paths import confined_relpath
 from hotmem.interchange.record import normalize_record
 from hotmem.trace import Timer, get_tracer
 
@@ -234,3 +244,374 @@ def _hotmem_version() -> str:
         return version("hotmem")
     except PackageNotFoundError:  # pragma: no cover - dev environments
         return "0.0.0.dev0"
+
+
+# ── Verify + apply (#73, delta-v1 §6) ───────────────────────────────────────
+
+
+@dataclass
+class Conflict:
+    """One actionable, non-silent conflict (delta-v1 §7)."""
+
+    reason: str  # base_missing | state_divergence | id_reuse | invalid_record
+    record_id: str | None = None
+    op_id: str | None = None
+    expected: str | None = None
+    actual: str | None = None
+    recovery: str = "re-clone from the source instance (hotmem snapshot --package)"
+
+
+class DeltaConflictError(Exception):
+    """Raised when a delta cannot apply: the target state diverged.
+
+    Carries every conflict found; the target is unchanged (the apply
+    transaction rolled back before this is raised).
+    """
+
+    def __init__(self, conflicts: list[Conflict]) -> None:
+        self.conflicts = conflicts
+        preview = "; ".join(f"{c.reason}:{c.record_id}" for c in conflicts[:3])
+        super().__init__(f"{len(conflicts)} conflict(s) — delta not applied: {preview}")
+
+
+@dataclass
+class ApplyResult:
+    applied: int
+    skipped: int  # already-applied operations (idempotent replay)
+    resulting_state_fingerprint: str | None
+    conflicts: list[Conflict] = field(default_factory=list)
+
+
+@dataclass
+class VerifiedDelta:
+    dir: Path
+    manifest: dict[str, Any]
+    ops_name: str
+    _spool: Path | None = None
+
+    def stream(self) -> Iterator[str]:
+        source = self._spool if self._spool is not None else self.dir / self.ops_name
+        with open(source, encoding="utf-8") as f:
+            yield from f
+
+    def cleanup(self) -> None:
+        if self._spool is not None:
+            with contextlib.suppress(OSError):
+                self._spool.unlink()
+            self._spool = None
+
+
+def _load_delta_manifest(pkg: Path) -> dict[str, Any]:
+    manifest_path = pkg / MANIFEST_NAME
+    if not manifest_path.is_file():
+        raise PackageError("missing_manifest", file=str(manifest_path))
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as err:
+        raise PackageError("malformed_manifest", file=MANIFEST_NAME) from err
+    if not isinstance(manifest, dict):
+        raise PackageError("malformed_manifest", file=MANIFEST_NAME)
+    if manifest.get("format") != FORMAT_ID:
+        raise PackageError(
+            "unsupported_format",
+            file=MANIFEST_NAME,
+            expected=FORMAT_ID,
+            actual=str(manifest.get("format")),
+        )
+    if int(manifest.get("schema_version") or 0) > 1:
+        raise PackageError(
+            "unsupported_schema",
+            file=MANIFEST_NAME,
+            expected="schema_version<=1",
+            actual=str(manifest.get("schema_version")),
+        )
+    if int(manifest.get("fingerprint_version") or 0) != FINGERPRINT_VERSION:
+        raise PackageError(
+            "unsupported_fingerprint",
+            file=MANIFEST_NAME,
+            expected=str(FINGERPRINT_VERSION),
+            actual=str(manifest.get("fingerprint_version")),
+        )
+    return manifest
+
+
+def verify_delta(delta_dir: str | Path) -> VerifiedDelta:
+    """Verify a delta package completely; raise PackageError on any failure.
+
+    Checks manifest format/schema/fingerprint versions, per-file digests
+    (plus the decompressed digest for GZ), operation count against the
+    manifest, operation structure (upsert-only, delta-v1 §7), and manifest
+    path confinement — all before any target write.
+    """
+    pkg = Path(delta_dir)
+    if not pkg.is_dir():
+        raise PackageError("missing_manifest", file=str(pkg / MANIFEST_NAME))
+
+    manifest = _load_delta_manifest(pkg)
+    for rel in manifest.get("files") or {}:
+        if not confined_relpath(pkg, rel):
+            raise PackageError("path_escape", file=rel)
+    files = manifest.get("files") or {}
+    ops_name, entry = next(
+        ((name, files[name]) for name in (OPS_PLAIN, OPS_GZ) if name in files),
+        (None, None),
+    )
+    if ops_name is None:
+        raise PackageError(
+            "missing_payload", file=MANIFEST_NAME, expected=f"{OPS_PLAIN} or {OPS_GZ}"
+        )
+
+    ops_path = pkg / ops_name
+    if not ops_path.is_file():
+        raise PackageError("missing_file", file=ops_name)
+    actual_size = ops_path.stat().st_size
+    if actual_size != entry.get("size"):
+        raise PackageError(
+            "size_mismatch",
+            file=ops_name,
+            expected=str(entry.get("size")),
+            actual=str(actual_size),
+        )
+
+    spool: Path | None = None
+    op_count = 0
+    try:
+        if ops_name == OPS_GZ:
+            expected_decompressed = entry.get("decompressed_sha256")
+            if not expected_decompressed:
+                raise PackageError("missing_decompressed_digest", file=ops_name)
+            decompressed_sha = hashlib.sha256()
+            fd, spool_name = tempfile.mkstemp(prefix="hotmem-delta-", suffix=".jsonl")
+            spool = Path(spool_name)
+            try:
+                with (
+                    open(ops_path, "rb") as raw,
+                    os.fdopen(fd, "wb") as out,
+                    gzip.GzipFile(fileobj=raw, mode="rb") as gz,
+                ):
+                    while chunk := gz.read(64 * 1024):
+                        decompressed_sha.update(chunk)
+                        out.write(chunk)
+            except (OSError, EOFError, zlib.error) as err:
+                raise PackageError("corrupt_compression", file=ops_name, actual=str(err)) from err
+            if decompressed_sha.hexdigest() != expected_decompressed:
+                raise PackageError(
+                    "decompressed_digest_mismatch",
+                    file=ops_name,
+                    expected=expected_decompressed,
+                    actual=decompressed_sha.hexdigest(),
+                )
+            stream: Path = spool
+        else:
+            ops_sha = hashlib.sha256()
+            with open(ops_path, "rb") as f:
+                for line in f:
+                    ops_sha.update(line)
+            if ops_sha.hexdigest() != entry.get("sha256"):
+                raise PackageError(
+                    "digest_mismatch",
+                    file=ops_name,
+                    expected=str(entry.get("sha256")),
+                    actual=ops_sha.hexdigest(),
+                )
+            stream = ops_path
+
+        with open(stream, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                op_count += 1
+                try:
+                    op = json.loads(line)
+                except json.JSONDecodeError as err:
+                    raise PackageError("malformed_operation", file=ops_name) from err
+                if not isinstance(op, dict) or op.get("op") != "upsert":
+                    raise PackageError(
+                        "unsupported_operation",
+                        file=ops_name,
+                        expected="upsert",
+                        actual=str(op.get("op") if isinstance(op, dict) else op),
+                    )
+                for required in ("op_id", "record_id", "record", "resulting_fingerprint"):
+                    if not op.get(required):
+                        raise PackageError(
+                            "malformed_operation",
+                            file=ops_name,
+                            expected=required,
+                            actual="missing",
+                        )
+
+        expected_count = int((manifest.get("counts") or {}).get("total_ops") or 0)
+        if op_count != expected_count:
+            raise PackageError(
+                "record_count_mismatch",
+                file=ops_name,
+                expected=str(expected_count),
+                actual=str(op_count),
+            )
+    except PackageError:
+        if spool is not None:
+            spool.unlink(missing_ok=True)
+        raise
+    except OSError as err:
+        if spool is not None:
+            spool.unlink(missing_ok=True)
+        raise PackageError("io_error", file=ops_name, actual=str(err)) from err
+
+    return VerifiedDelta(dir=pkg, manifest=manifest, ops_name=ops_name, _spool=spool)
+
+
+def apply_delta(db: MemoryDB, delta_dir: str | Path) -> ApplyResult:
+    """Verify, then apply a delta atomically with compare-and-swap semantics.
+
+    Per operation (delta-v1 §6): the receiver's current record fingerprint
+    must equal the operation's expected pre-image (write), or already equal
+    the resulting fingerprint (skip — idempotent replay); anything else is a
+    conflict. Conflicts abort the WHOLE delta: the transaction rolls back
+    and the target, checkpoint, and receipt are unchanged.
+
+    Records + checkpoint + sync.applied receipt commit in one transaction.
+    Compatible stored embeddings are reused; incompatible ones re-embed from
+    text; records without usable text are reported as invalid_record
+    conflicts and never stored.
+    """
+    from hotmem.events import EventType, append_event
+    from hotmem.interchange.compat import resolve_embedding
+    from hotmem.interchange.record import normalize_record, validate_record
+    from hotmem.swap import record_to_memory_record
+
+    delta_dir = Path(delta_dir)
+    with Timer() as t:
+        verified = verify_delta(delta_dir)
+        manifest = verified.manifest
+        ops_entry = (manifest.get("files") or {}).get(verified.ops_name) or {}
+
+        conflicts: list[Conflict] = []
+        applied = 0
+        skipped = 0
+        receiver_was_empty = db.count() == 0
+
+        try:
+            for line in verified.stream():
+                line = line.strip()
+                if not line:
+                    continue
+                op = json.loads(line)
+                record_id = op["record_id"]
+                expected = op.get("expected_pre_fingerprint")
+                resulting_fp = op["resulting_fingerprint"]
+
+                current = db.get_memory(record_id)
+                current_fp = record_fingerprint(current) if current is not None else None
+
+                if current is None:
+                    if expected is not None:
+                        conflicts.append(
+                            Conflict(
+                                reason="base_missing" if receiver_was_empty else "state_divergence",
+                                record_id=record_id,
+                                op_id=op.get("op_id"),
+                                expected=expected,
+                                actual=None,
+                            )
+                        )
+                        continue
+                elif current_fp == resulting_fp:
+                    skipped += 1
+                    continue  # already applied — idempotent replay (delta-v1 §6.3)
+                elif expected is not None and current_fp == expected:
+                    pass  # pre-image matches: apply
+                elif expected is None:
+                    conflicts.append(
+                        Conflict(
+                            reason="id_reuse",
+                            record_id=record_id,
+                            op_id=op.get("op_id"),
+                            expected=None,
+                            actual=current_fp,
+                        )
+                    )
+                    continue
+                else:
+                    conflicts.append(
+                        Conflict(
+                            reason="state_divergence",
+                            record_id=record_id,
+                            op_id=op.get("op_id"),
+                            expected=expected,
+                            actual=current_fp,
+                        )
+                    )
+                    continue
+
+                rec = normalize_record(op["record"], default_source="delta")
+                issues = validate_record(rec)
+                if issues:
+                    conflicts.append(
+                        Conflict(
+                            reason="invalid_record",
+                            record_id=record_id,
+                            op_id=op.get("op_id"),
+                            actual="; ".join(issues),
+                        )
+                    )
+                    continue
+                blob, model, dim, _reused = resolve_embedding(rec)
+                memory = record_to_memory_record(
+                    rec, blob, embedding_model=model, embedding_dim=dim
+                )
+                db.insert(**{c: getattr(memory, c) for c in _MEMORY_COLUMNS}, _commit=False)
+                applied += 1
+
+            if conflicts:
+                raise DeltaConflictError(conflicts)
+
+            base_logical_id = (manifest.get("base") or {}).get("logical_id") or ""
+            delta_digest = str(ops_entry.get("sha256") or "")
+            resulting = manifest.get("resulting_state_fingerprint")
+            db.record_sync_checkpoint(
+                base_logical_id=base_logical_id,
+                delta_digest=delta_digest,
+                applied_ops=applied,
+                resulting_state_fingerprint=resulting,
+                applied_at=_utc_now_iso(),
+                _commit=False,
+            )
+            append_event(
+                db,
+                event_type=EventType.SYNC_APPLIED,
+                namespace="sync",
+                payload={
+                    "base_logical_id": base_logical_id,
+                    "delta_digest": delta_digest,
+                    "applied": applied,
+                    "skipped": skipped,
+                    "resulting_state_fingerprint": resulting,
+                },
+                _commit=False,
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            verified.cleanup()
+
+    result = ApplyResult(
+        applied=applied,
+        skipped=skipped,
+        resulting_state_fingerprint=manifest.get("resulting_state_fingerprint"),
+        conflicts=conflicts,
+    )
+    _trace.info(
+        "delta_apply",
+        f"applied {applied}, skipped {skipped}, conflicts {len(conflicts)}",
+        detail={"path": str(delta_dir), "ms": round(t.ms, 2)},
+    )
+    return result
+
+
+def _utc_now_iso() -> str:
+    import datetime as _dt
+
+    return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -267,9 +267,9 @@ def test_migration_adds_events_table(tmp_path: Path):
         assert listing["next_seq"] is None
         # Existing memories count is unaffected.
         assert db.count() == 0
-        # user_version bumped to 3.
+        # user_version bumped to 3 (events), then to 4 (#73 sync checkpoints).
         version = db._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == 4
     finally:
         db.close()
 
@@ -280,11 +280,11 @@ def test_migration_is_idempotent_for_events(tmp_path: Path):
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
-    # Opening again must not error and must keep user_version at 3.
+    # Opening again must not error and must keep user_version at 4.
     db = MemoryDB(db_path)
     try:
         version = db._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 3
+        assert version == 4
     finally:
         db.close()
 

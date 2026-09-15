@@ -63,6 +63,7 @@ class EventType:
     HYGIENE_CHECKED = "hygiene.checked"
     HYGIENE_WARNING = "hygiene.warning"
     INDEX_REBUILT = "index.rebuilt"
+    SYNC_APPLIED = "sync.applied"
 
 
 def _utc_now_iso() -> str:

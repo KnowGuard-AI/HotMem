@@ -341,6 +341,24 @@ class MemoryDB:
             self._conn.commit()
             _trace.info("migrate", "events table available; user_version=3")
 
+        # #73: sync checkpoints — one row per applied delta, committed in the
+        # same transaction as the delta's record writes so a rolled-back
+        # apply never advances the replay checkpoint.
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS sync_checkpoints (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               base_logical_id TEXT NOT NULL,
+               delta_digest TEXT NOT NULL,
+               applied_ops INTEGER NOT NULL,
+               resulting_state_fingerprint TEXT,
+               applied_at TEXT NOT NULL
+           )"""
+        )
+        if current_version < 4:
+            self._conn.execute("PRAGMA user_version = 4")
+            self._conn.commit()
+            _trace.info("migrate", "sync checkpoints available; user_version=4")
+
         try:
             self._conn.execute(
                 """CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash_unique
@@ -387,8 +405,13 @@ class MemoryDB:
         schema_version: int = 1,
         fact_summary: str | None = None,
         provenance_json: str | None = None,
+        _commit: bool = True,
     ) -> None:
-        """Insert a memory row."""
+        """Insert a memory row.
+
+        ``_commit=False`` lets a caller batch the insert into a wider
+        transaction (e.g. the all-or-nothing delta apply, #73).
+        """
         values = {
             "id": id,
             "identifier": identifier,
@@ -425,7 +448,8 @@ class MemoryDB:
             _INSERT_OR_REPLACE_SQL,
             tuple(values[c] for c in _MEMORY_COLUMNS),
         )
-        self._conn.commit()
+        if _commit:
+            self._conn.commit()
         _trace.debug("insert", f"stored memory {id[:8]}…", detail={"identifier": identifier})
 
     def insert_file_backed(
@@ -961,6 +985,42 @@ class MemoryDB:
             "SELECT content_hash FROM memories WHERE content_hash != ''"
         ).fetchall()
         return {row["content_hash"] for row in rows}
+
+    def record_sync_checkpoint(
+        self,
+        *,
+        base_logical_id: str,
+        delta_digest: str,
+        applied_ops: int,
+        resulting_state_fingerprint: str | None,
+        applied_at: str,
+        _commit: bool = True,
+    ) -> None:
+        """Persist one applied-delta checkpoint (#73).
+
+        ``_commit=False`` commits together with the delta's record writes so
+        the checkpoint and canonical state advance atomically.
+        """
+        self._conn.execute(
+            """INSERT INTO sync_checkpoints
+               (base_logical_id, delta_digest, applied_ops,
+                resulting_state_fingerprint, applied_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (base_logical_id, delta_digest, applied_ops, resulting_state_fingerprint, applied_at),
+        )
+        if _commit:
+            self._conn.commit()
+
+    def latest_sync_checkpoint(self, base_logical_id: str) -> dict[str, Any] | None:
+        """Return the most recent checkpoint for a base package, if any."""
+        row = self._conn.execute(
+            """SELECT base_logical_id, delta_digest, applied_ops,
+                      resulting_state_fingerprint, applied_at
+               FROM sync_checkpoints WHERE base_logical_id = ?
+               ORDER BY id DESC LIMIT 1""",
+            (base_logical_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
 
     def batch_existing_hashes(self, hashes: list[str]) -> set[str]:
         """Return the subset of ``hashes`` already stored (chunked SELECT).
