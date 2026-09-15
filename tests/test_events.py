@@ -510,3 +510,88 @@ def test_trim_events_by_count_zero_clears(tmp_db: MemoryDB):
 def test_trim_events_by_count_negative_rejected(tmp_db: MemoryDB):
     with pytest.raises(ValueError):
         tmp_db.trim_events_by_count(keep=-1)
+
+
+# ── replay correctness (#73) ────────────────────────────────────────────────
+
+
+def _seed_created_events(db, n: int) -> list[dict]:
+    """Append n memory.created events with distinct ids; return the events."""
+    from hotmem.events import EventType, append_event
+
+    events = []
+    for i in range(n):
+        events.append(
+            append_event(
+                db,
+                event_type=EventType.MEMORY_CREATED,
+                memory_id=f"r{i}",
+                namespace="replay",
+                payload={
+                    "id": f"r{i}",
+                    "identifier": f"ident-{i}",
+                    "fact_text": f"fact {i}",
+                    "content_hash": f"hash-{i}",
+                },
+            )
+        )
+    return events
+
+
+def test_replay_respects_after_seq_cursor(tmp_db):
+    """Regression (#73): replay(after_seq=N) previously restarted at seq 0."""
+    from hotmem.events import replay
+
+    events = _seed_created_events(tmp_db, 5)
+    yielded = [e["seq"] for e in replay(tmp_db, after_seq=events[1]["seq"])]
+    assert yielded == [events[2]["seq"], events[3]["seq"], events[4]["seq"]]
+
+
+def test_replay_into_reports_applied_not_attempted(tmp_db, tmp_path):
+    """A record already present in the target is skipped and not counted."""
+    from hotmem.db import MemoryDB, MemoryRecord
+    from hotmem.embed import embed_text, pack_embedding
+    from hotmem.events import replay_into
+
+    source = MemoryDB(tmp_path / "src.sqlite")
+    _seed_created_events(source, 3)
+
+    target = MemoryDB(tmp_path / "dst.sqlite")
+    # Pre-insert one duplicate content_hash: content hash is "hash-1".
+    target.insert_many_ignore(
+        [
+            MemoryRecord(
+                id="different-id",
+                identifier="ident-1",
+                fact_text="fact 1",
+                embedding=pack_embedding(embed_text("fact 1")),
+                content_hash="hash-1",
+            )
+        ]
+    )
+
+    applied = replay_into(source, target)
+    assert applied == 2  # hash-1 skipped, two others applied
+    assert target.count() == 3
+
+
+def test_replay_into_batches_inserts(tmp_db, tmp_path, monkeypatch):
+    from hotmem.db import MemoryDB
+    from hotmem.events import replay_into
+
+    source = MemoryDB(tmp_db)
+    _seed_created_events(source, 5)
+
+    calls: list[int] = []
+    original = MemoryDB.insert_many_ignore
+
+    def spy(self, records, **kwargs):
+        materialized = list(records)
+        calls.append(len(materialized))
+        return original(self, materialized, **kwargs)
+
+    monkeypatch.setattr(MemoryDB, "insert_many_ignore", spy)
+
+    target = MemoryDB(tmp_path / "t.sqlite")
+    replay_into(source, target)
+    assert calls and all(c <= 1000 for c in calls)

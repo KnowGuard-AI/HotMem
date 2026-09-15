@@ -193,11 +193,16 @@ def query_events(
 def replay(db: MemoryDB, *, after_seq: int = 0) -> Iterator[dict[str, Any]]:
     """Stream events from the log as an iterator (constant memory).
 
-    Yields event dicts in seq order, starting after ``after_seq``. The caller
-    can reconstruct memory state by replaying ``memory.created`` events:
-    each payload carries the full row snapshot (via _build_memory_created_payload).
+    Yields event dicts in seq order, starting strictly after ``after_seq``.
+    The caller can reconstruct memory state by replaying ``memory.created``
+    events: each payload carries the full row snapshot (via
+    _build_memory_created_payload).
+
+    Note: only server ``/v1/add`` ingestion emits ``memory.created`` events
+    today — imported/hydrated state has no per-record events. Replay is an
+    audit/repair surface, not a proven replication log (#73).
     """
-    cursor = 0
+    cursor = after_seq
     while True:
         result = query_events(db, after_seq=cursor, limit=500, ascending=True)
         events = result["events"]
@@ -209,18 +214,25 @@ def replay(db: MemoryDB, *, after_seq: int = 0) -> Iterator[dict[str, Any]]:
             break
 
 
+_REPLAY_BATCH = 1000
+
+
 def replay_into(db: MemoryDB, target_db: MemoryDB) -> int:
     """Reconstruct memory state from the event log into ``target_db``.
 
-    Replays all ``memory.created`` events and inserts them via
-    ``insert_many_ignore``. Returns the number of memories reconstructed.
+    Replays ``memory.created`` events and inserts them via bounded
+    ``insert_many_ignore`` batches (no per-record commits). Returns the
+    number of records actually applied — records whose ``content_hash``
+    already exists in the target are skipped and NOT counted (#73):
+    the return value is truthful applied work, not attempted work.
     Non-``memory.created`` events are skipped (they don't carry full rows).
     """
     import base64
 
     from hotmem.db import MemoryRecord
 
-    count = 0
+    applied = 0
+    pending: list[MemoryRecord] = []
     for event in replay(db):
         if event["event_type"] != EventType.MEMORY_CREATED:
             continue
@@ -256,9 +268,13 @@ def replay_into(db: MemoryDB, target_db: MemoryDB) -> int:
             provenance_json=p.get("provenance_json"),
             snapshot_id=p.get("snapshot_id") or "",
         )
-        target_db.insert_many_ignore([record])
-        count += 1
-    return count
+        pending.append(record)
+        if len(pending) >= _REPLAY_BATCH:
+            applied += target_db.insert_many_ignore(pending)
+            pending.clear()
+    if pending:
+        applied += target_db.insert_many_ignore(pending)
+    return applied
 
 
 def _row_to_event(row: dict[str, Any]) -> dict[str, Any]:
