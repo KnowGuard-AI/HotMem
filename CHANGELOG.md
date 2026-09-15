@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — portable embedding descriptor contract (#78)
+- `hotmem.embed` now defines the minimal `Embedder` protocol, the immutable
+  `EmbeddingDescriptor` (implementation, model, revision, dimension,
+  normalization, metric, preprocessing), and `HashEmbedder` — the exact
+  `hotmem-hash-v1` default, unchanged. The descriptor's canonical key is
+  persisted as the record `embedding_model` value (the hash key stays
+  `hotmem-hash-v1`: zero migration, existing packages valid), and
+  interchange-v1 §5 compatibility is now descriptor-based: equal dimension
+  alone never establishes compatibility, absent legacy fields keep hash
+  semantics, and blobs are validated for length, finite values, and
+  normalization policy. `resolve_embedding` reports four statuses —
+  reused/rebuilt/missing/failed — with rebuilds stamped by the active
+  descriptor and provider failures preserving the canonical record.
+
 ### Changed — reconciled #80 duplicate-slot gate denominator (#77/#80)
 - The #77 guide read the 48-query aggregate duplicate-slot rate (7.5%) while
   the `near_duplicate_diversity` category — where the near-duplicates
