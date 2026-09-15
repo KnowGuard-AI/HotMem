@@ -29,6 +29,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
 
+from hotmem.annotations import AnnotationValidationError, validate_metadata
 from hotmem.db import MemoryDB
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.events import EventType, append_event, emit_import_event, query_events
@@ -362,6 +363,15 @@ def create_app(
         db: MemoryDB = _state["db"]
         base_dir: str = _state["base_dir"]
         embedder: Embedder = _state["embedder"]
+        # #79: the reserved annotations envelope is validated at ingestion
+        # with an actionable error — never silently stored malformed.
+        try:
+            validate_metadata(req.metadata)
+        except AnnotationValidationError as err:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "invalid_annotations", "message": str(err)},
+            )
         with Timer() as t:
             if req.file_uri is not None:
                 # File-backed path: store a reference, zero bytes copied.
@@ -659,6 +669,9 @@ def create_app(
             "embedding_rebuilt": result.embedding_rebuilt,
             "embedding_missing": result.embedding_missing,
             "embedding_failed": result.embedding_failed,
+            # Annotation merge disposition (issue #79; additive).
+            "annotations_merged": result.annotations_merged,
+            "annotation_conflicts": result.annotation_conflicts,
         }
 
     @app.post("/v1/snapshot")

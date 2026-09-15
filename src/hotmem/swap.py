@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
 
+from hotmem.annotations import AnnotationValidationError, merge_duplicate_annotations
 from hotmem.db import MemoryDB, MemoryRecord
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.interchange.canonical import compute_content_hash
@@ -59,6 +60,9 @@ class HydrateResult:
     embedding_rebuilt: int = 0
     embedding_missing: int = 0
     embedding_failed: int = 0
+    # Annotation merge disposition (issue #79; additive — defaults 0).
+    annotations_merged: int = 0
+    annotation_conflicts: int = 0
 
 
 @dataclass
@@ -171,10 +175,20 @@ def _flush_batch(
     races. loaded/skipped plus the four embedding-status counters
     (reused/rebuilt/missing/failed, issue #78) live in ``counters``.
     ``embedder`` owns rebuilds (``None`` = the call-time hash default).
+    Annotation-only changes on content-hash duplicates merge in-batch (#79):
+    disjoint items combine, conflicts are retained — never last-write-wins.
     """
     existing = db.batch_existing_hashes([r["content_hash"] for r in pending])
     todo = [r for r in pending if r["content_hash"] not in existing]
     counters["skipped"] += len(pending) - len(todo)
+
+    if any(
+        isinstance(r.get("metadata"), dict) and "annotations" in (r["metadata"] or {})
+        for r in pending
+    ):
+        merge_duplicate_annotations(
+            db, [r for r in pending if r["content_hash"] in existing], counters
+        )
 
     records: list[MemoryRecord] = []
     for rec in todo:
@@ -230,6 +244,8 @@ def hydrate(
             "embedding_rebuilt": 0,
             "embedding_missing": 0,
             "embedding_failed": 0,
+            "annotations_merged": 0,
+            "annotation_conflicts": 0,
         }
         pending: list[dict] = []
         batch_seen: set[str] = set()
@@ -258,7 +274,16 @@ def hydrate(
                     if not isinstance(record, dict):
                         counters["invalid"] += 1
                         continue
-                    rec = normalize_record(record)
+                    try:
+                        rec = normalize_record(record)
+                    except AnnotationValidationError as err:
+                        counters["invalid"] += 1  # malformed envelope: skip record (#79)
+                        _trace.debug(
+                            "hydrate",
+                            "skipping record with malformed annotations",
+                            detail={"error": str(err)},
+                        )
+                        continue
                     if validate_record(rec):
                         counters["invalid"] += 1
                         continue
@@ -298,6 +323,8 @@ def hydrate(
         embedding_rebuilt=counters["embedding_rebuilt"],
         embedding_missing=counters["embedding_missing"],
         embedding_failed=counters["embedding_failed"],
+        annotations_merged=counters.get("annotations_merged", 0),
+        annotation_conflicts=counters.get("annotation_conflicts", 0),
     )
 
 

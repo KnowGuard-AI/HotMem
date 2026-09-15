@@ -20,6 +20,7 @@ Extension: add indexes, FTS5, or WAL mode tuning here.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import sqlite3
@@ -891,6 +892,47 @@ class MemoryDB:
         """Return total number of stored memories."""
         row = self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()
         return row[0]
+
+    def all_ids(self) -> list[str]:
+        """All memory ids (annotation evidence resolution, #79)."""
+        return [r[0] for r in self._conn.execute("SELECT id FROM memories").fetchall()]
+
+    def fetch_metadata_by_hashes(self, content_hashes: list[str]) -> dict[str, dict[str, Any]]:
+        """Fetch id + parsed metadata for rows matching content hashes (#79).
+
+        ONE chunked query — used by the annotation merge path to compare
+        incoming envelopes against stored records without re-reading rows.
+        Returns ``{content_hash: {"id": ..., "metadata": dict}}``.
+        """
+        out: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(content_hashes), _SEARCH_BIND_CHUNK):
+            chunk = content_hashes[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"""SELECT content_hash, id, metadata_json
+                    FROM memories
+                    WHERE content_hash IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                except json.JSONDecodeError:
+                    metadata = {}
+                out[str(row["content_hash"])] = {"id": row["id"], "metadata": metadata}
+        return out
+
+    def update_metadata_json(
+        self, memory_id: str, metadata_json: str, *, commit: bool = True
+    ) -> bool:
+        """Update a row's metadata_json in the open transaction (#79 merge)."""
+        cursor = self._conn.execute(
+            "UPDATE memories SET metadata_json = ? WHERE id = ?",
+            (metadata_json, memory_id),
+        )
+        if commit:
+            self._conn.commit()
+        return cursor.rowcount > 0
 
     def fetch_embedding_blobs(
         self,

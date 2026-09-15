@@ -28,6 +28,7 @@ import json
 import uuid
 from typing import Any
 
+from hotmem.annotations import validate_metadata
 from hotmem.interchange.canonical import compute_content_hash
 
 # Every key any writer dialect has ever emitted. Anything else is an unknown
@@ -115,6 +116,12 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
     ``metadata``/``provenance``/``tags``/``related_memories`` are objects or
     lists, and unknown top-level keys are merged into
     ``metadata["_interchange_unknown"]``.
+
+    The reserved ``metadata.annotations`` envelope (#79) is structurally
+    validated here: malformed known structure raises
+    ``AnnotationValidationError`` (callers count the record invalid); local
+    evidence references are checked structurally — full resolution against
+    a package/target id set happens in the hydrate paths.
     """
     if not isinstance(raw, dict):
         raise TypeError(f"record must be a JSON object, got {type(raw).__name__}")
@@ -140,6 +147,8 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
         if not isinstance(preserved, dict):
             preserved = {}
         metadata = {**metadata, _UNKNOWN_KEY: {**preserved, **unknown}}
+
+    validate_metadata(metadata)  # structural envelope check (#79)
 
     provenance = raw.get("provenance", raw.get("provenance_json"))
     if provenance is not None:

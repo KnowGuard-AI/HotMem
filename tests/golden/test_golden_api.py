@@ -181,6 +181,9 @@ def test_hydrate_response_shape(client, tmp_path):
             "embedding_rebuilt",
             "embedding_missing",
             "embedding_failed",
+            # Annotation merge disposition (issue #79) — additive.
+            "annotations_merged",
+            "annotation_conflicts",
         },
         "POST /v1/hydrate",
     )
@@ -193,6 +196,8 @@ def test_hydrate_response_shape(client, tmp_path):
         "embedding_rebuilt": "<int>",
         "embedding_missing": "<int>",
         "embedding_failed": "<int>",
+        "annotations_merged": "<int>",
+        "annotation_conflicts": "<int>",
     }
     # A text-only legacy record without a stored vector is embedded fresh.
     assert body["embedding_rebuilt"] == 1

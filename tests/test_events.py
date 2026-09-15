@@ -224,6 +224,8 @@ def test_regression_hydrate_response_unchanged(client: TestClient, tmp_path: Pat
         "embedding_rebuilt",
         "embedding_missing",
         "embedding_failed",
+        "annotations_merged",
+        "annotation_conflicts",
     }
 
 

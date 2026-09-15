@@ -243,6 +243,9 @@ def test_sync_client_return_shapes(tmp_path):
                 "embedding_rebuilt",
                 "embedding_missing",
                 "embedding_failed",
+                # Annotation merge disposition (issue #79) — additive.
+                "annotations_merged",
+                "annotation_conflicts",
             },
             "client.hydrate()",
         )
