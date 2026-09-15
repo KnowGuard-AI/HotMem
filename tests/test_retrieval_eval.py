@@ -292,8 +292,10 @@ def test_committed_fixture_files_are_byte_stable(tmp_path: Path):
     }
     import subprocess
 
+    repo_root = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        ["uv", "run", "python", "bench/retrieval/gen_fixtures.py"],
+        [sys.executable, str(repo_root / "bench" / "retrieval" / "gen_fixtures.py")],
+        cwd=repo_root,
         capture_output=True,
         text=True,
     )

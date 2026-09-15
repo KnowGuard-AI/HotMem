@@ -579,7 +579,7 @@ def test_replay_into_batches_inserts(tmp_db, tmp_path, monkeypatch):
     from hotmem.db import MemoryDB
     from hotmem.events import replay_into
 
-    source = MemoryDB(tmp_db)
+    source = MemoryDB(tmp_path / "src.sqlite")
     _seed_created_events(source, 5)
 
     calls: list[int] = []
@@ -669,7 +669,7 @@ def test_import_ingestion_emits_no_per_record_events(tmp_db, tmp_path: Path):
     from hotmem.events import query_events, replay_into
     from hotmem.swap import hydrate
 
-    source = MemoryDB(tmp_db)
+    source = MemoryDB(tmp_path / "src.sqlite")
     swap_file = tmp_path / "in.jsonl"
     with open(swap_file, "w") as f:
         f.write('{"identifier": "a", "fact_text": "fact a"}\n')
