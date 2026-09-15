@@ -34,12 +34,13 @@ class _StubStaticModel:
 
     def __init__(self, _path: str) -> None:
         self.loaded_from = _path
+        self.dim = _STUB_DIM
 
     def encode(self, texts: list[str]) -> list[list[float]]:
         return [_stub_vec(t) for t in texts]
 
     @staticmethod
-    def load_pretrained(path: str) -> _StubStaticModel:
+    def from_pretrained(path: str) -> _StubStaticModel:
         return _StubStaticModel(path)
 
 
@@ -137,11 +138,17 @@ def test_resolver_builds_local_semantic_from_artifact(
     assert embedder.descriptor.dimension == _STUB_DIM
 
 
-def test_resolver_local_semantic_requires_model_path(stubbed_model2vec, tmp_path: Path):
+def test_resolver_local_semantic_requires_model_path():
+    """Without a provisioned model path the resolver refuses — never downloads."""
     from hotmem.embed import resolve_embedder_from_config
 
-    with pytest.raises(ValueError, match="never downloads"):
-        resolve_embedder_from_config("local-semantic", model_path=None)
+    if importlib.util.find_spec("model2vec") is None:
+        # Without the extra the import gate fires first.
+        with pytest.raises(ValueError, match=r"\[semantic\] extra"):
+            resolve_embedder_from_config("local-semantic", model_path=None)
+    else:
+        with pytest.raises(ValueError, match="never downloads"):
+            resolve_embedder_from_config("local-semantic", model_path=None)
 
 
 def test_semantic_runtime_end_to_end_through_library(

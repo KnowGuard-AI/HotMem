@@ -449,6 +449,61 @@ def test_recommendation_reports_both_duplicate_denominators(tmp_path: Path):
     assert measured["near_duplicate_diversity_duplicate_slot_rate"] == pytest.approx(0.300)
 
 
+def test_semantic_report_key_numbers_pinned():
+    """#78 evidence: the committed semantic report's headline numbers.
+
+    Hand-checked from the potion-base-8M run: the 66.7pp semantic gap
+    closed at zero lexical cost (<=5pp allowance), clone equivalence holds
+    under the semantic space, and the #80 gate metric (diversity
+    duplicate-slot rate) is 0.400. baseline.json stays untouched — this is
+    a separate report, never an overwrite of default-behavior evidence.
+    """
+    report = json.loads((FIXTURE_DIR / "semantic-local-m2v.json").read_text())
+    assert report["runtime"]["embedding_model"] == (
+        "local-m2v/potion-base-8M/rev:v1/norm:l2/pp:m2v-static-v1"
+    )
+    assert report["runtime"]["embedding_dim"] == 256
+    assert report["categories"]["semantic_paraphrase"]["recall_at_5"]["mean"] == pytest.approx(1.0)
+    assert report["categories"]["exact_lexical"]["recall_at_5"]["mean"] == pytest.approx(1.0)
+    assert report["overall"]["recall_at_5"]["mean"] == pytest.approx(1.0)
+    assert report["clone_equivalence"]["clone_equivalence_rate"] == pytest.approx(1.0)
+    diversity = report["categories"]["near_duplicate_diversity"]["duplicate_slot_rate"]["mean"]
+    assert diversity == pytest.approx(0.400)
+    assert report["recommendation"]["action"] == "pursue_reranking_hook_80"
+
+
+def test_run_eval_threads_injected_embedder(tmp_path: Path):
+    """run_eval(embedder=...) runs the whole pipeline in the injected space."""
+
+    class FakeEmbedder:
+        @property
+        def descriptor(self):
+            from hotmem.embed import EmbeddingDescriptor
+
+            return EmbeddingDescriptor(
+                implementation="test", model="fake", dimension=64, preprocessing="pp1"
+            )
+
+        def embed(self, text: str):
+            return retrieval_eval_if_needed().embed_text(text)
+
+    def retrieval_eval_if_needed():
+        import hotmem.embed as embed_mod
+
+        return embed_mod
+
+    doc = retrieval_eval.run_eval(
+        FIXTURE_DIR / "corpus.jsonl",
+        FIXTURE_DIR / "queries.jsonl",
+        work_dir=tmp_path,
+        embedder=FakeEmbedder(),
+    )
+    assert doc["runtime"]["embedding_model"] == "test/fake/norm:l2/pp:pp1"
+    assert doc["runtime"]["embedding_dim"] == 64
+    # The pipeline completed end to end under the injected descriptor.
+    assert doc["counts"]["ingested"] == doc["counts"]["corpus"]
+
+
 def test_reranking_gate_falls_back_to_aggregate_without_diversity_category():
     """Corpora without the diversity category: the aggregate governs #80."""
 

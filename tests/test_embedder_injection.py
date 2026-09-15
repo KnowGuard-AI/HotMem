@@ -8,6 +8,7 @@ the four embedding-disposition statuses.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import random
@@ -418,9 +419,14 @@ def test_config_resolution_rejects_unknown_with_choices():
 def test_config_resolution_semantic_requires_extra_or_model_path():
     from hotmem.embed import resolve_embedder_from_config
 
-    # Without the [semantic] extra (this test env): actionable install hint.
-    with pytest.raises(ValueError, match=r"\[semantic\] extra"):
-        resolve_embedder_from_config("local-semantic")
+    # Without the extra: actionable install hint. With it installed but no
+    # provisioned model path: an equally actionable no-download refusal.
+    if importlib.util.find_spec("model2vec") is None:
+        with pytest.raises(ValueError, match=r"\[semantic\] extra"):
+            resolve_embedder_from_config("local-semantic")
+    else:
+        with pytest.raises(ValueError, match="never downloads"):
+            resolve_embedder_from_config("local-semantic")
 
 
 def test_server_embedder_injection_end_to_end(tmp_path: Path):
@@ -511,9 +517,11 @@ def test_cli_embedder_flags_fail_fast(tmp_path: Path):
         main, ["serve", "--db", str(tmp_path / "x.sqlite"), "--embedder", "bogus"]
     )
     assert result.exit_code != 0
-    # local-semantic without the [semantic] extra resolves to an actionable error.
+    # local-semantic without a provisioned model resolves to an actionable
+    # error either way: the extra is missing, or no model path was given.
     result = runner.invoke(
         main, ["serve", "--db", str(tmp_path / "x.sqlite"), "--embedder", "local-semantic"]
     )
     assert result.exit_code != 0
-    assert "[semantic]" in (result.output + str(result.exception or ""))
+    message = result.output + str(result.exception or "")
+    assert "[semantic]" in message or "never downloads" in message

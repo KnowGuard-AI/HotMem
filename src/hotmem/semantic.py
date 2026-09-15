@@ -87,9 +87,10 @@ class LocalSemanticEmbedder:
                 f"'preprocessing' optional (got model={model_name!r}, revision={revision!r})"
             )
 
-        self._model = m2v.StaticModel.load_pretrained(str(path))
-        probe = self._model.encode(["dimension probe"])
-        dimension = len(probe[0])
+        # A local directory loads from disk; the path was validated above, and
+        # no hub name is ever constructed from user input.
+        self._model = m2v.StaticModel.from_pretrained(str(path))
+        dimension = int(self._model.dim)
         if dimension <= 0:
             raise ValueError(f"local-semantic model produced an empty vector (dim {dimension})")
 
