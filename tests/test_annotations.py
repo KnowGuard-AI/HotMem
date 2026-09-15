@@ -469,3 +469,53 @@ def test_server_add_validates_envelope_with_actionable_error(tmp_path: Path):
         assert good.status_code == 200
         row = MemoryDB(tmp_path / "server.sqlite").all_rows()[0]
         assert json.loads(row["metadata_json"])["annotations"]["schema_version"] == 1
+
+
+# ── committed mapping fixture (#79 reference) ────────────────────────────────
+
+
+def test_committed_mapping_fixture_is_valid_and_round_trips(tmp_path: Path):
+    """The synthetic reference mapping (annotations-v1.md): no vendor
+    runtime, no network — validates, hydrates, and survives movement."""
+    fixture_path = Path(__file__).resolve().parents[1] / "bench" / "annotations"
+    fixture = json.loads((fixture_path / "mapping-fixture.json").read_text())
+    # Local evidence references the two canonical records seeded below.
+    validate_annotations(fixture, known_ids={"mem-vendor-x-001", "mem-vendor-x-002"})
+
+    # Round-trip with explicit record ids matching the fixture's evidence.
+    source = MemoryDB(tmp_path / "fixture-src.sqlite")
+    source.insert(
+        id="mem-vendor-x-001",
+        identifier="vendor-x",
+        fact_text="vendor x invoices are paid net 30",
+        embedding=b"",
+        content_hash="hash-1",
+    )
+    source.insert(
+        id="mem-vendor-x-002",
+        identifier="vendor-x",
+        fact_text="vendor x ap contact is ap@vendorx.example",
+        embedding=b"",
+        content_hash="hash-2",
+    )
+    row = source.all_rows()[0]
+    source.update_metadata_json(row["id"], json.dumps(_meta(fixture), sort_keys=True))
+    pkg = tmp_path / "fixture.pkg"
+    write_package(source, pkg, gz=True)
+
+    target = MemoryDB(tmp_path / "fixture-target.sqlite")
+    result = hydrate_package(target, pkg)
+    assert result.invalid == 0
+    assert result.loaded == 2
+    stored = json.loads(
+        [r for r in target.all_rows() if r["id"] == "mem-vendor-x-001"][0]["metadata_json"]
+    )
+    assert stored["annotations"] == fixture  # lossless: byte-equal after movement
+    # The namespace surface round-trips: entity, alias, contact, relationship.
+    assert set(stored["annotations"]["namespaces"]) == {
+        "org.example.entities",
+        "org.example.relationships",
+    }
+    assert stored["annotations"]["producers"]["org.example.enricher"]["version"] == "1.2.0"
+    source.close()
+    target.close()
