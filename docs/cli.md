@@ -147,6 +147,7 @@ failures; the human mode fails loudly.
 |---|---|---|
 | `--db` | required | Target database path |
 | `--embedder` | `hash` | Runtime embedder (see §4.1) |
+| `--embedder-model-path` | — | Local model artifact for `--embedder local-semantic` (or `HOTMEM_EMBEDDER_MODEL_PATH`) |
 
 Atomic and idempotent: the selected durable memories plus exactly one
 resume-brief record hydrate in one transaction; a repeat run of the same

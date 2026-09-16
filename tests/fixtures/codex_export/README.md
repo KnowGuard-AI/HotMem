@@ -30,9 +30,10 @@ See `docs/okf/handoff-v1.md` §12 for the adapter boundary and support matrix.
 
 ## Fixture inventory (15 lines)
 
-8 turns (4 user / 3 assistant / 1 secret-bearing), 1 decision, 1
+5 turns (3 user / 2 assistant, one secret-bearing), 1 decision, 1
 commitment, 1 unresolved question, 1 next action, 1 tool call + 1 tool
-result, 1 file reference, 2 memory items, 1 hidden prompt. The
-secret-bearing line (`HOTMEM_API_KEY=hotmem_sk_…`) exercises deny-by-default
-redaction; the `hidden_prompt` line exercises the never-read policy; the
-`model`/`reasoning_tokens` extras exercise unsupported-field omission.
+result, 1 file reference, 2 memory items, 1 hidden prompt. Unsupported
+extras (`model`, `reasoning_tokens`, `owner`, `asked_by`, `priority`)
+exercise unsupported-field omission. The secret-bearing line
+(`HOTMEM_API_KEY=hotmem_sk_…`) exercises deny-by-default redaction; the
+`hidden_prompt` line exercises the never-read policy.

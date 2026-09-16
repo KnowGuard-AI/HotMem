@@ -116,7 +116,7 @@ present.
 ## 6. Resume brief
 
 `resume-brief.json` is a `BriefDocument`: `{text, sections, links,
-char_count}`.
+char_count, omissions_note}` (`omissions_note` may be null).
 
 - `text` is the bounded, target-friendly markdown a fresh session reads to
   continue the work: goal, decisions, commitments, unresolved questions,

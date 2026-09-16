@@ -137,3 +137,29 @@ def test_limits_defaults_are_sane():
     assert limits.brief_char_budget >= 1000
     assert limits.max_memories >= 10
     assert limits.max_consent_chars >= 64
+
+
+# ── Documentation consistency guards (L4) ───────────────────────────────────
+
+
+def test_fixture_readme_inventory_matches_actual_lines():
+    """The fixture README's inventory must describe the real fixture."""
+    from collections import Counter
+
+    lines = load_lines()
+    turns = Counter(line["role"] for line in lines if line["type"] == "turn")
+    readme = (FIXTURE / "README.md").read_text()
+    assert f"{len(lines)} lines)" in readme, "README omits/mismatches the line count"
+    expected = f"{sum(turns.values())} turns ({turns['user']} user / {turns['assistant']} assistant"
+    assert expected in readme, "README turn counts drifted from the fixture"
+
+
+def test_contract_documents_every_brief_field():
+    """Every BriefDocument field must appear in the normative contract."""
+    import dataclasses
+
+    from hotmem.handoff.brief import BriefDocument
+
+    contract = (Path(__file__).parent.parent / "docs" / "okf" / "handoff-v1.md").read_text()
+    for field in dataclasses.fields(BriefDocument):
+        assert field.name in contract, f"contract §6 omits BriefDocument.{field.name}"
