@@ -128,6 +128,7 @@ class NormalizedSession:
     entries: list[dict[str, Any]] = field(default_factory=list)
     memory_records: list[dict[str, Any]] = field(default_factory=list)
     omissions: list[dict[str, Any]] = field(default_factory=list)
+    redactions: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _require_consent(consent: str | None) -> str:

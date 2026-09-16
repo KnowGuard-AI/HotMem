@@ -7,15 +7,13 @@ Purpose:
     content itself.
 
 Interface:
-    omission(where, field, reason, recoverable) -> dict
-    redaction(where, field, kind, reason, recoverable) -> dict  (commit 4)
-    CoverageReport / build_coverage(...)                        (commit 4)
-    OMISSION_POLICY_HIDDEN, OMISSION_UNSUPPORTED, ... — canonical reasons
+    omission(where, field, reason, *, recoverable) -> dict
+    redaction(where, field, kind, reason, *, recoverable) -> dict
+    build_coverage(...) -> the manifest coverage block
 
 Deps: stdlib only.
-Extension: the redaction engine and coverage assembly land with the
-    redaction commit; record shapes are fixed here so adapters emit them
-    from day one.
+Extension: record shapes are fixed by the contract; new omission reasons
+    add constants here so they stay machine-stable.
 """
 
 from __future__ import annotations
@@ -40,3 +38,45 @@ def omission(where: str, field: str | None, reason: str, *, recoverable: bool) -
     still holds the item, so the operator can go back for it.
     """
     return {"where": where, "field": field, "reason": reason, "recoverable": recoverable}
+
+
+def redaction(
+    where: str, field: str, kind: str, reason: str, *, recoverable: bool
+) -> dict[str, Any]:
+    """One redaction record (handoff-v1 §7): location and secret KIND only.
+
+    Never includes the redacted value — not here, not in the reason, not in
+    any derived text.
+    """
+    return {
+        "where": where,
+        "field": field,
+        "kind": kind,
+        "reason": reason,
+        "recoverable": recoverable,
+    }
+
+
+def build_coverage(
+    *,
+    transferred: int,
+    omissions: list[dict[str, Any]],
+    redactions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Assemble the manifest coverage block (handoff-v1 §7).
+
+    ``recoverable_count`` counts omissions and redactions whose content the
+    source still holds, so the operator knows exactly what a re-export
+    could recover.
+    """
+    recoverable = sum(1 for o in omissions if o["recoverable"]) + sum(
+        1 for r in redactions if r["recoverable"]
+    )
+    return {
+        "transferred": transferred,
+        "omitted": omissions,
+        "redacted": redactions,
+        "omitted_count": len(omissions),
+        "redacted_count": len(redactions),
+        "recoverable_count": recoverable,
+    }
