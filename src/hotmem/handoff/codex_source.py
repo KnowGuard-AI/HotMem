@@ -161,11 +161,23 @@ def _load_envelope(root: Path) -> dict[str, Any]:
 
 
 def _truncate(text: str, max_bytes: int) -> str:
-    """Truncate to ``max_bytes`` on a UTF-8 boundary with a visible marker."""
+    """Truncate to at most ``max_bytes`` on a UTF-8 boundary, with a marker.
+
+    The marker is budgeted INSIDE the bound so the stored text never exceeds
+    the advertised per-entry byte bound (an omission record that claims
+    ``exceeded the per-entry byte bound; truncated`` must not itself exceed
+    it). When the bound is smaller than the marker, the text is hard-clipped
+    with no marker and the omission record still documents the truncation.
+    """
     raw = text.encode()
     if len(raw) <= max_bytes:
         return text
-    return raw[:max_bytes].decode(errors="ignore") + _TRUNCATION_MARKER
+    marker = _TRUNCATION_MARKER.encode()
+    if max_bytes <= len(marker):
+        return raw[:max_bytes].decode(errors="ignore")
+    budget = max_bytes - len(marker)
+    # errors="ignore" only ever drops bytes, so the result stays within budget.
+    return raw[:budget].decode(errors="ignore") + _TRUNCATION_MARKER
 
 
 def _record_unsupported_fields(

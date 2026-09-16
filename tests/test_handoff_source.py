@@ -210,9 +210,28 @@ def test_entry_truncation_records_omission(tmp_path):
         root, consent=CONSENT, limits=Limits(max_entry_bytes=100, brief_char_budget=600)
     )
     entry = session.entries[0]
-    assert entry["text"].startswith("x" * 100)
+    # L2: the marker is budgeted inside the bound — the stored text never
+    # exceeds the byte bound the omission record refers to.
+    assert len(entry["text"].encode()) <= 100
     assert entry["text"].endswith("…[truncated]")
+    marker_bytes = len("…[truncated]".encode())
+    assert entry["text"].startswith("x" * (100 - marker_bytes))
     assert any(o["reason"].startswith("entry exceeded") for o in session.omissions)
+
+
+@pytest.mark.parametrize("cap", [1, 5, 14, 15, 64, 100, 1024])
+def test_truncation_never_exceeds_the_byte_bound(tmp_path, cap):
+    """L2: bound honesty across caps, including caps below the marker size."""
+    root = _write_export(tmp_path, [_turn(1, "z" * 4096)])
+    session = read_codex_export(
+        root, consent=CONSENT, limits=Limits(max_entry_bytes=cap, brief_char_budget=600)
+    )
+    text = session.entries[0]["text"]
+    assert len(text.encode()) <= cap
+    # The result must remain valid UTF-8 (no half-cut code point).
+    assert text.encode().decode() == text
+    if cap > len("…[truncated]".encode()):
+        assert text.endswith("…[truncated]")
 
 
 def test_tool_result_bound_is_tighter_than_entry_bound(tmp_path):
