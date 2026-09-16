@@ -270,18 +270,18 @@
     "drift": [],
     "note": "local diagnostics on one machine \u2014 not cross-machine guarantees",
     "package": {
-      "export_seconds": 0.0069,
-      "gz_bytes": 68944,
-      "hydrate_records_per_s": 10542.4,
-      "hydrate_seconds": 0.0057,
+      "export_seconds": 0.0062,
+      "gz_bytes": 68937,
+      "hydrate_records_per_s": 11281.6,
+      "hydrate_seconds": 0.0053,
       "records": 60,
-      "verify_records_per_s": 48000.0,
-      "verify_seconds": 0.0012
+      "verify_records_per_s": 61895.6,
+      "verify_seconds": 0.001
     },
     "queries_compared": 48
   },
   "cold_start": {
-    "cold_start_seconds": 0.381
+    "cold_start_seconds": 0.356
   },
   "counts": {
     "corpus": 60,
@@ -289,8 +289,8 @@
     "queries": 48
   },
   "latency_ms": {
-    "p50_ms": 12.977,
-    "p95_ms": 13.286,
+    "p50_ms": 4.458,
+    "p95_ms": 4.497,
     "samples": 48
   },
   "overall": {

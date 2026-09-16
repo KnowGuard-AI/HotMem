@@ -248,6 +248,59 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
     )
 
 
+def _scan_annotation_context(payload_lines) -> tuple[set[str], set[str], bool]:
+    """One bounded-memory pass over a payload (#79): collect the explicit
+    record ids, the local evidence memory_ids referenced by annotation
+    envelopes, and whether any record carries annotations at all.
+
+    Only ids are retained — never records — so the streaming memory bound
+    holds; evidence references resolve against the package id set (forward
+    references included) plus the ids the target already stores. Records
+    without ids mint their uuid at normalize time and can never be
+    referenced, so scanning explicit ids is sound.
+    """
+    package_ids: set[str] = set()
+    referenced_ids: set[str] = set()
+    has_annotations = False
+    for line in payload_lines:
+        line = line.strip()
+        if not line:
+            continue
+        record = json.loads(line)  # structural corruption: hard error
+        if not isinstance(record, dict):
+            continue
+        record_id = record.get("id")
+        if isinstance(record_id, str) and record_id:
+            package_ids.add(record_id)
+        metadata = record.get("metadata", record.get("metadata_json"))
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                continue
+        if not (isinstance(metadata, dict) and "annotations" in metadata):
+            continue
+        has_annotations = True
+        namespaces = (metadata.get("annotations") or {}).get("namespaces") or {}
+        if not isinstance(namespaces, dict):
+            continue
+        for items in namespaces.values():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                evidence = item.get("evidence")
+                if not isinstance(evidence, list):
+                    continue
+                for entry in evidence:
+                    if isinstance(entry, dict):
+                        memory_id = entry.get("memory_id")
+                        if isinstance(memory_id, str) and memory_id:
+                            referenced_ids.add(memory_id)
+    return package_ids, referenced_ids, has_annotations
+
+
 def hydrate_package(
     db,
     pkg_dir: str | Path,
@@ -258,10 +311,18 @@ def hydrate_package(
 
     All-or-nothing: verification finishes before any write, inserts run in
     bounded batches inside a single transaction, and any error rolls back —
-    the target remains byte-identical. Compatible stored embeddings are
-    reused; incompatible ones are re-embedded under ``embedder`` (issue #78;
-    ``None`` = the hash default) from text; records without usable text
-    count invalid (contract §5/§7) and are never stored.
+    the target remains byte-identical. Peak memory stays O(batch): records
+    stream line by line; the only whole-payload state is the annotation
+    context (ids and evidence references), collected in a first pass so
+    local evidence resolves against the full package — forward references
+    included — plus the ids the target already stores (#79).
+    Annotation-less packages validate structurally inline and pay only the
+    id-scan pass.
+
+    Compatible stored embeddings are reused; incompatible ones are
+    re-embedded under ``embedder`` (issue #78; ``None`` = the hash
+    default) from text; records without usable text count invalid
+    (contract §5/§7) and are never stored.
     Idempotent: a repeated restore loads zero records.
     """
     pkg_dir = Path(pkg_dir)
@@ -282,63 +343,13 @@ def hydrate_package(
         pending: list[dict] = []
         batch_seen: set[str] = set()
 
-        # Parse every record up front (#79): local evidence references
-        # resolve against the FULL package id set — forward references
-        # included — plus the existing target, so validation cannot depend
-        # on streaming order. Annotation-less packages pay one extra list
-        # pass over already-parsed records; no extra file IO.
-        parsed: list[dict] = []
-        has_annotations = False
-        for line in verified.stream():
-            line = line.strip()
-            if not line:
-                continue
-            record = json.loads(line)  # structural corruption: hard error
-            if not isinstance(record, dict):
-                counters["invalid"] += 1
-                continue
-            try:
-                rec = normalize_record(record, default_source="interchange")
-            except AnnotationValidationError as err:
-                # Malformed known envelope structure: the RECORD is invalid
-                # (#79) — counted and skipped, never a whole-restore failure.
-                counters["invalid"] += 1
-                _trace.debug(
-                    "hydrate_pkg",
-                    "skipping record with malformed annotations",
-                    detail={"error": str(err)},
-                )
-                continue
-            issues = validate_record(rec)
-            if issues:
-                counters["invalid"] += 1
-                _trace.debug(
-                    "hydrate_pkg",
-                    "skipping invalid record",
-                    detail={"id": rec["id"], "issues": issues},
-                )
-                continue
-            metadata = rec.get("metadata") or {}
-            if isinstance(metadata, dict) and "annotations" in metadata:
-                has_annotations = True
-            parsed.append(rec)
-
+        package_ids, referenced_ids, has_annotations = _scan_annotation_context(verified.stream())
+        known_ids: set[str] | None = None
         if has_annotations:
-            known_ids = {rec["id"] for rec in parsed} | set(db.all_ids())
-            for rec in parsed:
-                metadata = rec.get("metadata") or {}
-                if not (isinstance(metadata, dict) and "annotations" in metadata):
-                    continue
-                try:
-                    validate_metadata(metadata, known_ids=known_ids)
-                except AnnotationValidationError as err:
-                    counters["invalid"] += 1
-                    _trace.debug(
-                        "hydrate_pkg",
-                        "skipping record with invalid annotations",
-                        detail={"id": rec["id"], "error": str(err)},
-                    )
-                    parsed.remove(rec)
+            # A reference resolves against the package ids or the ids the
+            # target already stores — one chunked existence query for the
+            # referenced subset, never a full-store scan.
+            known_ids = package_ids | db.fetch_existing_ids(referenced_ids)
 
         def flush() -> None:
             if not pending:
@@ -366,7 +377,49 @@ def hydrate_package(
             batch_seen.clear()
 
         try:
-            for rec in parsed:
+            for line in verified.stream():
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)  # structural corruption: hard error
+                if not isinstance(record, dict):
+                    counters["invalid"] += 1
+                    continue
+                try:
+                    rec = normalize_record(record, default_source="interchange")
+                except AnnotationValidationError as err:
+                    # Malformed known envelope structure: the RECORD is
+                    # invalid (#79) — counted and skipped, never a
+                    # whole-restore failure.
+                    counters["invalid"] += 1
+                    _trace.debug(
+                        "hydrate_pkg",
+                        "skipping record with malformed annotations",
+                        detail={"error": str(err)},
+                    )
+                    continue
+                if has_annotations:
+                    metadata = rec.get("metadata") or {}
+                    if isinstance(metadata, dict) and "annotations" in metadata:
+                        try:
+                            validate_metadata(metadata, known_ids=known_ids)
+                        except AnnotationValidationError as err:
+                            counters["invalid"] += 1
+                            _trace.debug(
+                                "hydrate_pkg",
+                                "skipping record with invalid annotations",
+                                detail={"id": rec["id"], "error": str(err)},
+                            )
+                            continue
+                issues = validate_record(rec)
+                if issues:
+                    counters["invalid"] += 1
+                    _trace.debug(
+                        "hydrate_pkg",
+                        "skipping invalid record",
+                        detail={"id": rec["id"], "issues": issues},
+                    )
+                    continue
                 content_hash = rec["content_hash"]
                 if content_hash in batch_seen:
                     counters["skipped"] += 1

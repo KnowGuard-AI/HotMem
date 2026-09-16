@@ -182,13 +182,14 @@ def _flush_batch(
     todo = [r for r in pending if r["content_hash"] not in existing]
     counters["skipped"] += len(pending) - len(todo)
 
-    if any(
-        isinstance(r.get("metadata"), dict) and "annotations" in (r["metadata"] or {})
-        for r in pending
-    ):
-        merge_duplicate_annotations(
-            db, [r for r in pending if r["content_hash"] in existing], counters
-        )
+    merge_duplicate_annotations(
+        db,
+        [r for r in pending if r["content_hash"] in existing],
+        counters,
+        # Per-batch autocommit path: no later commit exists to carry an
+        # all-duplicate batch's merge (durability, #79 review).
+        commit=True,
+    )
 
     records: list[MemoryRecord] = []
     for rec in todo:

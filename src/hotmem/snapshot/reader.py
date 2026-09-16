@@ -39,6 +39,7 @@ from hotmem.annotations import (
 from hotmem.db import MemoryDB
 from hotmem.embed import Embedder
 from hotmem.interchange.compat import resolve_embedding
+from hotmem.interchange.hydrate import _scan_annotation_context
 from hotmem.interchange.paths import confined_relpath
 from hotmem.interchange.record import normalize_record, validate_record
 from hotmem.snapshot.format import (
@@ -164,11 +165,45 @@ def hydrate_v2(
         pending: list[dict] = []
         batch_seen: set[str] = set()
 
-        # Parse all records first (#79): local evidence references resolve
-        # against the full snapshot id set (forward references included)
-        # plus the existing target. See hydrate_package for the rationale.
-        parsed: list[dict] = []
-        has_annotations = False
+        # Bounded-memory annotation context pass (#79): ids and evidence
+        # references only — never records — so streaming stays O(batch).
+        # See hydrate_package._scan_annotation_context for the rationale.
+        with open(memories_path, encoding="utf-8") as f:
+            package_ids, referenced_ids, has_annotations = _scan_annotation_context(f)
+        known_ids: set[str] | None = None
+        if has_annotations:
+            known_ids = package_ids | db.fetch_existing_ids(referenced_ids)
+
+        def flush() -> None:
+            if not pending:
+                return
+            hashes = [r["content_hash"] for r in pending]
+            existing = db.batch_existing_hashes(hashes)
+            todo = [r for r in pending if r["content_hash"] not in existing]
+            counters["skipped"] += len(pending) - len(todo)
+
+            merge_duplicate_annotations(
+                db,
+                [r for r in pending if r["content_hash"] in existing],
+                counters,
+                # Per-batch autocommit path: no later commit exists to carry
+                # an all-duplicate batch's merge (durability, #79 review).
+                commit=True,
+            )
+
+            records = []
+            for rec in todo:
+                blob, model, dim, status = resolve_embedding(rec, embedder=embedder)
+                counters[f"embedding_{status}"] += 1
+                records.append(
+                    record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
+                )
+            loaded = db.insert_many_ignore(records)
+            counters["loaded"] += loaded
+            counters["skipped"] += len(records) - loaded
+            pending.clear()
+            batch_seen.clear()
+
         with open(memories_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -188,65 +223,30 @@ def hydrate_v2(
                         detail={"error": str(err)},
                     )
                     continue
+                if has_annotations:
+                    metadata = rec.get("metadata") or {}
+                    if isinstance(metadata, dict) and "annotations" in metadata:
+                        try:
+                            validate_metadata(metadata, known_ids=known_ids)
+                        except AnnotationValidationError as err:
+                            counters["invalid"] += 1
+                            _trace.debug(
+                                "hydrate_v2",
+                                "skipping record with invalid annotations",
+                                detail={"id": rec["id"], "error": str(err)},
+                            )
+                            continue
                 if validate_record(rec):
                     counters["invalid"] += 1
                     continue
-                metadata = rec.get("metadata") or {}
-                if isinstance(metadata, dict) and "annotations" in metadata:
-                    has_annotations = True
-                parsed.append(rec)
-
-        if has_annotations:
-            known_ids = {rec["id"] for rec in parsed} | set(db.all_ids())
-            for rec in list(parsed):
-                metadata = rec.get("metadata") or {}
-                if not (isinstance(metadata, dict) and "annotations" in metadata):
+                content_hash = rec["content_hash"]
+                if content_hash in batch_seen:
+                    counters["skipped"] += 1
                     continue
-                try:
-                    validate_metadata(metadata, known_ids=known_ids)
-                except AnnotationValidationError as err:
-                    counters["invalid"] += 1
-                    _trace.debug(
-                        "hydrate_v2",
-                        "skipping record with invalid annotations",
-                        detail={"id": rec["id"], "error": str(err)},
-                    )
-                    parsed.remove(rec)
-
-        def flush() -> None:
-            if not pending:
-                return
-            hashes = [r["content_hash"] for r in pending]
-            existing = db.batch_existing_hashes(hashes)
-            todo = [r for r in pending if r["content_hash"] not in existing]
-            counters["skipped"] += len(pending) - len(todo)
-
-            merge_duplicate_annotations(
-                db, [r for r in pending if r["content_hash"] in existing], counters
-            )
-
-            records = []
-            for rec in todo:
-                blob, model, dim, status = resolve_embedding(rec, embedder=embedder)
-                counters[f"embedding_{status}"] += 1
-                records.append(
-                    record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
-                )
-            loaded = db.insert_many_ignore(records)
-            counters["loaded"] += loaded
-            counters["skipped"] += len(records) - loaded
-            pending.clear()
-            batch_seen.clear()
-
-        for rec in parsed:
-            content_hash = rec["content_hash"]
-            if content_hash in batch_seen:
-                counters["skipped"] += 1
-                continue
-            batch_seen.add(content_hash)
-            pending.append(rec)
-            if len(pending) >= _HYDRATE_BATCH:
-                flush()
+                batch_seen.add(content_hash)
+                pending.append(rec)
+                if len(pending) >= _HYDRATE_BATCH:
+                    flush()
         flush()
 
         loaded = counters["loaded"]

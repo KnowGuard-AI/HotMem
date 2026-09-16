@@ -143,13 +143,16 @@ def _apply_reranker(
     The reranker sees the narrow candidate view only; its vectors come
     from ONE batched ``db.fetch_embedding_blobs`` call restricted to the
     active embedding space (foreign or missing vectors read as absent and
-    contribute zero similarity). Any failure or contract violation falls
-    back to the first-stage order — search never fails because of a
-    reranker.
+    contribute zero similarity). Only the head the reranker can consume is
+    projected — ``max(reranker.pool, top_k)`` rows — so opt-in reranking
+    never allocates per-query structures proportional to the whole store.
+    Any failure or contract violation falls back to the first-stage order —
+    search never fails because of a reranker.
     """
+    window = scored[: max(reranker.pool, top_k)]
     candidates = [
         SearchCandidate(memory_id=row["id"], score=row["final_score"], content=row["_search_text"])
-        for row in scored
+        for row in window
     ]
 
     def fetch(memory_ids: list[str]) -> dict[str, bytes]:
@@ -157,6 +160,13 @@ def _apply_reranker(
 
     try:
         ordered = reranker.rerank(query, candidates, top_k=top_k, fetch_embeddings=fetch)
+        if not validate_rerank_output(ordered, candidates, top_k=top_k):
+            _trace.warn(
+                "rerank",
+                "invalid reranker output; falling back to first-stage order",
+                detail={"count": len(ordered) if isinstance(ordered, list) else -1},
+            )
+            return scored
     except Exception as err:
         _trace.warn(
             "rerank",
@@ -164,14 +174,7 @@ def _apply_reranker(
             detail={"error": type(err).__name__},
         )
         return scored
-    if not validate_rerank_output(ordered, candidates, top_k=top_k):
-        _trace.warn(
-            "rerank",
-            "invalid reranker output; falling back to first-stage order",
-            detail={"count": len(ordered) if isinstance(ordered, list) else -1},
-        )
-        return scored
-    by_id = {row["id"]: row for row in scored}
+    by_id = {row["id"]: row for row in window}
     return [by_id[memory_id] for memory_id in ordered]
 
 

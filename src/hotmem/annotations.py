@@ -72,6 +72,10 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
+from hotmem.trace import get_tracer
+
+_trace = get_tracer("annotations")
+
 SCHEMA_VERSION = 1
 MAX_ENVELOPE_BYTES = 128 * 1024
 MAX_ITEMS = 1000
@@ -172,6 +176,39 @@ def _validate_evidence_entry(entry: Any, path: str, known_ids: set[str] | None) 
     _fail(path, "evidence entries must carry 'memory_id' (local) or 'uri' (external)")
 
 
+def envelope_exceeds_limits(annotations: Any) -> bool:
+    """True when the serialized envelope breaches the documented limits.
+
+    Used both by validation and by the merge path (#79): merged output is
+    re-checked before it is persisted, so repeated hydration of colliding
+    records can never grow a row's envelope past MAX_ENVELOPE_BYTES /
+    MAX_ITEMS — the merge is refused instead (target retained, incoming
+    preserved via the conflict channel semantics).
+    """
+    if not isinstance(annotations, dict):
+        return False
+    serialized = json.dumps(annotations, sort_keys=True, separators=(",", ":"))
+    if len(serialized.encode("utf-8")) > MAX_ENVELOPE_BYTES:
+        return True
+    namespaces = annotations.get("namespaces") or {}
+    return (
+        isinstance(namespaces, dict)
+        and sum(len(items) for items in namespaces.values() if isinstance(items, list)) > MAX_ITEMS
+    )
+
+
+def _check_limits(annotations: Any) -> None:
+    if not isinstance(annotations, dict):
+        return
+    serialized = json.dumps(annotations, sort_keys=True, separators=(",", ":"))
+    if len(serialized.encode("utf-8")) > MAX_ENVELOPE_BYTES:
+        _fail(
+            "",
+            f"serialized envelope exceeds {MAX_ENVELOPE_BYTES} bytes "
+            f"(got {len(serialized.encode('utf-8'))})",
+        )
+
+
 def validate_annotations(
     annotations: Any,
     *,
@@ -196,13 +233,7 @@ def validate_annotations(
             "versions are not silently reinterpreted",
         )
 
-    serialized = json.dumps(annotations, sort_keys=True, separators=(",", ":"))
-    if len(serialized.encode("utf-8")) > MAX_ENVELOPE_BYTES:
-        _fail(
-            "",
-            f"serialized envelope exceeds {MAX_ENVELOPE_BYTES} bytes "
-            f"(got {len(serialized.encode('utf-8'))})",
-        )
+    _check_limits(annotations)
 
     namespaces = annotations.get("namespaces")
     if namespaces is None:
@@ -367,6 +398,17 @@ def merge_duplicate_annotations(
     version preserved in the outcome, never last-write-wins, never a silent
     content-hash dedup drop.
 
+    Merged output is re-checked against the documented limits before it is
+    persisted: a merge that would breach MAX_ENVELOPE_BYTES / MAX_ITEMS is
+    refused (target retained) with a trace diagnostic, so repeated
+    hydration of colliding records can never grow a row's envelope
+    unboundedly.
+
+    ``commit``: package hydration passes ``False`` inside its explicit
+    all-or-nothing transaction; the v2 and legacy flush paths pass ``True``
+    because their per-batch inserts auto-commit and no later commit exists
+    to carry an all-duplicate batch's merge.
+
     ``counters["annotations_merged"]`` counts merged items;
     ``counters["annotation_conflicts"]`` counts conflicting items. Rows
     without annotations on either side cost one dict check — zero work.
@@ -396,6 +438,15 @@ def merge_duplicate_annotations(
         )
         counters["annotation_conflicts"] += len(outcome.conflicts)
         if outcome.merged is None:
+            continue
+        if envelope_exceeds_limits(outcome.merged):
+            # Refuse the merge: the target stays intact and the limit
+            # breach is observable rather than an unbounded write.
+            _trace.warn(
+                "annotations",
+                "refusing merge that would exceed envelope limits",
+                detail={"id": target_row["id"]},
+            )
             continue
         merged_meta = {**target_meta, "annotations": outcome.merged}
         # Deterministic serialized form: canonical object key order, so

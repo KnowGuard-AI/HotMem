@@ -45,8 +45,9 @@ sharing the duplicate clusters' similarity range (0.81..0.92 vs
 0.83..0.99), so similarity alone cannot suppress duplicates without that
 cost; metadata-driven demotion is out of scope by canon. Exact-lexical
 Recall@5 is unchanged at 1.000. Overhead is bounded and measured: p50
-search latency ~2.0ms -> ~13.0ms for a 50-candidate pool at 256 dims
-(one batched embedding fetch + in-memory selection; no second scan).
+search latency ~2.0ms -> ~4.5ms for a 50-candidate pool at 256 dims
+(one batched embedding fetch + in-memory selection with incremental
+max-similarity caching; no second scan).
 
 Regenerate with `uv run python bench/retrieval/gen_fixtures.py` — the
 generator is deterministic and the committed bytes must not change (a

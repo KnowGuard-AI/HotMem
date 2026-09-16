@@ -27,6 +27,7 @@ from hotmem.snapshot import hydrate as snapshot_hydrate
 from hotmem.snapshot import snapshot as snapshot_write
 from hotmem.snapshot.writer import write_snapshot_v2
 from hotmem.swap import add_memory
+from hotmem.swap import hydrate as swap_hydrate
 
 
 def _envelope(
@@ -47,6 +48,12 @@ def _envelope(
 
 def _meta(annotations: dict) -> dict:
     return {"annotations": annotations}
+
+
+def _write_pkg(db: MemoryDB, tmp_path: Path, name: str) -> Path:
+    pkg = tmp_path / f"{name}.pkg"
+    write_package(db, pkg, gz=False)
+    return pkg
 
 
 # ── validation taxonomy ──────────────────────────────────────────────────────
@@ -469,6 +476,174 @@ def test_server_add_validates_envelope_with_actionable_error(tmp_path: Path):
         assert good.status_code == 200
         row = MemoryDB(tmp_path / "server.sqlite").all_rows()[0]
         assert json.loads(row["metadata_json"])["annotations"]["schema_version"] == 1
+
+
+# ── review regressions: durability, adjacent-invalid, merge limits ──────────
+
+
+def test_annotation_merge_is_durable_across_close_on_every_path(tmp_path: Path):
+    """Regression: the v2 and legacy swap duplicate paths must commit merges.
+
+    An all-duplicate batch (annotation-only change) never reaches an insert,
+    so nothing else commits — the merge itself must. Verified against silent
+    rollback-on-close: reopen the database before asserting.
+    """
+    db = _seed_annotated_db(tmp_path, "dur")
+
+    # Legacy JSONL path: load the original, then a metadata-only variant.
+    swap = tmp_path / "dur.jsonl"
+    snapshot_write(db, swap)
+    target = MemoryDB(tmp_path / "dur-target.sqlite")
+    assert snapshot_hydrate(target, swap).loaded == 1
+
+    producer = MemoryDB(tmp_path / "dur-producer.sqlite")
+    swap_hydrate(producer, swap)
+    row = producer.all_rows()[0]
+    enriched = _envelope(
+        items=[
+            {"id": "vendor-x", "type": "Organization"},
+            {"id": "vendor-x-alias", "type": "Alias"},
+        ]
+    )
+    producer.update_metadata_json(row["id"], json.dumps(_meta(enriched), sort_keys=True))
+    swap2 = tmp_path / "dur2.jsonl"
+    snapshot_write(producer, swap2)
+    result = snapshot_hydrate(target, swap2)
+    assert result.loaded == 0  # all-duplicate batch: no insert carries the commit
+    assert result.annotations_merged == 1
+    target.close()
+    reopened = MemoryDB(tmp_path / "dur-target.sqlite")
+    stored = json.loads(reopened.all_rows()[0]["metadata_json"])
+    items = stored["annotations"]["namespaces"]["org.example.entities"]
+    assert [i["id"] for i in items] == ["vendor-x", "vendor-x-alias"]  # durable
+    reopened.close()
+    producer.close()
+
+    # Snapshot v2 path: same shape through the directory format.
+    v2a = tmp_path / "dur-v2-a"
+    write_snapshot_v2(db, v2a)
+    target2 = MemoryDB(tmp_path / "dur-v2-target.sqlite")
+    assert snapshot_hydrate(target2, v2a).loaded == 1
+
+    producer2 = MemoryDB(tmp_path / "dur-v2-producer.sqlite")
+    hydrate_package(producer2, _write_pkg(db, tmp_path, "dur-v2-base"))
+    row2 = producer2.all_rows()[0]
+    enriched2 = _envelope(
+        items=[
+            {"id": "vendor-x", "type": "Organization"},
+            {"id": "vendor-x-2", "type": "Alias"},
+        ]
+    )
+    producer2.update_metadata_json(row2["id"], json.dumps(_meta(enriched2), sort_keys=True))
+    v2b = tmp_path / "dur-v2-b"
+    write_snapshot_v2(producer2, v2b)
+    result2 = snapshot_hydrate(target2, v2b)
+    assert result2.loaded == 0
+    assert result2.annotations_merged == 1
+    target2.close()
+    reopened2 = MemoryDB(tmp_path / "dur-v2-target.sqlite")
+    stored2 = json.loads(reopened2.all_rows()[0]["metadata_json"])
+    assert [i["id"] for i in stored2["annotations"]["namespaces"]["org.example.entities"]] == [
+        "vendor-x",
+        "vendor-x-2",
+    ]
+    reopened2.close()
+    producer2.close()
+    db.close()
+
+
+def test_consecutive_invalid_annotation_records_are_both_counted(tmp_path: Path):
+    """Regression: the validation pass must never skip the record after a
+    removed one (mutation-during-iteration)."""
+    src = MemoryDB(tmp_path / "adj.sqlite")
+    add_memory(src, "a", "adjacent record one")
+    add_memory(src, "b", "adjacent record two")
+    pkg = _write_pkg(src, tmp_path, "adj")
+
+    # Both records get dangling local evidence: the FIRST record is also
+    # missing its id, so pass-1 cannot collect it — both must be invalid.
+    lines = (pkg / "memories.jsonl").read_text().splitlines()
+    modified = []
+    for line in lines:
+        rec = json.loads(line)
+        bad = _meta(_envelope(items=[{"id": "x", "evidence": [{"memory_id": "ghost"}]}]))
+        if rec["identifier"] == "a":
+            rec.pop("id", None)  # dangling ref to an unknown, unmintable id
+            rec["metadata"] = bad
+        else:
+            rec["metadata"] = bad  # dangling ref: invalid too
+        modified.append(json.dumps(rec))
+    (pkg / "memories.jsonl").write_text("\n".join(modified) + "\n")
+    manifest = json.loads((pkg / "manifest.json").read_text())
+    import hashlib
+
+    payload = pkg / "memories.jsonl"
+    manifest["files"]["memories.jsonl"] = {
+        "size": payload.stat().st_size,
+        "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+    }
+    (pkg / "manifest.json").write_text(json.dumps(manifest))
+
+    target = MemoryDB(tmp_path / "adj-target.sqlite")
+    result = hydrate_package(target, pkg)
+    assert result.invalid == 2  # both counted — neither silently stored
+    assert target.count() == 0
+    src.close()
+    target.close()
+
+
+def test_merge_refused_when_result_would_exceed_limits(tmp_path: Path):
+    """Regression: merged envelopes are re-checked against the documented
+    limits before persisting — unbounded growth is refused, not stored."""
+    from hotmem.annotations import MAX_ITEMS, envelope_exceeds_limits
+
+    db = _seed_annotated_db(tmp_path, "cap")
+    pkg = tmp_path / "cap.pkg"
+    write_package(db, pkg, gz=True)
+
+    producer = MemoryDB(tmp_path / "cap-producer.sqlite")
+    hydrate_package(producer, pkg)
+    row = producer.all_rows()[0]
+    # Same content, an envelope that alone is legal but overflows when
+    # merged on top of the stored one.
+    overflow = _meta(_envelope(items=[{"id": f"j{n}"} for n in range(MAX_ITEMS)]))
+    producer.update_metadata_json(row["id"], json.dumps(overflow, sort_keys=True))
+    pkg2 = tmp_path / "cap2.pkg"
+    write_package(producer, pkg2, gz=True)
+
+    target = MemoryDB(tmp_path / "cap-target.sqlite")
+    hydrate_package(target, pkg)
+    result = hydrate_package(target, pkg2)
+    assert result.annotations_merged == 0  # over-limit merge refused
+    stored = json.loads(target.all_rows()[0]["metadata_json"])
+    assert not envelope_exceeds_limits(stored["annotations"])  # target intact
+    assert len(stored["annotations"]["namespaces"]["org.example.entities"]) == 1
+    db.close()
+    producer.close()
+    target.close()
+
+
+def test_evidence_reference_resolves_against_target_without_full_scan(tmp_path: Path):
+    """Evidence pointing at an id that exists ONLY in the target store
+    resolves (one chunked existence query — no full-table id scan)."""
+    target = MemoryDB(tmp_path / "tgt.sqlite")
+    add_memory(target, "known", "a record already in the target store")
+    existing_id = target.all_rows()[0]["id"]
+
+    src = MemoryDB(tmp_path / "ref-src.sqlite")
+    add_memory(
+        src,
+        "ref",
+        "a record with target-side evidence",
+        metadata=_meta(_envelope(items=[{"id": "e1", "evidence": [{"memory_id": existing_id}]}])),
+    )
+    pkg = tmp_path / "ref.pkg"
+    write_package(src, pkg, gz=True)
+    result = hydrate_package(target, pkg)
+    assert result.invalid == 0
+    assert result.loaded == 1
+    src.close()
+    target.close()
 
 
 # ── committed mapping fixture (#79 reference) ────────────────────────────────

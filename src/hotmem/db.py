@@ -897,6 +897,23 @@ class MemoryDB:
         """All memory ids (annotation evidence resolution, #79)."""
         return [r[0] for r in self._conn.execute("SELECT id FROM memories").fetchall()]
 
+    def fetch_existing_ids(self, memory_ids: list[str]) -> set[str]:
+        """Which of the given ids exist, via ONE chunked query (#79).
+
+        Annotation evidence resolution checks only the referenced subset
+        against the store — never a full-table id scan.
+        """
+        existing: set[str] = set()
+        ordered = sorted(memory_ids)  # deterministic chunking for any iterable
+        for start in range(0, len(ordered), _SEARCH_BIND_CHUNK):
+            chunk = ordered[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT id FROM memories WHERE id IN ({placeholders})", chunk
+            ).fetchall()
+            existing.update(r[0] for r in rows)
+        return existing
+
     def fetch_metadata_by_hashes(self, content_hashes: list[str]) -> dict[str, dict[str, Any]]:
         """Fetch id + parsed metadata for rows matching content hashes (#79).
 

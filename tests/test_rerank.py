@@ -179,6 +179,10 @@ def test_broken_reranker_falls_back_to_first_stage(tmp_path: Path):
 
             return RerankerDescriptor(implementation="test", name="junk")
 
+        @property
+        def pool(self):
+            return 10
+
         def rerank(self, query, candidates, *, top_k, fetch_embeddings=None):
             return ["ghost-id"]
 
@@ -191,6 +195,61 @@ def test_broken_reranker_falls_back_to_first_stage(tmp_path: Path):
     boom = search_memories(db, "invoice approval", top_k=2, reranker=ExplodingReranker())
     assert junk == plain
     assert boom == plain
+    db.close()
+
+
+# ── review regressions: contract hardening and bounded projection ──────────
+
+
+def test_unhashable_reranker_output_falls_back_not_crashes(tmp_path: Path):
+    """Regression: a correctly-sized list with unhashable elements must
+    fail validation and fall back — never raise TypeError through search."""
+    db = MemoryDB(tmp_path / "u.sqlite")
+    add_memory(db, "v", "fact one")
+    add_memory(db, "v", "fact two")
+
+    class UnhashableReranker:
+        @property
+        def descriptor(self):
+            from hotmem.rerank import RerankerDescriptor
+
+            return RerankerDescriptor(implementation="test", name="unhashable")
+
+        @property
+        def pool(self):
+            return 10
+
+        def rerank(self, query, candidates, *, top_k, fetch_embeddings=None):
+            return [{"a": 1}, {"b": 2}]  # correct size, unhashable elements
+
+    from hotmem.rerank import validate_rerank_output
+
+    cands = _candidates(("m1", 1.0, "x"), ("m2", 0.9, "y"))
+    assert validate_rerank_output([{"a": 1}, {"b": 2}], cands, top_k=2) is False
+
+    plain = search_memories(db, "fact", top_k=2)
+    guarded = search_memories(db, "fact", top_k=2, reranker=UnhashableReranker())
+    assert guarded == plain  # fell back; no crash
+    db.close()
+
+
+def test_search_projects_only_the_rerank_window(tmp_path: Path):
+    """Regression: opt-in reranking must not allocate per-query structures
+    proportional to the whole store — only max(pool, top_k) rows project."""
+    db = MemoryDB(tmp_path / "w.sqlite")
+    for i in range(120):
+        add_memory(db, "v", f"fact number {i:03d} about vendors and invoices")
+
+    seen_candidates: list[int] = []
+
+    class SpyMMR(MMRReranker):
+        def rerank(self, query, candidates, *, top_k, fetch_embeddings=None):
+            seen_candidates.append(len(candidates))
+            return super().rerank(query, candidates, top_k=top_k, fetch_embeddings=fetch_embeddings)
+
+    spy = SpyMMR(lambda_=0.5, pool_limit=20)
+    search_memories(db, "fact vendors", top_k=5, reranker=spy)
+    assert seen_candidates == [20]  # pool window, never all 120 rows
     db.close()
 
 

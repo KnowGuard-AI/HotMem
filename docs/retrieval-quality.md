@@ -108,7 +108,7 @@ lambda 0.5, pool 50):
 | Overall Recall@5 | 1.000 | 0.885 (the documented allowance) |
 | Exact-lexical Recall@5 | 1.000 | 1.000 |
 | Clone equivalence | 1.000 | 1.000 (deterministic under the reranker) |
-| Search latency p50 | ~2.0 ms | ~13.0 ms (bounded, one batched fetch) |
+| Search latency p50 | ~2.0 ms | ~4.5 ms (bounded, one batched fetch) |
 
 The recall allowance is real and structural: the fixtures grade
 near-duplicate cluster members and revision pairs as relevant while sharing

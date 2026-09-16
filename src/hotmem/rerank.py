@@ -92,6 +92,13 @@ class Reranker(Protocol):
     @property
     def descriptor(self) -> RerankerDescriptor: ...
 
+    @property
+    def pool(self) -> int:
+        """Maximum candidates this reranker may consume from the head of
+        the first-stage ranking (search projects only this many rows —
+        bounded work on large stores)."""
+        ...
+
     def rerank(
         self,
         query: str,
@@ -122,6 +129,10 @@ class IdentityReranker:
     def descriptor(self) -> RerankerDescriptor:
         return _IDENTITY_DESCRIPTOR
 
+    @property
+    def pool(self) -> int:
+        return 0  # the fast path skips the stage; projection never happens
+
     def rerank(
         self,
         query: str,
@@ -136,15 +147,22 @@ class IdentityReranker:
 _IDENTITY_DESCRIPTOR = RerankerDescriptor(implementation="hotmem", name="identity")
 
 
+def _norm(a: list[float]) -> float:
+    return sum(x * x for x in a) ** 0.5
+
+
+def _dot(a: list[float], b: list[float]) -> float:
+    return sum(x * y for x, y in zip(a, b, strict=True))
+
+
 def _cosine(a: list[float], b: list[float]) -> float:
     if len(a) != len(b) or not a:
         return 0.0
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    na = sum(x * x for x in a) ** 0.5
-    nb = sum(x * x for x in b) ** 0.5
+    na = _norm(a)
+    nb = _norm(b)
     if na == 0.0 or nb == 0.0:
         return 0.0
-    return dot / (na * nb)
+    return _dot(a, b) / (na * nb)
 
 
 @dataclass(frozen=True)
@@ -194,6 +212,10 @@ class MMRReranker:
     def descriptor(self) -> RerankerDescriptor:
         return RerankerDescriptor(implementation="hotmem", name=f"mmr-l{self.lambda_}")
 
+    @property
+    def pool(self) -> int:
+        return self.pool_limit
+
     def rerank(
         self,
         query: str,
@@ -217,6 +239,7 @@ class MMRReranker:
         rel = [1.0 if hi == lo else (s - lo) / (hi - lo) for s in scores]
 
         vectors: dict[str, list[float] | None] = {}
+        norms: dict[str, float] = {}
         if fetch_embeddings is not None and pool:
             blobs = fetch_embeddings([c.memory_id for c in pool]) or {}
             for c in pool:
@@ -224,28 +247,25 @@ class MMRReranker:
                 if blob:
                     count = len(blob) // 4
                     vectors[c.memory_id] = list(struct.unpack(f"{count}f", blob))
+                    norms[c.memory_id] = _norm(vectors[c.memory_id])
                 else:
                     vectors[c.memory_id] = None
 
         lam = self.lambda_
         order = {c.memory_id: idx for idx, c in enumerate(pool)}
         selected: list[SearchCandidate] = []
-        selected_vecs: list[list[float] | None] = []
+        # Incremental max-similarity cache: each round only needs cosine
+        # against the NEWLY selected vector (the running max only grows),
+        # with norms precomputed — O(pool x top_k x dim) total instead of
+        # O(pool x top_k^2 x dim) with per-call norm recompute.
+        max_sim: dict[str, float] = {c.memory_id: 0.0 for c in pool}
         remaining = list(pool)
 
         while remaining and len(selected) < target:
             best = None
             best_key = None
             for cand in remaining:
-                vec = vectors.get(cand.memory_id)
-                max_sim = 0.0
-                if vec is not None:
-                    for sv in selected_vecs:
-                        if sv is not None:
-                            sim = _cosine(vec, sv)
-                            if sim > max_sim:
-                                max_sim = sim
-                mmr = lam * rel[order[cand.memory_id]] - (1.0 - lam) * max_sim
+                mmr = lam * rel[order[cand.memory_id]] - (1.0 - lam) * max_sim[cand.memory_id]
                 # Tie-break: higher MMR first; then earlier pre-rerank rank;
                 # then memory id (deterministic total order).
                 key = (-mmr, order[cand.memory_id], cand.memory_id)
@@ -253,8 +273,17 @@ class MMRReranker:
                     best_key = key
                     best = cand
             selected.append(best)
-            selected_vecs.append(vectors.get(best.memory_id))
             remaining.remove(best)
+            new_vec = vectors.get(best.memory_id)
+            if new_vec is not None:
+                new_norm = norms[best.memory_id]
+                for cand in remaining:
+                    vec = vectors.get(cand.memory_id)
+                    if vec is None or new_norm == 0.0:
+                        continue
+                    sim = _dot(vec, new_vec) / (norms[cand.memory_id] * new_norm)
+                    if sim > max_sim[cand.memory_id]:
+                        max_sim[cand.memory_id] = sim
 
         ordered = [c.memory_id for c in selected]
         if len(ordered) < target:
@@ -305,7 +334,13 @@ def validate_rerank_output(
     expected = min(max(0, top_k), len(candidates))
     if len(ordered_ids) != expected:
         return False
-    if len(set(ordered_ids)) != len(ordered_ids):
-        return False
     known = {c.memory_id for c in candidates}
-    return all(memory_id in known for memory_id in ordered_ids)
+    try:
+        seen = set()
+        for memory_id in ordered_ids:
+            if memory_id in seen or memory_id not in known:
+                return False  # duplicate or unknown id
+            seen.add(memory_id)
+    except TypeError:
+        return False  # unhashable element: a contract violation, not a crash
+    return True
