@@ -14,6 +14,10 @@ Tools:
     - memory_health()
     - snapshot(file?)
     - hydrate(file?)
+    - handoff_prepare(source, output, mode?, consent, session?)  (#101)
+    - handoff_inspect(package)
+    - handoff_verify(package)
+    - handoff_hydrate(package)
 
 Deps: mcp, hotmem.db, hotmem.embed, hotmem.search, hotmem.swap, hotmem.trace
 Extension: add new tools (e.g. delete_memory, forget_identifier) here.
@@ -77,6 +81,41 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "file": {"type": "string"},
         },
+    },
+    "handoff_prepare": {
+        "type": "object",
+        "properties": {
+            "source": {"type": "string", "description": "Source export directory."},
+            "output": {"type": "string", "description": "Handoff package output directory."},
+            "mode": {"type": "string", "enum": ["resume", "archive"]},
+            "consent": {
+                "type": "string",
+                "description": "Explicit consent statement. Required; capture is never implicit.",
+            },
+            "session": {"type": "string", "description": "Required session id in the envelope."},
+        },
+        "required": ["source", "output", "consent"],
+    },
+    "handoff_inspect": {
+        "type": "object",
+        "properties": {
+            "package": {"type": "string", "description": "Handoff package directory."},
+        },
+        "required": ["package"],
+    },
+    "handoff_verify": {
+        "type": "object",
+        "properties": {
+            "package": {"type": "string", "description": "Handoff package directory."},
+        },
+        "required": ["package"],
+    },
+    "handoff_hydrate": {
+        "type": "object",
+        "properties": {
+            "package": {"type": "string", "description": "Handoff package directory."},
+        },
+        "required": ["package"],
     },
 }
 
@@ -144,6 +183,35 @@ def create_server(
                 description="Load memories from a JSONL swap file into HotMem.",
                 inputSchema=_TOOL_SCHEMAS["hydrate"],
             ),
+            Tool(
+                name="handoff_prepare",
+                description=(
+                    "Prepare a hotmem-handoff-v1 package from a source export "
+                    "(#101). Requires explicit consent; capture is never implicit."
+                ),
+                inputSchema=_TOOL_SCHEMAS["handoff_prepare"],
+            ),
+            Tool(
+                name="handoff_inspect",
+                description=(
+                    "Read-only inspection of a handoff package: identity, counts, "
+                    "coverage, omissions, redactions, or the failure reason."
+                ),
+                inputSchema=_TOOL_SCHEMAS["handoff_inspect"],
+            ),
+            Tool(
+                name="handoff_verify",
+                description="Fail-closed verification of a handoff package.",
+                inputSchema=_TOOL_SCHEMAS["handoff_verify"],
+            ),
+            Tool(
+                name="handoff_hydrate",
+                description=(
+                    "Hydrate a verified handoff package into this HotMem instance "
+                    "(atomic, idempotent)."
+                ),
+                inputSchema=_TOOL_SCHEMAS["handoff_hydrate"],
+            ),
         ]
 
     @server.call_tool()
@@ -162,6 +230,14 @@ def create_server(
                 return _handle_snapshot(_state, arguments)
             if name == "hydrate":
                 return _handle_hydrate(_state, arguments)
+            if name == "handoff_prepare":
+                return _handle_handoff_prepare(_state, arguments)
+            if name == "handoff_inspect":
+                return _handle_handoff_inspect(_state, arguments)
+            if name == "handoff_verify":
+                return _handle_handoff_verify(_state, arguments)
+            if name == "handoff_hydrate":
+                return _handle_handoff_hydrate(_state, arguments)
         except KeyError as err:
             _trace.error("tool", f"missing required argument: {err}", detail={"tool": name})
             return _error(f"missing required argument: {err}")
@@ -318,6 +394,91 @@ def _handle_hydrate(state: _ServerState, arguments: dict[str, Any]) -> CallToolR
             "invalid": result.invalid,
             # Embedding + annotation dispositions (issues #78/#79; additive)
             # — one shared definition with HTTP and CLI.
+            **result.disposition(),
+        }
+    )
+
+
+def _handle_handoff_prepare(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
+    """Prepare a handoff package from a source export (#101).
+
+    Consent is required and checked before any session content is read —
+    an MCP host can never capture a session implicitly.
+    """
+    from hotmem.handoff.codex_source import SourceError
+    from hotmem.handoff.package import prepare_handoff
+
+    try:
+        result = prepare_handoff(
+            arguments["source"],
+            arguments["output"],
+            mode=str(arguments.get("mode") or "resume"),
+            consent=str(arguments["consent"]),
+            session_id=arguments.get("session"),
+        )
+    except (SourceError, ValueError) as err:
+        return _error(str(err))
+    coverage = result.coverage
+    return _ok(
+        {
+            "handoff_id": result.handoff_id,
+            "package_id": result.package_id,
+            "mode": result.manifest["mode"],
+            "entries": result.manifest["counts"]["entries"],
+            "memories": result.manifest["counts"]["memories"],
+            "omissions": coverage["omitted_count"],
+            "redactions": coverage["redacted_count"],
+            "path": result.path,
+            "total_ms": result.timings_ms["total_ms"],
+        }
+    )
+
+
+def _handle_handoff_inspect(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
+    """Read-only package inspection; reports failures instead of raising."""
+    from hotmem.handoff.verify import inspect_handoff
+
+    report = inspect_handoff(str(arguments["package"]))
+    return _ok(report)
+
+
+def _handle_handoff_verify(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
+    """Fail-closed verification: an invalid package is an MCP error result."""
+    from hotmem.handoff.verify import HandoffError, verify_handoff
+
+    try:
+        verified = verify_handoff(str(arguments["package"]))
+    except HandoffError as err:
+        return _error(f"verification failed ({err.reason}): {err}")
+    return _ok(
+        {
+            "valid": True,
+            "package_id": verified.manifest["package_id"],
+            "mode": verified.manifest["mode"],
+            "entries": verified.entry_count,
+            "memories": verified.memory_count,
+        }
+    )
+
+
+def _handle_handoff_hydrate(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
+    """Hydrate a verified package into the server's database (atomic)."""
+    from hotmem.handoff.hydrate import hydrate_handoff
+    from hotmem.handoff.verify import HandoffError
+
+    try:
+        result = hydrate_handoff(state.db, str(arguments["package"]), embedder=state.embedder)
+    except HandoffError as err:
+        return _error(f"hydration not applied — verification failed ({err.reason}): {err}")
+    return _ok(
+        {
+            "handoff_id": result.handoff_id,
+            "package_id": result.package_id,
+            "loaded": result.loaded,
+            "skipped": result.skipped_dupes,
+            "invalid": result.invalid,
+            "already_applied": result.already_applied,
+            "brief": result.brief_identifier,
             **result.disposition(),
         }
     )

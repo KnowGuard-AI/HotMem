@@ -495,36 +495,48 @@ def test_server_default_embedder_is_hash(tmp_path: Path):
 def test_mcp_embedder_injection(tmp_path: Path):
     """create_server(embedder=...) owns the MCP add/search/health tools."""
     pytest.importorskip("mcp", reason="requires the optional [mcp] extra")
+    import hotmem.mcp_server as mcp_server
     from hotmem.mcp_server import (
         _handle_add_memory,
         _handle_memory_health,
         _handle_search_memories,
-        _ServerState,
         create_server,
     )
 
     semantic = SemanticFake()
     create_server(tmp_path / "mcp.sqlite", None, embedder=semantic)
-    state = _ServerState()
-    state.db = MemoryDB(tmp_path / "mcp.sqlite")
-    state.db_path = str(tmp_path / "mcp.sqlite")
-    state.swap_path = None
-    state.start_time = 0.0
-
-    payload = _handle_add_memory(state, {"identifier": "vendor", "fact": "mcp semantic fact"})
-    assert not payload.isError
-    row = state.db.all_rows(include_embedding=True)[0]
-    assert row["embedding_model"] == semantic.descriptor.key
-
-    health = _handle_memory_health(state, {})
-    assert json.loads(health.content[0].text)["embedding"] == {
-        "model": semantic.descriptor.key,
-        "dim": 128,
+    # The real serving path: handlers run against the module singleton that
+    # create_server configured (run() attaches the db the same way).
+    state = mcp_server._state
+    db = MemoryDB(tmp_path / "mcp.sqlite")
+    saved = {
+        field: getattr(state, field)
+        for field in ("db", "db_path", "swap_path", "start_time", "embedder")
     }
-    search = _handle_search_memories(state, {"query": "mcp semantic fact", "top_k": 1})
-    hits = json.loads(search.content[0].text)
-    assert hits["memories"][0]["content"] == "mcp semantic fact"
-    state.db.close()
+    try:
+        state.db = db
+        state.db_path = str(tmp_path / "mcp.sqlite")
+        state.swap_path = None
+        state.start_time = 0.0
+
+        payload = _handle_add_memory(state, {"identifier": "vendor", "fact": "mcp semantic fact"})
+        assert not payload.isError
+        row = state.db.all_rows(include_embedding=True)[0]
+        assert row["embedding_model"] == semantic.descriptor.key
+
+        health = _handle_memory_health(state, {})
+        assert json.loads(health.content[0].text)["embedding"] == {
+            "model": semantic.descriptor.key,
+            "dim": 128,
+        }
+        search = _handle_search_memories(state, {"query": "mcp semantic fact", "top_k": 1})
+        hits = json.loads(search.content[0].text)
+        assert hits["memories"][0]["content"] == "mcp semantic fact"
+    finally:
+        # The singleton is global; restore it so other tests stay isolated.
+        for field, value in saved.items():
+            setattr(state, field, value)
+        db.close()
 
 
 def test_cli_embedder_flags_fail_fast(tmp_path: Path):
