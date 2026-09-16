@@ -48,6 +48,27 @@ def test_api_key_assignment_keeps_name_redacts_value():
     assert "abc123def456ghi789" not in redacted
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        '"API_KEY": "abcd1234"',
+        '"api_key": "abcd1234"',
+        '{"token": "abcd1234"}',
+        '"password": "hunter2pass"',
+    ],
+)
+def test_json_quoted_keys_are_redacted(text):
+    """Recall: JSON/config key forms keep the quoted name, swap the value."""
+    redacted, hits = DEFAULT_ENGINE.redact_text(text)
+    assert "abcd1234" not in redacted
+    assert "hunter2pass" not in redacted
+    assert [h["kind"] for h in hits] == ["api_key"]
+    assert (
+        redacted.endswith(f'"{PLACEHOLDER.format(kind="api_key")}"')
+        or PLACEHOLDER.format(kind="api_key") in redacted
+    )
+
+
 def test_bearer_token_redacts_credential_keeps_scheme():
     text = "Authorization: bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
     redacted, hits = DEFAULT_ENGINE.redact_text(text)
@@ -156,6 +177,56 @@ def test_gate_is_stable_on_its_own_placeholders():
     assert twice == once
     assert hits2 == []
     assert_no_secrets(once, where="placeholder stability")
+
+
+# ── Scaling guard (H1: quadratic backtracking regression) ───────────────────
+
+
+def test_redaction_scales_near_linearly_on_long_single_token_text():
+    """A bounded identifier prefix keeps matching near-linear (was O(n^2)).
+
+    Regression guard for the api_key pattern: an unbounded leading
+    ``[a-z0-9_.-]*`` backtracks at every start position, which cost ~113 s
+    for a single 64 KiB entry (the configured ``max_entry_bytes``) and made
+    prepare/verify effectively hang on legitimate single-token content
+    (base64 blobs, minified JSON, long tokens/paths).
+
+    Assertions are deliberately loose (8x size -> allow 25x time, plus an
+    absolute ceiling) so they stay meaningful without being wall-clock
+    flaky: the pre-fix behavior was ~68-190x growth and >100 s absolute.
+    """
+    import time
+
+    def elapsed(text: str) -> float:
+        start = time.perf_counter()
+        DEFAULT_ENGINE.redact_text(text)
+        return time.perf_counter() - start
+
+    small = elapsed("y" * 8192)
+    large = elapsed("y" * 65536)
+
+    assert large < 5.0, f"64 KiB entry took {large:.2f}s — quadratic backtracking returned"
+    assert large < 25 * max(small, 0.005), (
+        f"sublinear scaling guard: 8 KiB={small * 1000:.1f}ms vs 64 KiB={large * 1000:.1f}ms"
+    )
+
+
+def test_redaction_completes_on_keyword_dense_text():
+    """Worst-case bounded pattern: repeated keyword, no assignment."""
+    import time
+
+    start = time.perf_counter()
+    redacted, hits = DEFAULT_ENGINE.redact_text("secret" * 10922)  # ~64 KiB
+    assert time.perf_counter() - start < 10.0
+    assert redacted and hits == []
+
+
+def test_bounded_prefix_still_catches_long_env_style_names():
+    """Recall is preserved for realistic identifier lengths (<= 64 chars)."""
+    long_name = "MY_" + "X" * 40 + "_API_KEY"  # 51 chars, still well-formed
+    redacted, hits = DEFAULT_ENGINE.redact_text(f"{long_name}=supersecretvalue")
+    assert "supersecretvalue" not in redacted
+    assert [h["kind"] for h in hits] == ["api_key"]
 
 
 # ── Coverage assembly ───────────────────────────────────────────────────────

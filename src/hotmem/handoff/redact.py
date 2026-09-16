@@ -43,12 +43,26 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
         # <name>=value / <name>: value for api keys, secrets, tokens,
         # passwords — including env-var style names (HOTMEM_API_KEY,
         # GITHUB_TOKEN) where the keyword is a suffix of a longer
-        # identifier. The name stays visible; only the value is redacted.
+        # identifier, and JSON/config forms where the name is quoted
+        # ("api_key": "value").
+        #
+        # Performance: the leading ``(?<![a-z0-9_.-])`` anchors every
+        # attempt at an identifier-run boundary. Without it the engine
+        # retries the whole prefix/keyword combination at every character,
+        # which cost ~113 s for a single 64 KiB entry (the configured
+        # max_entry_bytes) and made prepare/verify hang on legitimate
+        # single-token content (base64 blobs, minified JSON, long tokens).
+        # Recall is unaffected: any maximal identifier run that contains a
+        # keyword also *starts* at a boundary, so the run start is always a
+        # candidate position. The bounded ``{0,64}`` prefix follows
+        # env-var identifiers, which are far shorter than 64 chars.
+        #
         # Brackets are excluded from the value charset so the engine's own
         # [REDACTED:<kind>] placeholder can never re-match (gate stability).
         re.compile(
-            r"(?i)([a-z0-9_.-]*(?:api[_-]?key|apikey|secret|token|password|passwd|pwd)"
-            r"[a-z0-9_.-]*)\s*[=:]\s*[\"']?([^\s\"'\[\]]{4,})[\"']?"
+            r"(?i)(?<![a-z0-9_.-])([a-z0-9_.-]{0,64}"
+            r"(?:api[_-]?key|apikey|secret|token|password|passwd|pwd)[a-z0-9_.-]{0,64})"
+            r"[\"']?\s*[=:]\s*[\"']?([^\s\"'\[\]]{4,})[\"']?"
         ),
         "credential pattern: key/password assignment",
     ),
