@@ -288,3 +288,79 @@ def test_inspect_copies_package_does_not_mutate(pkg):
     after = {p.name: p.read_bytes() for p in pkg.iterdir()}
     assert before == after
     assert shutil.rmtree(pkg) is None  # cleanup helper, also proves plain dir
+
+
+# ── Type-confusion matrix (M2: fail closed, never crash) ────────────────────
+
+# Structurally wrong manifests must produce structured HandoffError reasons —
+# not AttributeError/ValueError/TypeError escaping to a 500, a crashing
+# inspect, an MCP dispatcher exception, or a CLI traceback.
+MALFORMED_MANIFEST_CASES: dict[str, object] = {
+    "schema-version-string": lambda m: m.update(schema_version="one"),
+    "schema-version-missing": lambda m: m.pop("schema_version"),
+    "schema-version-null": lambda m: m.update(schema_version=None),
+    "files-not-object": lambda m: m.update(files=[]),
+    "files-value-not-object": lambda m: m["files"].update({"session.jsonl": "oops"}),
+    "files-size-string": lambda m: m["files"]["session.jsonl"].update(size="big"),
+    "files-size-bool": lambda m: m["files"]["session.jsonl"].update(size=True),
+    "files-sha-not-hex": lambda m: m["files"]["session.jsonl"].update(sha256="zz" * 32),
+    "files-sha-not-string": lambda m: m["files"]["session.jsonl"].update(sha256=123),
+    "counts-not-object": lambda m: m.update(counts=["nope"]),
+    "counts-entries-string": lambda m: m["counts"].update(entries="many"),
+    "counts-entries-null": lambda m: m["counts"].update(entries=None),
+    "counts-by-kind-not-object": lambda m: m["counts"].update(entries_by_kind=["turn"]),
+    "counts-by-kind-value-string": lambda m: m["counts"].update(entries_by_kind={"turn": "one"}),
+    "coverage-not-object": lambda m: m.update(coverage="nope"),
+    "coverage-omitted-not-array": lambda m: m["coverage"].update(omitted="nope"),
+    "coverage-transferred-string": lambda m: m["coverage"].update(transferred="11"),
+    "source-not-object": lambda m: m.update(source=["nope"]),
+    "source-adapter-not-string": lambda m: m["source"].update(adapter=123),
+    "target-not-object": lambda m: m.update(target="hotmem"),
+    "limits-not-object": lambda m: m.update(limits="x"),
+    "consent-not-object": lambda m: m.update(consent=[]),
+    "package-id-not-string": lambda m: m.update(package_id=123),
+    "handoff-id-null": lambda m: m.update(handoff_id=None),
+}
+
+
+@pytest.mark.parametrize("case", list(MALFORMED_MANIFEST_CASES))
+def test_type_confused_manifest_fails_closed(pkg, case):
+    mutate = MALFORMED_MANIFEST_CASES[case]
+    _edit_manifest(pkg, mutate)
+
+    with pytest.raises(HandoffError) as exc_info:
+        verify_handoff(pkg)
+    assert exc_info.value.reason, f"{case}: empty reason"
+
+    report = inspect_handoff(pkg)
+    assert report["valid"] is False, f"{case}: inspect claimed validity"
+    assert report["failure"]["reason"] == exc_info.value.reason
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["source-not-object", "counts-not-object", "coverage-not-object", "files-value-not-object"],
+)
+def test_inspect_never_raises_on_type_confusion(pkg, case):
+    """inspect promises a report for invalid packages — including these."""
+    _edit_manifest(pkg, MALFORMED_MANIFEST_CASES[case])
+    report = inspect_handoff(pkg)  # must not raise
+    assert report["valid"] is False
+    assert report["failure"]["reason"]
+    assert report["path"].endswith("pkg")
+
+
+def test_type_confused_manifest_never_writes_target(pkg, tmp_path):
+    """Fail-closed means the target is untouched, including on shape errors."""
+    from hotmem.db import MemoryDB
+    from hotmem.handoff.hydrate import hydrate_handoff
+
+    _edit_manifest(pkg, MALFORMED_MANIFEST_CASES["counts-not-object"])
+    db = MemoryDB(str(tmp_path / "t.sqlite"))
+    try:
+        with pytest.raises(HandoffError):
+            hydrate_handoff(db, str(pkg))
+        assert db.count() == 0
+        assert db.get_handoff("anything") is None
+    finally:
+        db.close()

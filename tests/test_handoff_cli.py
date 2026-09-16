@@ -166,3 +166,35 @@ def test_hydrate_invalid_package_exits_nonzero_without_touching_target(tmp_path)
     assert result.exit_code != 0
     assert "size_mismatch" in result.output  # size gate fires before digest
     assert not target.exists() or MemoryDB(str(target)).count() == 0
+
+
+def test_type_confused_manifest_reports_cleanly_without_traceback(tmp_path):
+    """M2: shape errors are diagnostics, not tracebacks or 500-style crashes."""
+    _prepare(tmp_path)
+    manifest_path = tmp_path / "pkg" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["counts"] = ["nope"]
+    manifest_path.write_text(json.dumps(manifest))
+
+    verify = runner.invoke(main, ["handoff", "verify", str(tmp_path / "pkg")])
+    assert verify.exit_code != 0
+    assert "invalid_manifest_field" in verify.output
+    assert "Traceback" not in verify.output
+
+    inspect = runner.invoke(main, ["handoff", "inspect", str(tmp_path / "pkg")])
+    assert inspect.exit_code != 0
+    assert "Traceback" not in inspect.output
+
+
+def test_type_confused_manifest_hydrate_exits_nonzero_without_writes(tmp_path):
+    _prepare(tmp_path)
+    target = tmp_path / "target.sqlite"
+    manifest_path = tmp_path / "pkg" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["coverage"] = "nope"
+    manifest_path.write_text(json.dumps(manifest))
+
+    result = runner.invoke(main, ["handoff", "hydrate", str(tmp_path / "pkg"), "--db", str(target)])
+    assert result.exit_code != 0
+    assert "invalid_manifest_field" in result.output
+    assert not target.exists() or MemoryDB(str(target)).count() == 0

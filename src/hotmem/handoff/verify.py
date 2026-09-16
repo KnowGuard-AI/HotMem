@@ -73,6 +73,50 @@ class HandoffError(Exception):
         super().__init__(message)
 
 
+def _describe(value: Any) -> str:
+    """Short type/value description for diagnostics (never full payloads)."""
+    text = f"{type(value).__name__} {value!r}"
+    return text if len(text) <= 40 else text[:37] + "..."
+
+
+def _field_error(field: str, value: Any, expected: str) -> HandoffError:
+    """Structured error for a malformed manifest field shape.
+
+    Type confusion in the manifest must fail closed like any other
+    corruption, not surface as AttributeError/ValueError/TypeError — the
+    surfaces only map ``HandoffError`` to their documented responses
+    (409 bodies, MCP error results, CLI diagnostics).
+    """
+    return HandoffError(
+        "invalid_manifest_field",
+        file=MANIFEST_NAME,
+        expected=f"{field} {expected}",
+        actual=_describe(value),
+    )
+
+
+def _object_field(container: dict[str, Any], field: str) -> dict[str, Any]:
+    """Require ``container[field]`` to be a JSON object."""
+    value = container.get(field)
+    if not isinstance(value, dict):
+        raise _field_error(field, value, "object")
+    return value
+
+
+def _int_field(container: dict[str, Any], field: str) -> int:
+    """Require ``container[field]`` to be a JSON integer (not a bool)."""
+    value = container.get(field)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _field_error(field, value, "integer")
+    return value
+
+
+def _is_hex64(value: Any) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
+
+
 @dataclass(frozen=True)
 class VerifiedHandoff:
     """A fully verified package with streamed access to its payloads."""
@@ -117,7 +161,10 @@ def _load_manifest(pkg: Path) -> dict[str, Any]:
             expected=FORMAT_ID,
             actual=str(manifest.get("format")),
         )
-    if int(manifest.get("schema_version") or 0) > SCHEMA_VERSION:
+    schema_version = manifest.get("schema_version")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise _field_error("schema_version", schema_version, "integer")
+    if schema_version > SCHEMA_VERSION:
         raise HandoffError(
             "unsupported_schema",
             file=MANIFEST_NAME,
@@ -131,6 +178,19 @@ def _load_manifest(pkg: Path) -> dict[str, Any]:
             expected=" or ".join(MODES),
             actual=str(manifest.get("mode")),
         )
+    for required_str in ("package_id", "handoff_id"):
+        value = manifest.get(required_str)
+        if not isinstance(value, str) or not value:
+            raise _field_error(required_str, value, "non-empty string")
+    # Validate every block shape up front so no later reader can meet an
+    # unexpected type (see _field_error).
+    _object_field(manifest, "source")
+    _object_field(manifest, "target")
+    _object_field(manifest, "counts")
+    _object_field(manifest, "coverage")
+    _object_field(manifest, "limits")
+    if "consent" in manifest:
+        _object_field(manifest, "consent")
     return manifest
 
 
@@ -151,23 +211,46 @@ def _verify_files(pkg: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         raise HandoffError("missing_file", file=BRIEF_NAME)
 
     for name, entry in files.items():
+        if not isinstance(entry, dict):
+            raise HandoffError(
+                "invalid_file_entry",
+                file=str(name),
+                expected="object with size + sha256",
+                actual=_describe(entry),
+            )
+        expected_size = entry.get("size")
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int):
+            raise HandoffError(
+                "invalid_file_entry",
+                file=str(name),
+                expected="size integer",
+                actual=_describe(expected_size),
+            )
+        expected_sha = entry.get("sha256")
+        if not _is_hex64(expected_sha):
+            raise HandoffError(
+                "invalid_file_entry",
+                file=str(name),
+                expected="sha256 64-char hex",
+                actual=_describe(expected_sha),
+            )
         path = pkg / str(name)
         if not path.is_file():
             raise HandoffError("missing_file", file=str(name))
         actual_size = path.stat().st_size
-        if actual_size != entry.get("size"):
+        if actual_size != expected_size:
             raise HandoffError(
                 "size_mismatch",
                 file=str(name),
-                expected=str(entry.get("size")),
+                expected=str(expected_size),
                 actual=str(actual_size),
             )
         actual_sha = sha256_file(path)
-        if actual_sha != entry.get("sha256"):
+        if actual_sha != expected_sha:
             raise HandoffError(
                 "digest_mismatch",
                 file=str(name),
-                expected=str(entry.get("sha256")),
+                expected=str(expected_sha),
                 actual=actual_sha,
             )
     return files
@@ -175,8 +258,8 @@ def _verify_files(pkg: Path, manifest: dict[str, Any]) -> dict[str, Any]:
 
 def _verify_session_stream(pkg: Path, manifest: dict[str, Any]) -> tuple[list[dict], list[str]]:
     """Parse + validate every session entry; return (entries, raw_lines)."""
-    counts = manifest.get("counts") or {}
-    expected_entries = int(counts.get("entries") or 0)
+    counts = _object_field(manifest, "counts")
+    expected_entries = _int_field(counts, "entries")
 
     raw_lines: list[str] = []
     with open(pkg / SESSION_STREAM_NAME, encoding="utf-8") as f:
@@ -212,15 +295,37 @@ def _verify_session_stream(pkg: Path, manifest: dict[str, Any]) -> tuple[list[di
         kind = entry.get("kind")
         if kind not in ENTRY_KINDS:
             raise HandoffError("unknown_entry_kind", file=SESSION_STREAM_NAME, actual=str(kind))
-        for required in ("schema_version", "text", "source"):
-            if not entry.get(required):
-                raise HandoffError(
-                    "invalid_entry",
-                    file=SESSION_STREAM_NAME,
-                    actual=f"{entry_id[:12]} missing {required}",
-                )
+        # Validate shapes before any reader touches them: a non-dict source
+        # block, non-string text, or non-int schema_version must fail
+        # closed, not crash a surface with AttributeError/TypeError.
+        schema_version = entry.get("schema_version")
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise HandoffError(
+                "invalid_entry",
+                file=SESSION_STREAM_NAME,
+                actual=f"{entry_id[:12]} schema_version",
+            )
+        if not isinstance(entry.get("text"), str):
+            raise HandoffError(
+                "invalid_entry",
+                file=SESSION_STREAM_NAME,
+                actual=f"{entry_id[:12]} text",
+            )
+        if not isinstance(entry.get("source"), dict):
+            raise HandoffError(
+                "invalid_entry",
+                file=SESSION_STREAM_NAME,
+                actual=f"{entry_id[:12]} source",
+            )
+        summary = entry.get("summary")
+        if summary is not None and not isinstance(summary, str):
+            raise HandoffError(
+                "invalid_entry",
+                file=SESSION_STREAM_NAME,
+                actual=f"{entry_id[:12]} summary",
+            )
         seq = entry.get("seq")
-        if not isinstance(seq, int) or seq <= last_seq:
+        if isinstance(seq, bool) or not isinstance(seq, int) or seq <= last_seq:
             raise HandoffError(
                 "disordered_seq",
                 file=SESSION_STREAM_NAME,
@@ -230,11 +335,14 @@ def _verify_session_stream(pkg: Path, manifest: dict[str, Any]) -> tuple[list[di
         entries.append(entry)
 
     # Provenance consistency: entries must belong to the manifest session.
-    source_meta = manifest.get("source") or {}
+    source_meta = _object_field(manifest, "source")
     adapter = source_meta.get("adapter")
     session_id = source_meta.get("session_id")
+    for label, value in (("source.adapter", adapter), ("source.session_id", session_id)):
+        if not isinstance(value, str) or not value:
+            raise _field_error(label, value, "non-empty string")
     for entry in entries:
-        block = entry.get("source") or {}
+        block = entry["source"]
         if block.get("adapter") != adapter or block.get("session_id") != session_id:
             raise HandoffError(
                 "provenance_mismatch",
@@ -245,8 +353,8 @@ def _verify_session_stream(pkg: Path, manifest: dict[str, Any]) -> tuple[list[di
 
 
 def _verify_memories(pkg: Path, manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    counts = manifest.get("counts") or {}
-    expected = int(counts.get("memories") or 0)
+    counts = _object_field(manifest, "counts")
+    expected = _int_field(counts, "memories")
     records: list[dict[str, Any]] = []
     with open(pkg / MEMORIES_NAME, encoding="utf-8") as f:
         for line in f:
@@ -268,8 +376,7 @@ def _verify_memories(pkg: Path, manifest: dict[str, Any]) -> list[dict[str, Any]
                 )
             # Handoff-level strictness: content_hash is the hydration dedupe
             # key, so it must be a well-formed SHA-256 hex digest.
-            content_hash = str(normalized.get("content_hash") or "")
-            if len(content_hash) != 64 or any(c not in "0123456789abcdef" for c in content_hash):
+            if not _is_hex64(normalized.get("content_hash")):
                 raise HandoffError(
                     "invalid_memory_record",
                     file=MEMORIES_NAME,
@@ -289,20 +396,31 @@ def _verify_memories(pkg: Path, manifest: dict[str, Any]) -> list[dict[str, Any]
 def _verify_coverage_and_identity(
     manifest: dict[str, Any], entries: list[dict[str, Any]], memories: list[dict[str, Any]]
 ) -> None:
-    counts = manifest.get("counts") or {}
-    coverage = manifest.get("coverage") or {}
-    by_kind = counts.get("entries_by_kind") or {}
+    counts = _object_field(manifest, "counts")
+    coverage = _object_field(manifest, "coverage")
+    by_kind = counts.get("entries_by_kind")
+    if not isinstance(by_kind, dict):
+        raise _field_error("entries_by_kind", by_kind, "object")
+    for kind, count in by_kind.items():
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise _field_error(f"entries_by_kind.{kind}", count, "integer")
+    for list_field in ("omitted", "redacted"):
+        value = coverage.get(list_field)
+        if value is not None and not isinstance(value, list):
+            raise _field_error(f"coverage.{list_field}", value, "array")
+    for int_field in ("transferred", "omitted_count", "redacted_count"):
+        _int_field(coverage, int_field)
 
-    if coverage.get("transferred") != len(entries):
+    if coverage["transferred"] != len(entries):
         raise HandoffError(
             "coverage_mismatch",
             file=MANIFEST_NAME,
             expected=str(len(entries)),
-            actual=str(coverage.get("transferred")),
+            actual=str(coverage["transferred"]),
         )
-    if coverage.get("omitted_count") != len(coverage.get("omitted") or []):
+    if coverage["omitted_count"] != len(coverage.get("omitted") or []):
         raise HandoffError("coverage_mismatch", file=MANIFEST_NAME, actual="omitted_count")
-    if coverage.get("redacted_count") != len(coverage.get("redacted") or []):
+    if coverage["redacted_count"] != len(coverage.get("redacted") or []):
         raise HandoffError("coverage_mismatch", file=MANIFEST_NAME, actual="redacted_count")
     if sum(by_kind.values()) != len(entries):
         raise HandoffError("coverage_mismatch", file=MANIFEST_NAME, actual="entries_by_kind sum")
