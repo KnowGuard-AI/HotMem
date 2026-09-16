@@ -322,3 +322,31 @@ def test_default_limits_fixture_passes_unbounded():
     session = _read_fixture(limits=DEFAULT_LIMITS)
     assert len(session.omissions) == 6  # 5 unsupported fields + 1 hidden prompt
     assert all(o["recoverable"] or o["reason"].startswith("policy") for o in session.omissions)
+
+
+def test_credential_bearing_unknown_field_is_named_not_transferred(tmp_path):
+    """L3: unmapped source fields (incl. credentials) are never carried.
+
+    The contract's layer-1 guarantee is "never transferred, recorded by
+    name only" — a nested credential value must not appear anywhere in the
+    normalized session.
+    """
+    root = _write_export(
+        tmp_path,
+        [
+            _turn(1),
+            {
+                "type": "turn",
+                "id": "cx-002",
+                "seq": 2,
+                "role": "user",
+                "text": "ok",
+                "credentials": {"api_key": "abcd1234efgh"},
+            },
+        ],
+    )
+    session = read_codex_export(root, consent=CONSENT)
+    serialized = json.dumps({"e": session.entries, "o": session.omissions})
+    assert "abcd1234efgh" not in serialized
+    named = [o for o in session.omissions if o["field"] == "credentials"]
+    assert named and named[0]["recoverable"] is True

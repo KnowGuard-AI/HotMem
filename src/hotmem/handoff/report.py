@@ -23,7 +23,6 @@ from typing import Any
 # Canonical omission reasons (machine-stable; human-readable text follows).
 OMISSION_UNSUPPORTED = "unsupported source field"
 OMISSION_POLICY_HIDDEN = "policy: hidden prompts are never captured"
-OMISSION_POLICY_CREDENTIAL = "policy: credential-bearing source field is never read"
 OMISSION_TRUNCATED_ENTRY = "entry exceeded the per-entry byte bound; truncated"
 OMISSION_TRUNCATED_TOOL_RESULT = "tool result exceeded the tool-result byte bound; truncated"
 OMISSION_SESSION_CAPPED = "session exceeded max_session_entries; remainder not transferred"

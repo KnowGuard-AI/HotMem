@@ -47,7 +47,6 @@ MANIFEST_NAME = "manifest.json"
 SESSION_STREAM_NAME = "session.jsonl"
 MEMORIES_NAME = "memories.jsonl"
 BRIEF_NAME = "resume-brief.json"
-PACKAGE_FILE_NAMES = (MANIFEST_NAME, SESSION_STREAM_NAME, MEMORIES_NAME, BRIEF_NAME)
 
 MODE_RESUME = "resume"
 MODE_ARCHIVE = "archive"

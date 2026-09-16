@@ -146,12 +146,14 @@ The manifest `coverage` block is the operator-facing honesty layer:
 - `RedactionRecord`: `{where, field, kind, reason, recoverable}` — the
   secret *kind* and location, never the value. Redaction is deny-by-default
   for credentials, tokens, hidden prompts, and unrelated content.
-- Redaction is layered: (1) source fields never read — hidden prompts and
-  credential-bearing source metadata are skipped and recorded; (2) secret
-  patterns over all transferred text, replaced with `[REDACTED:<kind>]`;
-  (3) an output gate that re-scans rendered briefs and error strings.
-  Redacted values must never appear in the package, resume brief, logs, or
-  error text.
+- Redaction is layered: (1) source fields never transferred — hidden
+  prompts are never read at all and are recorded as policy omissions
+  (`recoverable: false`), and any source field the adapter does not map
+  (including credential-bearing metadata) is recorded by name only and
+  never carried into the package; (2) secret patterns over all transferred
+  text, replaced with `[REDACTED:<kind>]`; (3) an output gate that
+  re-scans rendered briefs and error strings. Redacted values must never
+  appear in the package, resume brief, logs, or error text.
 
 ## 8. Modes
 

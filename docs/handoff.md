@@ -50,12 +50,14 @@ Modes differ in content and coverage — never inferred at the target.
 - Consent is an **explicit, non-empty statement** required at every surface
   (CLI `--consent`, MCP `consent`, HTTP `consent`) and checked *before any
   session content is read*. Nothing is captured implicitly.
-- Redaction is deny-by-default and layered: hidden prompts and
-  credential-bearing source fields are never read; secret patterns (api
-  keys, tokens, bearer headers, PEM blocks, vendor-prefixed credentials)
-  are replaced with `[REDACTED:<kind>]`; and an output gate re-scans
-  rendered briefs and error strings. Redaction records carry the secret
-  *kind* and location — never the value.
+- Redaction is deny-by-default and layered: hidden prompts are never read
+  at all, and source fields the adapter does not map (including
+  credential-bearing metadata) are recorded by name only and never carried
+  into the package; secret patterns (api keys, tokens, bearer headers, PEM
+  blocks, vendor-prefixed credentials) are replaced with
+  `[REDACTED:<kind>]`; and an output gate re-scans rendered briefs and
+  error strings. Redaction records carry the secret *kind* and location —
+  never the value.
 - Every unsupported field, dropped item, or bound exceedance becomes a
   machine-readable omission record with a reason and a recoverability
   flag. The manifest's `coverage` block is the honesty layer.
