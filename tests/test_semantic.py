@@ -46,12 +46,20 @@ class _StubStaticModel:
 
 @pytest.fixture
 def stubbed_model2vec(monkeypatch: pytest.MonkeyPatch):
-    """Install a stub model2vec and import hotmem.semantic against it."""
+    """Install a stub model2vec and import hotmem.semantic against it.
+
+    Both the stub and the stubbed-imported module are removed on teardown:
+    leaving ``hotmem.semantic`` cached would let a later resolver call
+    succeed without the real extra installed, hiding the import gate in
+    environments where model2vec is absent (CI).
+    """
     monkeypatch.setitem(
         sys.modules, "model2vec", types.SimpleNamespace(StaticModel=_StubStaticModel)
     )
     sys.modules.pop("hotmem.semantic", None)
-    return importlib.import_module("hotmem.semantic")
+    module = importlib.import_module("hotmem.semantic")
+    yield module
+    sys.modules.pop("hotmem.semantic", None)
 
 
 _artifact_seq = 0
