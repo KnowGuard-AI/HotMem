@@ -364,3 +364,59 @@ def test_type_confused_manifest_never_writes_target(pkg, tmp_path):
         assert db.get_handoff("anything") is None
     finally:
         db.close()
+
+
+# ── Stable derived entry ids (L1) ───────────────────────────────────────────
+
+
+def test_valid_package_entry_ids_are_derived(pkg):
+    """Positive control: shipped ids equal entry_id_for(source identity)."""
+    from hotmem.handoff import entry_id_for
+
+    verified = verify_handoff(pkg)
+    entries = [json.loads(line) for line in verified.stream_lines()]
+    for entry in entries:
+        block = entry["source"]
+        assert entry["id"] == entry_id_for(
+            block["adapter"], block["session_id"], block["source_entry_id"]
+        )
+
+
+def test_non_derived_entry_id_fails_verification(pkg):
+    """A 64-hex id that is NOT derived from the source identity must fail.
+
+    Checksums and the content-derived package_id are refreshed so only the
+    id-derivation rule can catch it (handoff-v1 §1/§4 promise stable ids).
+    """
+    from hotmem.handoff import entry_content_hash, package_id_for
+
+    lines = [json.loads(line) for line in (pkg / "session.jsonl").read_text().splitlines()]
+    lines[0]["id"] = "f" * 64  # arbitrary, unrelated to source identity
+    _rewrite_payload(
+        pkg,
+        "session.jsonl",
+        "".join(json.dumps(e, sort_keys=True, separators=(",", ":")) + "\n" for e in lines),
+    )
+    memories = [
+        json.loads(line)
+        for line in (pkg / "memories.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    refreshed = package_id_for(
+        [entry_content_hash(e) for e in lines]
+        + [str(r.get("content_hash") or "") for r in memories]
+    )
+    _edit_manifest(pkg, lambda m: m.update(package_id=refreshed))
+
+    _expect_error(pkg, "entry_id_not_derived")
+
+
+def test_entry_with_missing_source_entry_id_fails(pkg):
+    lines = [json.loads(line) for line in (pkg / "session.jsonl").read_text().splitlines()]
+    lines[0]["source"].pop("source_entry_id")
+    _rewrite_payload(
+        pkg,
+        "session.jsonl",
+        "".join(json.dumps(e, sort_keys=True, separators=(",", ":")) + "\n" for e in lines),
+    )
+    _expect_error(pkg, "invalid_entry")

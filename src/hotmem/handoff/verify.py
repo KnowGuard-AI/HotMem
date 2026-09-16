@@ -39,6 +39,7 @@ from hotmem.handoff import (
     SCHEMA_VERSION,
     SESSION_STREAM_NAME,
     entry_content_hash,
+    entry_id_for,
     package_id_for,
 )
 from hotmem.handoff.redact import assert_no_secrets
@@ -323,6 +324,26 @@ def _verify_session_stream(pkg: Path, manifest: dict[str, Any]) -> tuple[list[di
                 "invalid_entry",
                 file=SESSION_STREAM_NAME,
                 actual=f"{entry_id[:12]} summary",
+            )
+        # Stable ids are part of the contract (handoff-v1 §1/§4): every entry
+        # id must be derivable from its source identity, so brief links and
+        # re-prepares stay stable. A package carrying arbitrary ids fails.
+        block = entry["source"]
+        for label in ("adapter", "session_id", "source_entry_id"):
+            value = block.get(label)
+            if not isinstance(value, str) or not value:
+                raise HandoffError(
+                    "invalid_entry",
+                    file=SESSION_STREAM_NAME,
+                    actual=f"{entry_id[:12]} source.{label}",
+                )
+        expected_id = entry_id_for(block["adapter"], block["session_id"], block["source_entry_id"])
+        if entry_id != expected_id:
+            raise HandoffError(
+                "entry_id_not_derived",
+                file=SESSION_STREAM_NAME,
+                expected=expected_id[:12],
+                actual=entry_id[:12],
             )
         seq = entry.get("seq")
         if isinstance(seq, bool) or not isinstance(seq, int) or seq <= last_seq:
