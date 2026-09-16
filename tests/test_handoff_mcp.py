@@ -60,6 +60,38 @@ def test_handoff_prepare_requires_consent(state, tmp_path):
     assert "consent" in payload["error"]
 
 
+@pytest.mark.parametrize("bad_consent", [None, 123, [], {}, True])
+def test_handoff_prepare_rejects_non_string_consent(state, tmp_path, bad_consent):
+    """M1: a null/non-string consent must never become a recorded consent.
+
+    ``str(None)`` would otherwise pass as the literal statement "None" and
+    the manifest would claim ``given: true`` — a false consent record on
+    exactly the surface that must never capture implicitly.
+    """
+    out = tmp_path / "pkg"
+    result = _handle_handoff_prepare(
+        state, {"source": str(FIXTURE), "output": str(out), "consent": bad_consent}
+    )
+    assert result.isError
+    assert "consent" in _text(result)["error"]
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("bad_path", [None, 123, [], {}])
+def test_handoff_prepare_rejects_non_string_paths(state, tmp_path, bad_path):
+    """Wrong-typed paths are structured errors, not exceptions out of the handler."""
+    result = _handle_handoff_prepare(
+        state, {"source": bad_path, "output": str(tmp_path / "pkg"), "consent": CONSENT}
+    )
+    assert result.isError
+    assert "path string" in _text(result)["error"]
+    result = _handle_handoff_prepare(
+        state, {"source": str(FIXTURE), "output": bad_path, "consent": CONSENT}
+    )
+    assert result.isError
+    assert "path string" in _text(result)["error"]
+
+
 def test_handoff_prepare_emits_identity_and_coverage(state, tmp_path):
     result = _handle_handoff_prepare(
         state,

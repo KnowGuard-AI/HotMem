@@ -403,17 +403,32 @@ def _handle_handoff_prepare(state: _ServerState, arguments: dict[str, Any]) -> C
     """Prepare a handoff package from a source export (#101).
 
     Consent is required and checked before any session content is read —
-    an MCP host can never capture a session implicitly.
+    an MCP host can never capture a session implicitly. Argument types are
+    validated here because MCP hosts are not required to honour the
+    declared inputSchema: coercing a missing/null consent to the string
+    "None" would record a false consent statement.
     """
     from hotmem.handoff.codex_source import SourceError
     from hotmem.handoff.package import prepare_handoff
 
+    consent = arguments["consent"]
+    if not isinstance(consent, str) or not consent.strip():
+        return _error(
+            "explicit consent is required before any session content is read; "
+            "pass a non-empty consent string"
+        )
+    source = arguments["source"]
+    output = arguments["output"]
+    for name, value in (("source", source), ("output", output)):
+        if not isinstance(value, str) or not value.strip():
+            return _error(f"{name} must be a non-empty path string")
+
     try:
         result = prepare_handoff(
-            arguments["source"],
-            arguments["output"],
+            source,
+            output,
             mode=str(arguments.get("mode") or "resume"),
-            consent=str(arguments["consent"]),
+            consent=consent,
             session_id=arguments.get("session"),
         )
     except (SourceError, ValueError) as err:
