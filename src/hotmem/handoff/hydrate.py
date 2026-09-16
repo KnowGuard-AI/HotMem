@@ -38,7 +38,7 @@ from hotmem.handoff.verify import VerifiedHandoff, verify_handoff
 from hotmem.interchange.canonical import compute_content_hash
 from hotmem.interchange.compat import resolve_embedding
 from hotmem.interchange.record import normalize_record
-from hotmem.swap import _HYDRATE_BATCH, record_to_memory_record
+from hotmem.swap import HYDRATE_BATCH, record_to_memory_record
 from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("handoff.hydrate")
@@ -208,7 +208,7 @@ def hydrate_handoff(
                     counters["invalid"] += 1
                     continue
                 memory_records.append(rec)
-                if len(memory_records) >= _HYDRATE_BATCH:
+                if len(memory_records) >= HYDRATE_BATCH:
                     insert_records(memory_records)
                     memory_records = []
             insert_records(memory_records)

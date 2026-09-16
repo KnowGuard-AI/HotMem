@@ -58,9 +58,10 @@ from hotmem.handoff import (
     package_id_for,
 )
 from hotmem.handoff.brief import build_brief
-from hotmem.handoff.codex_source import NormalizedSession, read_codex_export
+from hotmem.handoff.codex_source import read_codex_export
 from hotmem.handoff.redact import redact_normalized
 from hotmem.handoff.report import OMISSION_RESUME_BOUNDED, build_coverage, omission
+from hotmem.handoff.session import NormalizedSession
 from hotmem.interchange.canonical import canonical_line, sha256_file
 from hotmem.trace import Timer, get_tracer
 

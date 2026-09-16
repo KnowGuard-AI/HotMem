@@ -20,7 +20,7 @@ Interface:
     BriefDocument.text / .sections / .links / .char_count / .to_dict()
     TOOL_HISTORY_MARKER — the explicit no-re-run marker (acceptance 10)
 
-Deps: hotmem.handoff (kinds), hotmem.handoff.codex_source (NormalizedSession
+Deps: hotmem.handoff (kinds), hotmem.handoff.session (NormalizedSession
     shape), hotmem.handoff.redact (output gate).
 Extension: section set and trim order are contract-visible; change them only
     with a golden-fixture update.
@@ -32,8 +32,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from hotmem.handoff import DEFAULT_LIMITS, EntryKind
-from hotmem.handoff.codex_source import NormalizedSession
 from hotmem.handoff.redact import assert_no_secrets
+from hotmem.handoff.session import NormalizedSession
 from hotmem.trace import get_tracer
 
 _trace = get_tracer("handoff.brief")

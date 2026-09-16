@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +50,7 @@ from hotmem.handoff.report import (
     OMISSION_UNSUPPORTED,
     omission,
 )
+from hotmem.handoff.session import NormalizedSession
 from hotmem.interchange.canonical import compute_content_hash
 from hotmem.trace import get_tracer
 
@@ -113,22 +113,6 @@ class ExportFormatError(SourceError):
 
 class MalformedSourceError(SourceError):
     """Raised on structurally invalid source lines (with line numbers)."""
-
-
-@dataclass(frozen=True)
-class NormalizedSession:
-    """The adapter output consumed by the package writer."""
-
-    adapter: str
-    adapter_version: str
-    session_id: str
-    label: str
-    time_range: dict[str, Any]
-    codex_version: str | None
-    entries: list[dict[str, Any]] = field(default_factory=list)
-    memory_records: list[dict[str, Any]] = field(default_factory=list)
-    omissions: list[dict[str, Any]] = field(default_factory=list)
-    redactions: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _require_consent(consent: str | None) -> str:

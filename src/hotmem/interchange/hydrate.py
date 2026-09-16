@@ -50,7 +50,7 @@ from hotmem.interchange.package import (
 )
 from hotmem.interchange.paths import confined_relpath
 from hotmem.interchange.record import normalize_record, validate_record
-from hotmem.swap import _HYDRATE_BATCH, HydrateResult, record_to_memory_record
+from hotmem.swap import HYDRATE_BATCH, HydrateResult, record_to_memory_record
 from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("interchange.hydrate")
@@ -426,7 +426,7 @@ def hydrate_package(
                     continue
                 batch_seen.add(content_hash)
                 pending.append(rec)
-                if len(pending) >= _HYDRATE_BATCH:
+                if len(pending) >= HYDRATE_BATCH:
                     flush()
             flush()
             db.commit()

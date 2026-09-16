@@ -16,7 +16,7 @@ Interface:
     assert_no_secrets(text) — the output gate (raises RedactionLeakError)
     redact_normalized(session) -> NormalizedSession     # entries + memories
 
-Deps: stdlib + hotmem.handoff (NormalizedSession) + hotmem.handoff.report.
+Deps: stdlib + hotmem.handoff.session (NormalizedSession) + hotmem.handoff.report.
 Extension: new credential shapes append (kind, pattern, reason) tuples to
     the pattern set; kinds are machine-stable contract values.
 """
@@ -27,8 +27,8 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any
 
-from hotmem.handoff.codex_source import NormalizedSession
 from hotmem.handoff.report import redaction
+from hotmem.handoff.session import NormalizedSession
 from hotmem.trace import get_tracer
 
 _trace = get_tracer("handoff.redact")

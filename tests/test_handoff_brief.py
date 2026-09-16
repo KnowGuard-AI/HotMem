@@ -19,8 +19,9 @@ from pathlib import Path
 import pytest
 
 from hotmem.handoff.brief import TOOL_HISTORY_MARKER, build_brief
-from hotmem.handoff.codex_source import NormalizedSession, read_codex_export
+from hotmem.handoff.codex_source import read_codex_export
 from hotmem.handoff.redact import RedactionLeakError, redact_normalized
+from hotmem.handoff.session import NormalizedSession
 
 FIXTURE = Path(__file__).parent / "fixtures" / "codex_export"
 CONSENT = "I consent to capturing this session for the handoff showcase."

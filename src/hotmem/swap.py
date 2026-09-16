@@ -122,7 +122,7 @@ def _open_swap_write(path: Path) -> Iterator[TextIO]:
 
 # Hydration flushes in bounded batches: bounded memory + batched (database-backed)
 # dedup instead of loading the entire destination hash set (interchange #67).
-_HYDRATE_BATCH = 1000
+HYDRATE_BATCH = 1000
 
 
 def record_to_memory_record(
@@ -310,7 +310,7 @@ def hydrate(
                         continue
                     batch_seen.add(content_hash)
                     pending.append(rec)
-                    if len(pending) >= _HYDRATE_BATCH:
+                    if len(pending) >= HYDRATE_BATCH:
                         flush()
         except (EOFError, OSError) as err:
             if _swap_format(swap_path) == "jsonl.gz":
