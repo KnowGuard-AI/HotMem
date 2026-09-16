@@ -26,7 +26,7 @@ Rules — a stored embedding is reused iff ALL hold:
 Interface:
     compatible_embedding_blob(record, *, descriptor=None) -> bytes | None
     resolve_embedding(record, *, embedder=None) -> (blob, model, dim, status)
-    EMBEDDING_STATUSES — "reused" | "rebuilt" | "missing" | "failed"
+        where status is "reused" | "rebuilt" | "missing" | "failed"
 
 Deps: hotmem.embed protocol + hash implementation.
 Extension: optional/hosted adapters implement the same Embedder protocol;
@@ -54,7 +54,6 @@ from hotmem.trace import get_tracer
 _trace = get_tracer("interchange.compat")
 
 EmbeddingStatus = Literal["reused", "rebuilt", "missing", "failed"]
-EMBEDDING_STATUSES: tuple[EmbeddingStatus, ...] = ("reused", "rebuilt", "missing", "failed")
 
 _L2_NORM_TOLERANCE = 1e-3
 

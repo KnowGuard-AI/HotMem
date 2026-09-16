@@ -145,10 +145,14 @@ compatibility.
 | `hotmem-hash-v1` | The deterministic hash default — key unchanged, so existing records, packages, and markers stay valid |
 | structured key (e.g. `local/mini/rev:r1/norm:l2/pp:pp1`) | A semantic adapter's descriptor; reusable only by an active embedder with the identical key and dimension |
 
-The package/delta manifest `embedding` block remains
-`{"model": <descriptor key>, "dim": <dimension>}`; producers may add a full
-`descriptor` object (the seven fields above) additively — readers ignore
-unknown manifest fields. Rehydration reports four embedding statuses per
+The package/delta manifest `embedding` block is derived from the payload's
+embedded rows: a uniform store records `{"model": <descriptor key>,
+"dim": <dimension>}`; a mixed-space store records `{"model": "mixed",
+"dim": 0}` because no single key can describe it (per-record fields stay
+authoritative); a store with no embedded rows keeps the hash default.
+Hash-only packages are byte-identical to previous versions. Producers may
+add further descriptor detail additively — readers ignore unknown manifest
+fields. Rehydration reports four embedding statuses per
 run: `embedding_reused`, `embedding_rebuilt`, `embedding_missing`
 (textless file-backed rows keep the NULL-embedding convention), and
 `embedding_failed` (provider errors: the canonical record still loads; an

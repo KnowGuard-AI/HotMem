@@ -253,6 +253,25 @@ def test_search_projects_only_the_rerank_window(tmp_path: Path):
     db.close()
 
 
+def test_zero_norm_candidate_vectors_never_divide_or_crash():
+    """Regression: a zero-norm candidate vector scores 0.0 similarity
+    (canonical cosine semantics) instead of raising ZeroDivisionError."""
+    import struct as _struct
+
+    cands = _candidates(("z", 0.9, "x"), ("a", 0.8, "y"), ("b", 0.7, "z"))
+    base = [1.0] + [0.0] * 7
+    zero = [0.0] * 8
+
+    def fetch(ids: list[str]) -> dict[str, bytes]:
+        vectors = {"z": zero, "a": base, "b": [0.0, 1.0] + [0.0] * 6}
+        return {i: _struct.pack(f"{len(vectors[i])}f", *vectors[i]) for i in ids}
+
+    ordered = MMRReranker(lambda_=0.5).rerank("q", cands, top_k=3, fetch_embeddings=fetch)
+    assert ordered == ["z", "a", "b"]  # deterministic, no exception
+    # And the same shape through search never falls back on an internal error.
+    assert len(ordered) == 3
+
+
 # ── configuration path ──────────────────────────────────────────────────────
 
 

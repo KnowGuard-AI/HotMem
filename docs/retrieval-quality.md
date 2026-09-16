@@ -145,6 +145,14 @@ index once (`POST /v1/vector-index/rebuild`); the marker is stamped from the
 active descriptor, so a switch reads stale and falls back to the exact scan
 until rebuilt — never auto-migrated at startup.
 
+**Rolling back or switching embedders (derived index):** the vector index is
+disposable derived state. Delete its directory — `<base_dir>/hotmem-vector-index/`
+— before serving under a different (or pre-#78) version; search then falls
+back to the deterministic SQLite scan, and you rebuild deliberately once the
+runtime is settled. Never copy an index across embedding spaces, and never
+let a stale marker outlive a version rollback: canonical SQLite/files/bundles
+are the only state that must survive.
+
 **Enable diversity re-ranking** where duplicates crowd the top-k:
 
 ```bash

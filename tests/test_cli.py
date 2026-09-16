@@ -54,6 +54,35 @@ def test_status_down_exits_nonzero():
     assert "No HotMem server" in result.output
 
 
+def test_ingestion_commands_share_the_embedder_config(tmp_path: Path):
+    """#78 review: hydrate / delta apply / import accept the shared embedder
+    configuration and fail fast before touching data."""
+    runner = CliRunner()
+    for args in (["hydrate", "--help"], ["delta", "apply", "--help"], ["import", "--help"]):
+        result = runner.invoke(main, args)
+        assert result.exit_code == 0, result.output
+        assert "--embedder" in result.output
+        assert "--embedder-model-path" in result.output
+
+    # Invalid selection resolves before the DB is opened: actionable error.
+    result = runner.invoke(
+        main,
+        [
+            "hydrate",
+            "--file",
+            str(tmp_path / "missing.jsonl"),
+            "--db",
+            str(tmp_path / "x.sqlite"),
+            "--embedder",
+            "local-semantic",
+        ],
+    )
+    assert result.exit_code != 0
+    message = result.output + str(result.exception or "")
+    assert "never downloads" in message or "[semantic]" in message
+    assert not (tmp_path / "x.sqlite").exists()  # failed before opening the DB
+
+
 # ── hydrate ────────────────────────────────────────────────────────────
 
 

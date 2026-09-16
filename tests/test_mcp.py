@@ -113,6 +113,11 @@ def test_snapshot_and_hydrate(state: _ServerState, tmp_path: Path):
         loaded = _text(_handle_hydrate(other, {"file": swap}))
         assert loaded["loaded"] == 1
         assert other_db.count() == 1
+        # Disposition parity with the HTTP surface (issues #78/#79): the
+        # one shared definition reports embedding AND annotation counters.
+        assert loaded["embedding_reused"] == 1
+        assert loaded["annotations_merged"] == 0
+        assert loaded["annotation_conflicts"] == 0
     finally:
         other_db.close()
 

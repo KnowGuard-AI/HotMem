@@ -316,11 +316,9 @@ def _handle_hydrate(state: _ServerState, arguments: dict[str, Any]) -> CallToolR
             "loaded": result.loaded,
             "skipped_dupes": result.skipped_dupes,
             "invalid": result.invalid,
-            # Embedding disposition (issue #78; additive).
-            "embedding_reused": result.embedding_reused,
-            "embedding_rebuilt": result.embedding_rebuilt,
-            "embedding_missing": result.embedding_missing,
-            "embedding_failed": result.embedding_failed,
+            # Embedding + annotation dispositions (issues #78/#79; additive)
+            # — one shared definition with HTTP and CLI.
+            **result.disposition(),
         }
     )
 

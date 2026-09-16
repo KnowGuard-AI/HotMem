@@ -30,9 +30,9 @@ import hashlib
 import math
 import os
 import struct
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Protocol
+from typing import Protocol
 
 from hotmem.trace import Timer, get_tracer
 
@@ -117,16 +117,6 @@ class EmbeddingDescriptor:
         if self.preprocessing:
             parts.append(f"pp:{self.preprocessing}")
         return "/".join(parts)
-
-    def as_dict(self) -> dict[str, Any]:
-        """Serializable form for package/delta manifest descriptor blocks."""
-        return {f.name: getattr(self, f.name) for f in fields(self)}
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> EmbeddingDescriptor:
-        """Parse a descriptor block, ignoring unknown keys (forward-compat)."""
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in (data or {}).items() if k in known})
 
 
 HASH_DESCRIPTOR = EmbeddingDescriptor(
@@ -265,3 +255,20 @@ def unpack_embedding(blob: bytes) -> list[float]:
     """Unpack binary blob back into float vector."""
     count = len(blob) // 4
     return list(struct.unpack(f"{count}f", blob))
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two vectors — the one canonical definition.
+
+    Shared by the SQLite scoring UDF and the second-stage reranker (#80
+    review: ranking stages must not drift). Missing/degenerate inputs score
+    exactly 0.0: empty vectors, length mismatch, and zero norms.
+    """
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)

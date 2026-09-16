@@ -21,7 +21,6 @@ Extension: add indexes, FTS5, or WAL mode tuning here.
 from __future__ import annotations
 
 import json
-import math
 import re
 import sqlite3
 import struct
@@ -30,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL
+from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, cosine
 from hotmem.trace import get_tracer
 
 _trace = get_tracer("db")
@@ -272,22 +271,18 @@ class MemoryRecord:
 def _cosine_similarity(blob_a: bytes | None, blob_b: bytes | None) -> float | None:
     """SQLite UDF: cosine similarity between two packed float32 blobs.
 
-    Returns 0.0 for NULL embeddings (file-backed without summary) so they
-    rank last but don't break search queries.
+    Delegates the math to ``hotmem.embed.cosine`` — the one canonical
+    definition shared with the second-stage reranker (#80 review), so the
+    ranking stages cannot drift. Returns 0.0 for NULL embeddings
+    (file-backed without summary) so they rank last but don't break search
+    queries.
     """
     if blob_a is None or blob_b is None:
         return 0.0
     n = len(blob_a) // 4
     if n == 0 or len(blob_b) // 4 != n:
         return 0.0  # empty or mismatched embeddings score 0
-    a = struct.unpack(f"{n}f", blob_a)
-    b = struct.unpack(f"{n}f", blob_b)
-    dot = sum(x * y for x, y in zip(a, b, strict=True))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+    return cosine(list(struct.unpack(f"{n}f", blob_a)), list(struct.unpack(f"{n}f", blob_b)))
 
 
 def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:

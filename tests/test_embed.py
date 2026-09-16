@@ -218,20 +218,19 @@ def test_descriptor_validation_rejects_invalid():
         EmbeddingDescriptor(implementation="a", model="m", dimension=8, metric="dot")
 
 
-def test_descriptor_roundtrip_dict():
-    local = EmbeddingDescriptor(
-        implementation="local",
-        model="mini",
-        dimension=384,
-        revision="r1",
-        preprocessing="pp1",
-    )
-    assert EmbeddingDescriptor.from_dict(local.as_dict()) == local
-    # Unknown keys are ignored (forward-compat manifest parsing).
-    assert EmbeddingDescriptor.from_dict({**local.as_dict(), "future": "field"}) == local
-    # Required fields stay required - a malformed block fails clearly.
-    with pytest.raises(TypeError):
-        EmbeddingDescriptor.from_dict({"model": "mini"})
+def test_cosine_is_the_one_canonical_definition():
+    """Cosine semantics shared by the SQL UDF and the reranker (#80 review)."""
+    from hotmem.embed import cosine
+
+    assert cosine([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
+    assert cosine([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
+    assert cosine([1.0, 0.0], [-1.0, 0.0]) == pytest.approx(-1.0)
+    assert cosine([2.0, 0.0], [3.0, 0.0]) == pytest.approx(1.0)  # scale-invariant
+    # Degenerate inputs score exactly 0.0, never raise or divide.
+    assert cosine([], []) == 0.0
+    assert cosine([0.0, 0.0], [1.0, 0.0]) == 0.0  # zero norm
+    assert cosine([1.0, 0.0], [1.0, 0.0, 0.0]) == 0.0  # length mismatch
+    assert cosine([1.0], []) == 0.0
 
 
 def test_two_hash_instances_are_isolated_but_equal():

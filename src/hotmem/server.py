@@ -664,14 +664,9 @@ def create_app(
             "skipped_dupes": result.skipped_dupes,
             "invalid": result.invalid,
             "path": target,
-            # Embedding disposition (issue #78; additive response fields).
-            "embedding_reused": result.embedding_reused,
-            "embedding_rebuilt": result.embedding_rebuilt,
-            "embedding_missing": result.embedding_missing,
-            "embedding_failed": result.embedding_failed,
-            # Annotation merge disposition (issue #79; additive).
-            "annotations_merged": result.annotations_merged,
-            "annotation_conflicts": result.annotation_conflicts,
+            # Embedding + annotation dispositions (issues #78/#79; additive
+            # response fields) — one shared definition with MCP and CLI.
+            **result.disposition(),
         }
 
     @app.post("/v1/snapshot")

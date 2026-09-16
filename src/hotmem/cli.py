@@ -249,9 +249,22 @@ def mcp(
     help="Snapshot path: a directory (v2) or .jsonl/.jsonl.gz file (legacy).",
 )
 @click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
-def hydrate(swap_file: str, db_path: str):
-    """Load a snapshot into the database (v2 directory or legacy JSONL)."""
+@_embedder_options
+def hydrate(
+    swap_file: str,
+    db_path: str,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+):
+    """Load a snapshot into the database (v2 directory or legacy JSONL).
+
+    Embeddings are rebuilt under the configured embedder (issues #78/#79):
+    match the runtime the store is served with so imported rows are
+    cosinely searchable — compatible stored vectors are reused either way.
+    """
     from hotmem.db import MemoryDB
+
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
 
     # Route v2 directories through the snapshot dispatch (no progress bar);
     # legacy .jsonl/.jsonl.gz goes through swap.hydrate with the UI progress bar.
@@ -263,7 +276,7 @@ def hydrate(swap_file: str, db_path: str):
 
         db = MemoryDB(db_path)
         try:
-            result = do_hydrate_v2(db, swap_file)
+            result = do_hydrate_v2(db, swap_file, embedder=embedder)
         except (SnapshotChecksumError, PackageError) as err:
             db.close()
             reason = getattr(err, "reason", "checksum")
@@ -274,10 +287,7 @@ def hydrate(swap_file: str, db_path: str):
             loaded=result.loaded,
             skipped_dupes=result.skipped_dupes,
             invalid=result.invalid,
-            embedding_reused=result.embedding_reused,
-            embedding_rebuilt=result.embedding_rebuilt,
-            embedding_missing=result.embedding_missing,
-            embedding_failed=result.embedding_failed,
+            **result.disposition(),
         )
         return
 
@@ -289,7 +299,7 @@ def hydrate(swap_file: str, db_path: str):
 
     db = MemoryDB(db_path)
     with ui.progress(total=total, desc="Hydrating") as tick:
-        result = do_hydrate(db, swap_file, on_progress=tick)
+        result = do_hydrate(db, swap_file, on_progress=tick, embedder=embedder)
     db.close()
 
     ui.summary(
@@ -297,10 +307,7 @@ def hydrate(swap_file: str, db_path: str):
         loaded=result.loaded,
         skipped_dupes=result.skipped_dupes,
         invalid=result.invalid,
-        embedding_reused=result.embedding_reused,
-        embedding_rebuilt=result.embedding_rebuilt,
-        embedding_missing=result.embedding_missing,
-        embedding_failed=result.embedding_failed,
+        **result.disposition(),
     )
 
 
@@ -648,12 +655,21 @@ def playground(
     type=click.Path(),
     help="Keep the intermediate HotMem swap JSONL at this path (default: temp, deleted).",
 )
-def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str | None):
+@_embedder_options
+def import_cmd(
+    source: str,
+    source_db: str,
+    target_db: str | None,
+    swap_out: str | None,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+):
     """Import memories from a foreign memory system into HotMem.
 
     One-command migration: read the source store, convert to HotMem swap JSONL,
-    hydrate into the target DB. Embeddings are re-computed by HotMem's
-    embedder (source dims differ, so reuse is not possible).
+    hydrate into the target DB. Embeddings are re-computed under the
+    configured embedder (source dims differ, so reuse is not possible) —
+    match the runtime the target is served with (issues #78/#79).
 
     OKF bundles (--from okf) convert every markdown concept page into one
     deterministic, reviewable JSONL record BEFORE hydration — keep it with
@@ -667,6 +683,7 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
     from hotmem.swap import hydrate as do_hydrate
     from hotmem.swap import write_record
 
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     reader = IMPORTERS[source.lower()]
     # OKF records serialize canonically (sorted, compact, UTF-8) so the
     # reviewable JSONL is byte-stable across runs (#68 acceptance); mem0
@@ -698,7 +715,7 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
         try:
             total = os.path.getsize(swap_path) if os.path.exists(swap_path) else 0
             with ui.progress(total=total, desc="Hydrating") as tick:
-                result = do_hydrate(db, swap_path, on_progress=tick)
+                result = do_hydrate(db, swap_path, on_progress=tick, embedder=embedder)
         finally:
             db.close()
 
@@ -842,7 +859,13 @@ def delta_produce(base_pkg: str, db_path: str, out_dir: str, gz: bool):
     help="Delta package directory (hotmem-delta-v1).",
 )
 @click.option("--db", "db_path", required=True, type=click.Path(), help="Receiver database path.")
-def delta_apply(delta_dir: str, db_path: str):
+@_embedder_options
+def delta_apply(
+    delta_dir: str,
+    db_path: str,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+):
     """Apply a verified delta to a receiver instance (all-or-nothing).
 
     Conflicts (diverged receiver, missing base) abort the whole delta and
@@ -854,9 +877,10 @@ def delta_apply(delta_dir: str, db_path: str):
     from hotmem.interchange.delta import apply_delta as do_apply
     from hotmem.interchange.hydrate import PackageError
 
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     db = MemoryDB(db_path)
     try:
-        result = do_apply(db, delta_dir)
+        result = do_apply(db, delta_dir, embedder=embedder)
     except DeltaConflictError as err:
         db.close()
         for conflict in err.conflicts:

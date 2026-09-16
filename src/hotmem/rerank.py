@@ -155,14 +155,17 @@ def _dot(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b, strict=True))
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    if len(a) != len(b) or not a:
+def _similarity(a: list[float], b: list[float], norm_a: float, norm_b: float) -> float:
+    """Cosine of two same-length vectors with precomputed norms.
+
+    The incremental MMR loop caches norms, so this is the shared
+    ``hotmem.embed.cosine`` formula with the redundant recomputation
+    removed. Degenerate inputs score 0.0 exactly like the canonical
+    definition: a zero norm or a length mismatch never divides.
+    """
+    if len(a) != len(b) or not a or norm_a == 0.0 or norm_b == 0.0:
         return 0.0
-    na = _norm(a)
-    nb = _norm(b)
-    if na == 0.0 or nb == 0.0:
-        return 0.0
-    return _dot(a, b) / (na * nb)
+    return _dot(a, b) / (norm_a * norm_b)
 
 
 @dataclass(frozen=True)
@@ -279,9 +282,9 @@ class MMRReranker:
                 new_norm = norms[best.memory_id]
                 for cand in remaining:
                     vec = vectors.get(cand.memory_id)
-                    if vec is None or new_norm == 0.0:
+                    if vec is None:
                         continue
-                    sim = _dot(vec, new_vec) / (norms[cand.memory_id] * new_norm)
+                    sim = _similarity(vec, new_vec, norms[cand.memory_id], new_norm)
                     if sim > max_sim[cand.memory_id]:
                         max_sim[cand.memory_id] = sim
 

@@ -64,6 +64,21 @@ class HydrateResult:
     annotations_merged: int = 0
     annotation_conflicts: int = 0
 
+    def disposition(self) -> dict[str, int]:
+        """The per-run embedding + annotation counters, one definition.
+
+        Every hydrate surface (HTTP, MCP, CLI) reports from this dict so
+        the field lists cannot drift apart (#78/#79 review).
+        """
+        return {
+            "embedding_reused": self.embedding_reused,
+            "embedding_rebuilt": self.embedding_rebuilt,
+            "embedding_missing": self.embedding_missing,
+            "embedding_failed": self.embedding_failed,
+            "annotations_merged": self.annotations_merged,
+            "annotation_conflicts": self.annotation_conflicts,
+        }
+
 
 @dataclass
 class SnapshotResult:

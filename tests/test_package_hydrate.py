@@ -18,6 +18,51 @@ from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, HashEmbedder, embed_tex
 from hotmem.interchange.canonical import canonical_line, compute_content_hash
 from hotmem.interchange.hydrate import PackageError, hydrate_package, verify_package
 from hotmem.interchange.package import MANIFEST_NAME, PAYLOAD_GZ, PAYLOAD_PLAIN, write_package
+from hotmem.swap import add_memory
+
+
+def test_manifest_embedding_block_describes_the_payload_space(tmp_path: Path):
+    """#78: the manifest block is derived from payload rows — a semantic
+    package never claims the hash default, mixed stores say so."""
+    from test_embedder_injection import SemanticFake
+
+    # Hash-only stores keep the historical bytes exactly.
+    hash_db = MemoryDB(tmp_path / "hash-manifest.sqlite")
+    add_memory(hash_db, "v", "hash manifest fact")
+    hash_pkg = tmp_path / "hash-manifest.pkg"
+    write_package(hash_db, hash_pkg)
+    hash_manifest = json.loads((hash_pkg / MANIFEST_NAME).read_text())
+    assert hash_manifest["embedding"] == {"model": EMBEDDING_MODEL, "dim": EMBEDDING_DIM}
+
+    # A uniformly semantic store records its own descriptor key + dimension.
+    sem = SemanticFake()
+    sem_db = MemoryDB(tmp_path / "sem-manifest.sqlite")
+    add_memory(sem_db, "v", "semantic manifest fact", embedder=sem)
+    sem_pkg = tmp_path / "sem-manifest.pkg"
+    write_package(sem_db, sem_pkg)
+    sem_manifest = json.loads((sem_pkg / MANIFEST_NAME).read_text())
+    assert sem_manifest["embedding"] == {
+        "model": sem.descriptor.key,
+        "dim": sem.descriptor.dimension,
+    }
+
+    # A mixed-space store cannot name one space: "mixed"/0, and the records
+    # keep their own fields (per-record identity stays authoritative).
+    sem_db.insert(
+        id="foreign-row",
+        identifier="foreign",
+        fact_text="foreign manifest fact",
+        embedding=pack_embedding([0.0] * EMBEDDING_DIM),
+        embedding_dim=EMBEDDING_DIM,
+        embedding_model="foreign/v9",
+        content_hash="foreign-hash-1",
+    )
+    mixed_pkg = tmp_path / "mixed-manifest.pkg"
+    write_package(sem_db, mixed_pkg)
+    mixed_manifest = json.loads((mixed_pkg / MANIFEST_NAME).read_text())
+    assert mixed_manifest["embedding"] == {"model": "mixed", "dim": 0}
+    hash_db.close()
+    sem_db.close()
 
 
 def _make_db(tmp_path: Path, n: int = 3) -> MemoryDB:
