@@ -60,4 +60,5 @@ nav:
   - API Reference: api.md
   - CLI: cli.md
   - Snapshot v2 Format: snapshot-v2.md
+  - Session Handoff: handoff.md
   - Retrieval Quality: retrieval-quality.md

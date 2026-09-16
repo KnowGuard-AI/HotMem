@@ -130,3 +130,44 @@ hotmem openapi --output openapi.yaml --format yaml
 ```
 
 Or fetch it from a running server: `GET /openapi.json`
+
+## 10. Session Handoff (#101)
+
+Verified handoff packages (`hotmem-handoff-v1`) wrap the same core
+functions as the CLI and MCP tools. Consent is required on prepare and
+checked before any session content is read.
+
+### `POST /v1/handoff/prepare`
+
+```json
+{"source": "./codex_export", "output": "./handoff",
+ "mode": "resume", "consent": "I consent to capturing this session",
+ "session": "sess-7f3a2b"}
+```
+
+Returns `handoff_id`, `package_id`, `mode`, `entries`, `memories`,
+`coverage` (omitted/redacted/recoverable counts), `path`, and
+`timings_ms`. A missing or empty `consent` returns **400** before
+anything is written.
+
+### `POST /v1/handoff/verify`
+
+`{"package": "./handoff"}` → `{"valid": true, "package_id", "mode",
+"entries", "memories"}`; invalid packages return **409** with the
+structured body `{"error": "handoff_invalid", "reason", "file",
+"expected", "actual", "message"}`.
+
+### `GET /v1/handoff/inspect?package=…`
+
+Read-only report for valid AND invalid packages: identity, source/target,
+counts, coverage (including full omission/redaction lists), limits, and a
+`failure` block when invalid. Nothing is written; invalid packages are
+reported as data.
+
+### `POST /v1/handoff/hydrate`
+
+`{"package": "./handoff"}` → hydrates into this sidecar's database
+atomically and idempotently: `{"handoff_id", "package_id", "loaded",
+"skipped", "invalid", "already_applied", "brief", …embedding
+dispositions}`. Invalid packages return **409** without touching the
+store. The hydrated resume brief is retrievable through `POST /v1/search`.

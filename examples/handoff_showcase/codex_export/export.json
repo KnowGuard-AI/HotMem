@@ -1,0 +1,12 @@
+{
+  "format": "codex-export-v1",
+  "exported_at": "2026-09-16T12:00:00Z",
+  "session": {
+    "id": "sess-7f3a2b",
+    "label": "hotmem-showcase-planning",
+    "started_at": "2026-09-16T09:00:00Z",
+    "ended_at": "2026-09-16T11:45:00Z",
+    "adapter": "codex-export",
+    "codex_version": "1.4.2"
+  }
+}
