@@ -18,6 +18,9 @@ harden into final API or format specifications.
   record, manifest, and hydration contract (#67).
 - [Delta Contract v1](delta-v1.md) — normative `hotmem-delta-v1` verified
   one-way incremental transfer (#73).
+- [Session Handoff Contract v1](handoff-v1.md) — normative `hotmem-handoff-v1`
+  package, verification, and hydration semantics for the Codex → HotMem →
+  Claude showcase (#101).
 - [Company-Brain Interchange Strategy](company-brain-interchange.md) — the
   accepted strategy behind #67–#73.
 - [Format and Maintenance](format-and-maintenance.md)
