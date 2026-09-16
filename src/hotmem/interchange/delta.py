@@ -48,6 +48,7 @@ from typing import Any
 
 from hotmem.db import _MEMORY_COLUMNS, MemoryDB
 from hotmem.embed import Embedder
+from hotmem.fsutil import atomic_publish, fsync_dir
 from hotmem.interchange.canonical import canonical_line, sha256_bytes, sha256_file
 from hotmem.interchange.fingerprint import (
     FINGERPRINT_VERSION,
@@ -55,10 +56,6 @@ from hotmem.interchange.fingerprint import (
     state_fingerprint_from_list,
 )
 from hotmem.interchange.hydrate import PackageError, verify_package
-from hotmem.interchange.package import (
-    _atomic_publish,  # internal-but-shared atomic publish helper (#69)
-    _fsync_dir,
-)
 from hotmem.interchange.paths import confined_relpath
 from hotmem.interchange.record import normalize_record
 from hotmem.trace import Timer, get_tracer
@@ -212,8 +209,8 @@ def produce_delta(
                 f.flush()
                 os.fsync(f.fileno())
 
-            _fsync_dir(staging)
-            _atomic_publish(staging, final)
+            fsync_dir(staging)
+            atomic_publish(staging, final)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
             raise
