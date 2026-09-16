@@ -64,6 +64,7 @@ class EventType:
     HYGIENE_WARNING = "hygiene.warning"
     INDEX_REBUILT = "index.rebuilt"
     SYNC_APPLIED = "sync.applied"
+    HANDOFF_APPLIED = "handoff.applied"
 
 
 def _utc_now_iso() -> str:
