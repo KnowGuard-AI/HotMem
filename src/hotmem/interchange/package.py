@@ -138,22 +138,52 @@ def _atomic_publish(staging: Path, final: Path) -> None:
         shutil.rmtree(backup, ignore_errors=True)
 
 
-def _write_payload(db: MemoryDB, sink, hasher) -> tuple[int, list[str]]:
+def _write_payload(db: MemoryDB, sink, hasher) -> tuple[int, list[str], set[tuple[str, int]]]:
     """Stream canonical records to ``sink``, hashing payload bytes.
 
-    Returns (record_count, content_hashes). Memory stays O(row) — rows are
-    fetched in id order with fetchmany batches and written one line at a
-    time (interchange #67/#69 streaming requirement).
+    Returns (record_count, content_hashes, embedding_spaces) where
+    ``embedding_spaces`` is the set of distinct (model, dim) pairs carried
+    by rows that actually hold an embedding — the manifest's honest
+    description of which space the payload's vectors belong to (#78;
+    previously the block claimed the hash default even for semantic
+    stores). Memory stays O(row) — rows are fetched in id order with
+    fetchmany batches and written one line at a time (interchange
+    #67/#69 streaming requirement).
     """
     content_hashes: list[str] = []
+    embedding_spaces: set[tuple[str, int]] = set()
     count = 0
     for row in db.iter_rows():
         data = canonical_line(row_to_record(row)).encode()
         hasher.update(data)
         sink.write(data)
         content_hashes.append(row["content_hash"] or "")
+        if row.get("embedding"):
+            # Legacy rows may carry a blob with an empty model string — the
+            # documented convention maps that to the hash default (compat.py
+            # §5.1), so the manifest applies the same mapping.
+            model = str(row.get("embedding_model") or "") or EMBEDDING_MODEL
+            embedding_spaces.add((model, int(row.get("embedding_dim") or EMBEDDING_DIM)))
         count += 1
-    return count, content_hashes
+    return count, content_hashes, embedding_spaces
+
+
+def _embedding_manifest_block(spaces: set[tuple[str, int]]) -> dict[str, Any]:
+    """Describe the payload's embedding space in the manifest (informational).
+
+    Uniform stores record their descriptor key + dimension; a mixed-space
+    store records ``"mixed"``/0 because no single key can describe it (the
+    per-record ``embedding_model``/``embedding_dim`` fields stay
+    authoritative); a store with no embedded rows keeps the hash default.
+    Hash-only packages produce byte-identical manifests to previous
+    versions.
+    """
+    if len(spaces) == 1:
+        model, dim = next(iter(spaces))
+        return {"model": model, "dim": dim}
+    if not spaces:
+        return {"model": EMBEDDING_MODEL, "dim": EMBEDDING_DIM}
+    return {"model": "mixed", "dim": 0}
 
 
 def write_package(
@@ -188,9 +218,9 @@ def write_package(
                 with gzip.GzipFile(
                     filename="", mode="wb", compresslevel=9, fileobj=raw_file, mtime=0
                 ) as gz_file:
-                    record_count, content_hashes = _write_payload(db, gz_file, hasher)
+                    record_count, content_hashes, spaces = _write_payload(db, gz_file, hasher)
             else:
-                record_count, content_hashes = _write_payload(db, raw_file, hasher)
+                record_count, content_hashes, spaces = _write_payload(db, raw_file, hasher)
             raw_file.flush()
             os.fsync(raw_file.fileno())
 
@@ -208,7 +238,7 @@ def write_package(
             "logical_id": logical_id(content_hashes),
             "files": {payload_name: payload_entry},
             "source": {"kind": "hotmem-dump"},
-            "embedding": {"model": EMBEDDING_MODEL, "dim": EMBEDDING_DIM},
+            "embedding": _embedding_manifest_block(spaces),
             "created_at": datetime.now(UTC).isoformat(),
             "hotmem_version": _hotmem_version(),
         }

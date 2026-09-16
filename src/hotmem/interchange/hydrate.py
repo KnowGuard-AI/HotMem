@@ -35,6 +35,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hotmem.annotations import (
+    AnnotationValidationError,
+    merge_duplicate_annotations,
+    validate_metadata,
+)
+from hotmem.embed import Embedder
 from hotmem.interchange.compat import resolve_embedding
 from hotmem.interchange.package import (
     FORMAT_ID,
@@ -242,14 +248,81 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
     )
 
 
-def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
+def _scan_annotation_context(payload_lines) -> tuple[set[str], set[str], bool]:
+    """One bounded-memory pass over a payload (#79): collect the explicit
+    record ids, the local evidence memory_ids referenced by annotation
+    envelopes, and whether any record carries annotations at all.
+
+    Only ids are retained — never records — so the streaming memory bound
+    holds; evidence references resolve against the package id set (forward
+    references included) plus the ids the target already stores. Records
+    without ids mint their uuid at normalize time and can never be
+    referenced, so scanning explicit ids is sound.
+    """
+    package_ids: set[str] = set()
+    referenced_ids: set[str] = set()
+    has_annotations = False
+    for line in payload_lines:
+        line = line.strip()
+        if not line:
+            continue
+        record = json.loads(line)  # structural corruption: hard error
+        if not isinstance(record, dict):
+            continue
+        record_id = record.get("id")
+        if isinstance(record_id, str) and record_id:
+            package_ids.add(record_id)
+        metadata = record.get("metadata", record.get("metadata_json"))
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                continue
+        if not (isinstance(metadata, dict) and "annotations" in metadata):
+            continue
+        has_annotations = True
+        namespaces = (metadata.get("annotations") or {}).get("namespaces") or {}
+        if not isinstance(namespaces, dict):
+            continue
+        for items in namespaces.values():
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                evidence = item.get("evidence")
+                if not isinstance(evidence, list):
+                    continue
+                for entry in evidence:
+                    if isinstance(entry, dict):
+                        memory_id = entry.get("memory_id")
+                        if isinstance(memory_id, str) and memory_id:
+                            referenced_ids.add(memory_id)
+    return package_ids, referenced_ids, has_annotations
+
+
+def hydrate_package(
+    db,
+    pkg_dir: str | Path,
+    *,
+    embedder: Embedder | None = None,
+) -> HydrateResult:
     """Verify, then restore a package in one transaction (#69).
 
     All-or-nothing: verification finishes before any write, inserts run in
     bounded batches inside a single transaction, and any error rolls back —
-    the target remains byte-identical. Compatible stored embeddings are
-    reused; incompatible ones are re-embedded from text; records without
-    usable text count invalid (contract §5/§7) and are never stored.
+    the target remains byte-identical. Peak memory stays O(batch): records
+    stream line by line; the only whole-payload state is the annotation
+    context (ids and evidence references), collected in a first pass so
+    local evidence resolves against the full package — forward references
+    included — plus the ids the target already stores (#79).
+    Annotation-less packages validate structurally inline and pay only the
+    id-scan pass.
+
+    Compatible stored embeddings are reused; incompatible ones are
+    re-embedded under ``embedder`` (issue #78; ``None`` = the hash
+    default) from text; records without usable text count invalid
+    (contract §5/§7) and are never stored.
     Idempotent: a repeated restore loads zero records.
     """
     pkg_dir = Path(pkg_dir)
@@ -260,23 +333,40 @@ def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
             "loaded": 0,
             "skipped": 0,
             "invalid": 0,
-            "reused_embeddings": 0,
-            "computed_embeddings": 0,
+            "embedding_reused": 0,
+            "embedding_rebuilt": 0,
+            "embedding_missing": 0,
+            "embedding_failed": 0,
+            "annotations_merged": 0,
+            "annotation_conflicts": 0,
         }
         pending: list[dict] = []
         batch_seen: set[str] = set()
 
+        package_ids, referenced_ids, has_annotations = _scan_annotation_context(verified.stream())
+        known_ids: set[str] | None = None
+        if has_annotations:
+            # A reference resolves against the package ids or the ids the
+            # target already stores — one chunked existence query for the
+            # referenced subset, never a full-store scan.
+            known_ids = package_ids | db.fetch_existing_ids(referenced_ids)
+
         def flush() -> None:
             if not pending:
                 return
-            existing = db.batch_existing_hashes([r["content_hash"] for r in pending])
+            hashes = [r["content_hash"] for r in pending]
+            existing = db.batch_existing_hashes(hashes)
             todo = [r for r in pending if r["content_hash"] not in existing]
             counters["skipped"] += len(pending) - len(todo)
 
+            merge_duplicate_annotations(
+                db, [r for r in pending if r["content_hash"] in existing], counters
+            )
+
             records = []
             for rec in todo:
-                blob, model, dim, reused = resolve_embedding(rec)
-                counters["reused_embeddings" if reused else "computed_embeddings"] += 1
+                blob, model, dim, status = resolve_embedding(rec, embedder=embedder)
+                counters[f"embedding_{status}"] += 1
                 records.append(
                     record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
                 )
@@ -295,7 +385,32 @@ def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
                 if not isinstance(record, dict):
                     counters["invalid"] += 1
                     continue
-                rec = normalize_record(record, default_source="interchange")
+                try:
+                    rec = normalize_record(record, default_source="interchange")
+                except AnnotationValidationError as err:
+                    # Malformed known envelope structure: the RECORD is
+                    # invalid (#79) — counted and skipped, never a
+                    # whole-restore failure.
+                    counters["invalid"] += 1
+                    _trace.debug(
+                        "hydrate_pkg",
+                        "skipping record with malformed annotations",
+                        detail={"error": str(err)},
+                    )
+                    continue
+                if has_annotations:
+                    metadata = rec.get("metadata") or {}
+                    if isinstance(metadata, dict) and "annotations" in metadata:
+                        try:
+                            validate_metadata(metadata, known_ids=known_ids)
+                        except AnnotationValidationError as err:
+                            counters["invalid"] += 1
+                            _trace.debug(
+                                "hydrate_pkg",
+                                "skipping record with invalid annotations",
+                                detail={"id": rec["id"], "error": str(err)},
+                            )
+                            continue
                 issues = validate_record(rec)
                 if issues:
                     counters["invalid"] += 1
@@ -333,4 +448,14 @@ def hydrate_package(db, pkg_dir: str | Path) -> HydrateResult:
             **{k: counters[k] for k in counters},
         },
     )
-    return HydrateResult(loaded=loaded, skipped_dupes=skipped, invalid=invalid)
+    return HydrateResult(
+        loaded=loaded,
+        skipped_dupes=skipped,
+        invalid=invalid,
+        embedding_reused=counters["embedding_reused"],
+        embedding_rebuilt=counters["embedding_rebuilt"],
+        embedding_missing=counters["embedding_missing"],
+        embedding_failed=counters["embedding_failed"],
+        annotations_merged=counters["annotations_merged"],
+        annotation_conflicts=counters["annotation_conflicts"],
+    )

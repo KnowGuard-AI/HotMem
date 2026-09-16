@@ -265,16 +265,18 @@ class QueryResult:
     missed_relevant: list[str] = field(default_factory=list)
 
 
-def ingest_corpus(records: list[dict], db) -> int:
+def ingest_corpus(records: list[dict], db, *, embedder=None) -> int:
     """Ingest fixture records through the production database path.
 
     Fixture ``created_at`` (optional) is passed through db.insert so
     temporal/revision fixtures grade deterministically regardless of wall
-    clock — production code, frozen clock (#77).
+    clock — production code, frozen clock (#77). ``embedder`` owns the
+    ingested embedding space (issue #78; ``None`` = the hash default).
     """
     from hotmem.db import MemoryRecord
-    from hotmem.embed import embed_text, pack_embedding
+    from hotmem.embed import DEFAULT_EMBEDDER, pack_embedding
 
+    active = embedder if embedder is not None else DEFAULT_EMBEDDER
     batch: list[MemoryRecord] = []
     count = 0
     for rec in records:
@@ -285,8 +287,9 @@ def ingest_corpus(records: list[dict], db) -> int:
                 identifier=rec["identifier"],
                 fact_text=fact,
                 fact_summary=rec.get("fact_summary"),
-                embedding=pack_embedding(embed_text(fact)),
-                embedding_model="hotmem-hash-v1",
+                embedding=pack_embedding(active.embed(fact)),
+                embedding_model=active.descriptor.key,
+                embedding_dim=active.descriptor.dimension,
                 content_hash=rec.get("content_hash") or _fixture_content_hash(rec),
                 source=rec.get("source", "retrieval-eval"),
                 importance=rec.get("importance", 0.5),
@@ -311,18 +314,27 @@ def _fixture_content_hash(rec: dict) -> str:
 
 
 def evaluate_query(
-    db, query_rec: dict, *, top_k: int, duplicate_groups: dict[str, str]
+    db,
+    query_rec: dict,
+    *,
+    top_k: int,
+    duplicate_groups: dict[str, str],
+    embedder=None,
+    reranker=None,
 ) -> QueryResult:
     """Run one query through production search and score it.
 
     @1/@5 metrics are always computed: when the displayed top-k differs
     from 5, an additional pass with top_k=5 executes (documented extra
-    query execution, excluded from latency aggregation).
+    query execution, excluded from latency aggregation). ``embedder`` owns
+    the query embedding (issue #78; ``None`` = the hash default).
     """
     from hotmem.search import search_memories
 
     started = time.perf_counter()
-    rows = search_memories(db, query_rec["query"], top_k=top_k)
+    rows = search_memories(
+        db, query_rec["query"], top_k=top_k, embedder=embedder, reranker=reranker
+    )
     display_elapsed = time.perf_counter() - started
 
     ranked_ids = [r["memory_id"] for r in rows]
@@ -330,7 +342,9 @@ def evaluate_query(
 
     eval_top = max(EVAL_TOP_K, top_k)
     if eval_top != top_k:
-        rows = search_memories(db, query_rec["query"], top_k=eval_top)
+        rows = search_memories(
+            db, query_rec["query"], top_k=eval_top, embedder=embedder, reranker=reranker
+        )
         ranked_ids = [r["memory_id"] for r in rows]
     _ = display_elapsed  # latency is sampled separately; see measure_latency
 
@@ -354,7 +368,9 @@ def evaluate_query(
     return result
 
 
-def measure_latency(db, queries: list[dict], *, top_k: int, repeat: int) -> dict:
+def measure_latency(
+    db, queries: list[dict], *, top_k: int, repeat: int, embedder=None, reranker=None
+) -> dict:
     """Latency p50/p95 sampled separately from quality runs (issue #77)."""
     from hotmem.search import search_memories
 
@@ -362,7 +378,7 @@ def measure_latency(db, queries: list[dict], *, top_k: int, repeat: int) -> dict
     for _ in range(max(1, repeat)):
         for rec in queries:
             started = time.perf_counter()
-            search_memories(db, rec["query"], top_k=top_k)
+            search_memories(db, rec["query"], top_k=top_k, embedder=embedder, reranker=reranker)
             samples_ms.append((time.perf_counter() - started) * 1000.0)
     if not samples_ms:
         return {"p50_ms": None, "p95_ms": None, "samples": 0}
@@ -396,10 +412,16 @@ def run_clone_equivalence(
     duplicate_groups: dict[str, str],
     per_query: list[QueryResult],
     tmp: Path,
+    *,
+    embedder=None,
+    reranker=None,
 ) -> dict:
     """Clone stage (#77 snapshot_hydration_equivalence): export the ingested
     instance as a verified package, hydrate a CLEAN target, re-run every
-    query, and compare ordered ids + scores with per-query drift."""
+    query, and compare ordered ids + scores with per-query drift.
+    ``embedder`` owns both sides of the clone (issue #78): a same-space
+    restore reuses every stored vector, so equivalence must hold under any
+    active descriptor."""
     import time
 
     from hotmem.db import MemoryDB
@@ -420,7 +442,7 @@ def run_clone_equivalence(
 
     target_db = MemoryDB(Path(tmp) / "clone-target.sqlite")
     started = time.perf_counter()
-    hydrate_package(target_db, pkg)
+    hydrate_package(target_db, pkg, embedder=embedder)
     hydrate_seconds = time.perf_counter() - started
 
     drift: list[dict] = []
@@ -431,6 +453,8 @@ def run_clone_equivalence(
             {"query_id": base.query_id, "category": base.category, "query": base.query},
             top_k=DEFAULT_TOP_K,
             duplicate_groups=duplicate_groups,
+            embedder=embedder,
+            reranker=reranker,
         )
         ids_match = rerun.ranked_ids == base.ranked_ids
         scores_match = rerun.ranked_scores == base.ranked_scores
@@ -470,7 +494,14 @@ def run_clone_equivalence(
     }
 
 
-def measure_cold_start(corpus_path: Path, queries_path: Path, *, top_k: int) -> dict:
+def measure_cold_start(
+    corpus_path: Path,
+    queries_path: Path,
+    *,
+    top_k: int,
+    embedder_spec: str | None = None,
+    model_path: str | None = None,
+) -> dict:
     """Fresh-process cold-start-to-first-query time (issue #77).
 
     Re-invokes this script in a subprocess with a small internal mode:
@@ -478,43 +509,63 @@ def measure_cold_start(corpus_path: Path, queries_path: Path, *, top_k: int) -> 
     """
     import subprocess
 
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--cold-start-internal",
+        "--corpus",
+        str(corpus_path),
+        "--queries",
+        str(queries_path),
+        "--top-k",
+        str(top_k),
+    ]
+    if embedder_spec:
+        cmd.extend(["--embedder", embedder_spec])
+    if model_path:
+        cmd.extend(["--embedder-model-path", model_path])
     started = time.perf_counter()
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "--cold-start-internal",
-            "--corpus",
-            str(corpus_path),
-            "--queries",
-            str(queries_path),
-            "--top-k",
-            str(top_k),
-        ],
-        capture_output=True,
-        text=True,
-    )
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     elapsed = time.perf_counter() - started
     if proc.returncode != 0:
         return {"cold_start_seconds": None, "error": proc.stderr.strip()[-200:]}
     return {"cold_start_seconds": round(elapsed, 3)}
 
 
-def run_cold_start_internal(corpus_path: Path, queries_path: Path, *, top_k: int) -> int:
+def run_cold_start_internal(
+    corpus_path: Path,
+    queries_path: Path,
+    *,
+    top_k: int,
+    embedder=None,
+    embedder_spec: str | None = None,
+    model_path: str | None = None,
+) -> int:
     """Internal mode for measure_cold_start: ingest + first query + exit."""
     corpus = load_corpus(corpus_path)
     queries = load_queries(queries_path, require_all_categories=False)
     from hotmem.db import MemoryDB
 
+    if embedder is None and embedder_spec:
+        from hotmem.embed import resolve_embedder_from_config
+
+        embedder = resolve_embedder_from_config(embedder_spec, model_path=model_path)
     with tempfile.TemporaryDirectory(prefix="hotmem-cold-start-") as tmp:
         db = MemoryDB(Path(tmp) / "eval.sqlite")
-        ingest_corpus(corpus, db)
+        ingest_corpus(corpus, db, embedder=embedder)
         if queries:
             from hotmem.search import search_memories
 
-            search_memories(db, queries[0]["query"], top_k=top_k)
+            search_memories(db, queries[0]["query"], top_k=top_k, embedder=embedder)
         db.close()
     return 0
+
+
+def _is_identity(reranker) -> bool:
+    """True for the zero-work identity reranker (the exact pre-#80 path)."""
+    from hotmem.rerank import IdentityReranker
+
+    return isinstance(reranker, IdentityReranker)
 
 
 def run_eval(
@@ -525,8 +576,20 @@ def run_eval(
     repeat: int = 1,
     work_dir: Path | None = None,
     require_all_categories: bool = True,
+    embedder=None,
+    embedder_spec: str | None = None,
+    embedder_model_path: str | None = None,
+    reranker=None,
 ) -> dict:
-    """Run the full evaluation; return the metrics document (JSON-safe)."""
+    """Run the full evaluation; return the metrics document (JSON-safe).
+
+    ``embedder`` selects the evaluated embedding space (issue #78):
+    ``None`` = the hash default (the committed baseline); the optional local
+    semantic adapter produces the separate committed semantic report —
+    never an overwrite of default-behavior evidence. ``embedder_spec`` /
+    ``embedder_model_path`` forward the selection to the cold-start
+    subprocess (fresh process resolves its own embedder; no downloads).
+    """
     corpus = load_corpus(corpus_path)
     queries = load_queries(queries_path, require_all_categories=require_all_categories)
     duplicate_groups = build_duplicate_groups(corpus)
@@ -534,7 +597,9 @@ def run_eval(
     import contextlib
 
     from hotmem.db import MemoryDB
+    from hotmem.embed import DEFAULT_EMBEDDER
 
+    active = embedder if embedder is not None else DEFAULT_EMBEDDER
     own_tmp = work_dir is None
     if own_tmp:
         tmp = tempfile.mkdtemp(prefix="hotmem-retrieval-eval-")
@@ -545,17 +610,40 @@ def run_eval(
     db_path = Path(tmp) / "eval.sqlite"
     try:
         db = MemoryDB(db_path)
-        ingested = ingest_corpus(corpus, db)
+        ingested = ingest_corpus(corpus, db, embedder=active)
 
         per_query: list[QueryResult] = []
         for rec in queries:
             per_query.append(
-                evaluate_query(db, rec, top_k=top_k, duplicate_groups=duplicate_groups)
+                evaluate_query(
+                    db,
+                    rec,
+                    top_k=top_k,
+                    duplicate_groups=duplicate_groups,
+                    embedder=active,
+                    reranker=reranker,
+                )
             )
-        latency = measure_latency(db, queries, top_k=top_k, repeat=repeat)
+        latency = measure_latency(
+            db, queries, top_k=top_k, repeat=repeat, embedder=active, reranker=reranker
+        )
 
-        clone = run_clone_equivalence(corpus, queries, duplicate_groups, per_query, Path(tmp))
-        cold = measure_cold_start(corpus_path, queries_path, top_k=top_k)
+        clone = run_clone_equivalence(
+            corpus,
+            queries,
+            duplicate_groups,
+            per_query,
+            Path(tmp),
+            embedder=active,
+            reranker=reranker,
+        )
+        cold = measure_cold_start(
+            corpus_path,
+            queries_path,
+            top_k=top_k,
+            embedder_spec=embedder_spec,
+            model_path=embedder_model_path,
+        )
         db.close()
     finally:
         if own_tmp:
@@ -582,9 +670,14 @@ def run_eval(
     doc = {
         "schema_version": METRICS_SCHEMA_VERSION,
         "runtime": {
-            "embedding_model": "hotmem-hash-v1",
-            "embedding_dim": 64,
+            "embedding_model": active.descriptor.key,
+            "embedding_dim": active.descriptor.dimension,
             "fusion": "cosine 0.6 / fts5_bm25 0.2 / importance 0.2",
+            "reranker": (
+                reranker.descriptor.key
+                if reranker is not None and not _is_identity(reranker)
+                else "none"
+            ),
             "top_k": top_k,
             "repeat": repeat,
         },
@@ -625,6 +718,13 @@ def build_recommendation(doc: dict) -> dict:
     slots above 20% -> #80 (optional reranking hook); else retain the
     stack and expand fixtures. These prioritize work; they are not release
     thresholds. Never recommend entity extraction from this benchmark.
+
+    #80 gate denominator (issue #80): the ``near_duplicate_diversity``
+    category measures duplicate occupancy directly and is the entry
+    gate; the aggregate over all queries dilutes it with categories that
+    have no duplicates and is reported for context only. When the
+    diversity category is absent (synthetic mini corpora), the aggregate
+    governs. Both denominators are pinned by hand-calculated tests.
     """
     overall = doc["overall"]
     categories = doc["categories"]
@@ -637,12 +737,15 @@ def build_recommendation(doc: dict) -> dict:
     sem = cat_mean("semantic_paraphrase", "recall_at_5")
     lex = cat_mean("exact_lexical", "recall_at_5")
     dup = (overall.get("duplicate_slot_rate") or {}).get("mean") or 0.0
+    diversity_dup = cat_mean("near_duplicate_diversity", "duplicate_slot_rate")
+    rerank_gate = diversity_dup if diversity_dup is not None else dup
 
     measured = {
         "clone_equivalence_rate": clone_rate,
         "semantic_recall_at_5": sem,
         "exact_lexical_recall_at_5": lex,
         "duplicate_slot_rate": dup,
+        "near_duplicate_diversity_duplicate_slot_rate": diversity_dup,
     }
     if clone_rate is not None and clone_rate < 1.0:
         return {
@@ -659,11 +762,13 @@ def build_recommendation(doc: dict) -> dict:
             "hash embedder cannot bridge wording differences; pursue #78.",
             "measured": measured,
         }
-    if dup > 0.20:
+    if rerank_gate > 0.20:
         return {
             "action": "pursue_reranking_hook_80",
-            "rationale": f"duplicate-slot rate {dup:.3f} exceeds 20%: near-duplicates consume "
-            "diverse top-k slots; pursue #80 (evidence-gated optional reranking hook).",
+            "rationale": f"near-duplicate diversity duplicate-slot rate {rerank_gate:.3f} "
+            "exceeds 20%: near-duplicates consume diverse top-k slots "
+            f"(aggregate over all queries: {dup:.3f}); pursue #80 (evidence-gated "
+            "optional reranking hook).",
             "measured": measured,
         }
     return {
@@ -792,7 +897,9 @@ def render_report(doc: dict) -> str:
         f"  - measured: clone equivalence {m.get('clone_equivalence_rate')}, "
         f"semantic Recall@5 {m.get('semantic_recall_at_5')}, "
         f"exact-lexical Recall@5 {m.get('exact_lexical_recall_at_5')}, "
-        f"duplicate-slot rate {m.get('duplicate_slot_rate')}"
+        f"duplicate-slot rate {m.get('duplicate_slot_rate')} "
+        f"(near-duplicate diversity category: "
+        f"{m.get('near_duplicate_diversity_duplicate_slot_rate')})"
     )
     lines.append("")
     lines.append("## What this benchmark does not prove")
@@ -824,13 +931,77 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     parser.add_argument("--repeat", type=int, default=1, help="Latency sampling only")
     parser.add_argument("--cold-start-internal", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--embedder",
+        dest="embedder_spec",
+        default="hash",
+        choices=["hash", "local-semantic"],
+        help="Embedding space to evaluate (default: hash, the committed baseline). "
+        "'local-semantic' writes a separate report; never overwrites "
+        "bench/retrieval/baseline.json.",
+    )
+    parser.add_argument(
+        "--embedder-model-path",
+        type=Path,
+        default=None,
+        help="Provisioned local model artifact for --embedder local-semantic.",
+    )
+    parser.add_argument(
+        "--reranker",
+        dest="reranker_spec",
+        default="none",
+        choices=["none", "mmr"],
+        help="Optional bounded second stage (#80): 'none' keeps the exact "
+        "first-stage ranking; 'mmr' writes a separate report.",
+    )
+    parser.add_argument(
+        "--reranker-lambda",
+        type=float,
+        default=0.5,
+        help="MMR tradeoff in [0.0, 1.0] (default 0.5, the #80 evidence setting).",
+    )
+    parser.add_argument(
+        "--reranker-pool", type=int, default=50, help="MMR candidate pool (10..200)."
+    )
     args = parser.parse_args(argv)
 
     if args.cold_start_internal:
-        return run_cold_start_internal(args.corpus, args.queries, top_k=args.top_k)
+        return run_cold_start_internal(
+            args.corpus,
+            args.queries,
+            top_k=args.top_k,
+            embedder_spec=args.embedder_spec,
+            model_path=str(args.embedder_model_path) if args.embedder_model_path else None,
+        )
+
+    from hotmem.embed import resolve_embedder_from_config
+    from hotmem.rerank import resolve_reranker_from_config
 
     try:
-        doc = run_eval(args.corpus, args.queries, top_k=args.top_k, repeat=args.repeat)
+        embedder = resolve_embedder_from_config(
+            args.embedder_spec,
+            model_path=str(args.embedder_model_path) if args.embedder_model_path else None,
+        )
+        reranker = resolve_reranker_from_config(
+            args.reranker_spec, lambda_=args.reranker_lambda, pool_limit=args.reranker_pool
+        )
+    except ValueError as err:
+        print(f"reranker error: {err}", file=sys.stderr)
+        return 2
+
+    try:
+        doc = run_eval(
+            args.corpus,
+            args.queries,
+            top_k=args.top_k,
+            repeat=args.repeat,
+            embedder=embedder,
+            embedder_spec=args.embedder_spec,
+            embedder_model_path=(
+                str(args.embedder_model_path) if args.embedder_model_path else None
+            ),
+            reranker=reranker,
+        )
     except FixtureError as err:
         print(f"fixture error: {err}", file=sys.stderr)
         return 2

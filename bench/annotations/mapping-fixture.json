@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "namespaces": {
+    "org.example.entities": [
+      {
+        "id": "vendor-x",
+        "type": "Organization",
+        "confidence": 0.92,
+        "scope": "finance",
+        "authority": "manual",
+        "valid_time": {"start": "2026-01-01"},
+        "classification": "internal",
+        "evidence": [
+          {"memory_id": "mem-vendor-x-001"},
+          {"uri": "https://example.com/vendors/x"}
+        ]
+      },
+      {
+        "id": "vendor-x-alias",
+        "type": "Alias",
+        "value": "VX Corp",
+        "confidence": 0.8,
+        "evidence": [{"memory_id": "mem-vendor-x-001"}]
+      },
+      {
+        "id": "vendor-x-contact",
+        "type": "Contact",
+        "value": "ap@vendorx.example",
+        "confidence": 0.65,
+        "classification": "restricted",
+        "evidence": [{"memory_id": "mem-vendor-x-002"}]
+      }
+    ],
+    "org.example.relationships": [
+      {
+        "id": "vendor-x-invoices",
+        "type": "processes_invoices_for",
+        "from": "vendor-x",
+        "to": "finance-system",
+        "confidence": 0.9,
+        "evidence": [{"memory_id": "mem-vendor-x-002"}]
+      }
+    ]
+  },
+  "producers": {
+    "org.example.enricher": {
+      "version": "1.2.0",
+      "model": "example-entity-linker-v3",
+      "ran_at": "2026-09-01T00:00:00Z"
+    }
+  }
+}

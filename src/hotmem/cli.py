@@ -33,6 +33,93 @@ def main():
     """HotMem — local-first memory sidecar for agent applications."""
 
 
+def _embedder_options(cmd):
+    """Shared --embedder flags (issue #78): one explicit configuration path.
+
+    Resolution happens before serving so an invalid selection fails fast;
+    ``--embedder-model-path`` (or HOTMEM_EMBEDDER_MODEL_PATH) provisions the
+    optional local semantic adapter — HotMem never downloads models.
+    """
+    cmd = click.option(
+        "--embedder-model-path",
+        "embedder_model_path",
+        default=None,
+        type=click.Path(),
+        help="Local model artifact directory for --embedder local-semantic.",
+    )(cmd)
+    return click.option(
+        "--embedder",
+        "embedder_spec",
+        default=None,
+        type=click.Choice(["hash", "local-semantic"]),
+        help=(
+            "Embedding implementation (default: hash, the deterministic "
+            "hotmem-hash-v1). 'local-semantic' requires the [semantic] extra "
+            "and an explicitly provisioned local model."
+        ),
+    )(cmd)
+
+
+def _resolve_embedder_or_fail(embedder_spec: str | None, embedder_model_path: str | None):
+    """Resolve the runtime embedder, converting config errors to CLI errors."""
+    from hotmem.embed import resolve_embedder_from_config
+
+    try:
+        return resolve_embedder_from_config(embedder_spec, model_path=embedder_model_path)
+    except ValueError as err:
+        raise click.ClickException(str(err)) from err
+
+
+def _reranker_options(cmd):
+    """Shared --reranker flags (issue #80): bounded second-stage selection.
+
+    'none' (default) preserves the exact first-stage ranking; 'mmr' trades a
+    fraction of relevance for diversity so near-duplicates stop consuming
+    the top-k. Resolution happens before serving; the selection never
+    enters canonical records or sync identity.
+    """
+    cmd = click.option(
+        "--reranker-pool",
+        "reranker_pool",
+        default=50,
+        type=click.IntRange(10, 200),
+        help="MMR candidate pool size (10..200; default 50).",
+    )(cmd)
+    cmd = click.option(
+        "--reranker-lambda",
+        "reranker_lambda",
+        default=0.5,
+        type=click.FloatRange(0.0, 1.0),
+        help="MMR relevance/diversity tradeoff in [0.0, 1.0] (default 0.5, "
+        "the #80 evidence-driven setting).",
+    )(cmd)
+    return click.option(
+        "--reranker",
+        "reranker_spec",
+        default=None,
+        type=click.Choice(["none", "mmr"]),
+        help=(
+            "Optional bounded second-stage reranker (default: none — the exact "
+            "current ranking). 'mmr' requires the #80 gate evidence; see "
+            "bench/retrieval/post-p2-gate-80.md."
+        ),
+    )(cmd)
+
+
+def _resolve_reranker_or_fail(
+    reranker_spec: str | None, reranker_lambda: float, reranker_pool: int
+):
+    """Resolve the runtime reranker, converting config errors to CLI errors."""
+    from hotmem.rerank import resolve_reranker_from_config
+
+    try:
+        return resolve_reranker_from_config(
+            reranker_spec, lambda_=reranker_lambda, pool_limit=reranker_pool
+        )
+    except ValueError as err:
+        raise click.ClickException(str(err)) from err
+
+
 @main.command()
 @click.option("--port", default=8711, type=int, help="Port to listen on.")
 @click.option("--mount", default=None, type=click.Path(), help="Mount directory path.")
@@ -46,12 +133,28 @@ def main():
     help="Optional derived vector index backend (default: none). The index is "
     "disposable and rebuildable; SQLite remains canonical storage.",
 )
-def serve(port: int, mount: str | None, db_path: str | None, host: str, vector_backend: str):
+@_embedder_options
+@_reranker_options
+def serve(
+    port: int,
+    mount: str | None,
+    db_path: str | None,
+    host: str,
+    vector_backend: str,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+    reranker_spec: str | None,
+    reranker_lambda: float,
+    reranker_pool: int,
+):
     """Start the HotMem sidecar server."""
     import uvicorn
 
     from hotmem.mount import bootstrap_mount
     from hotmem.server import create_app
+
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    reranker = _resolve_reranker_or_fail(reranker_spec, reranker_lambda, reranker_pool)
 
     swap_path = None
 
@@ -72,6 +175,8 @@ def serve(port: int, mount: str | None, db_path: str | None, host: str, vector_b
         swap_path=swap_path,
         port=port,
         vector_backend=vector_backend,
+        embedder=embedder,
+        reranker=reranker,
     )
 
     _trace.info(
@@ -85,7 +190,17 @@ def serve(port: int, mount: str | None, db_path: str | None, host: str, vector_b
 @main.command()
 @click.option("--mount", default=None, type=click.Path(), help="Mount directory path.")
 @click.option("--db", "db_path", default=None, type=click.Path(), help="Explicit database path.")
-def mcp(mount: str | None, db_path: str | None):
+@_embedder_options
+@_reranker_options
+def mcp(
+    mount: str | None,
+    db_path: str | None,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+    reranker_spec: str | None,
+    reranker_lambda: float,
+    reranker_pool: int,
+):
     """Start the HotMem MCP server on stdio transport."""
     import asyncio
 
@@ -97,6 +212,9 @@ def mcp(mount: str | None, db_path: str | None):
         ) from err
 
     from hotmem.mount import bootstrap_mount
+
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    reranker = _resolve_reranker_or_fail(reranker_spec, reranker_lambda, reranker_pool)
 
     swap_path = None
 
@@ -117,7 +235,9 @@ def mcp(mount: str | None, db_path: str | None):
         "starting mcp server on stdio",
         detail={"db": db_path, "mount": mount},
     )
-    asyncio.run(run_mcp_server(db_path=db_path, swap_path=swap_path))
+    asyncio.run(
+        run_mcp_server(db_path=db_path, swap_path=swap_path, embedder=embedder, reranker=reranker)
+    )
 
 
 @main.command()
@@ -129,9 +249,22 @@ def mcp(mount: str | None, db_path: str | None):
     help="Snapshot path: a directory (v2) or .jsonl/.jsonl.gz file (legacy).",
 )
 @click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
-def hydrate(swap_file: str, db_path: str):
-    """Load a snapshot into the database (v2 directory or legacy JSONL)."""
+@_embedder_options
+def hydrate(
+    swap_file: str,
+    db_path: str,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+):
+    """Load a snapshot into the database (v2 directory or legacy JSONL).
+
+    Embeddings are rebuilt under the configured embedder (issues #78/#79):
+    match the runtime the store is served with so imported rows are
+    cosinely searchable — compatible stored vectors are reused either way.
+    """
     from hotmem.db import MemoryDB
+
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
 
     # Route v2 directories through the snapshot dispatch (no progress bar);
     # legacy .jsonl/.jsonl.gz goes through swap.hydrate with the UI progress bar.
@@ -143,7 +276,7 @@ def hydrate(swap_file: str, db_path: str):
 
         db = MemoryDB(db_path)
         try:
-            result = do_hydrate_v2(db, swap_file)
+            result = do_hydrate_v2(db, swap_file, embedder=embedder)
         except (SnapshotChecksumError, PackageError) as err:
             db.close()
             reason = getattr(err, "reason", "checksum")
@@ -154,6 +287,7 @@ def hydrate(swap_file: str, db_path: str):
             loaded=result.loaded,
             skipped_dupes=result.skipped_dupes,
             invalid=result.invalid,
+            **result.disposition(),
         )
         return
 
@@ -165,11 +299,15 @@ def hydrate(swap_file: str, db_path: str):
 
     db = MemoryDB(db_path)
     with ui.progress(total=total, desc="Hydrating") as tick:
-        result = do_hydrate(db, swap_file, on_progress=tick)
+        result = do_hydrate(db, swap_file, on_progress=tick, embedder=embedder)
     db.close()
 
     ui.summary(
-        "hydrate", loaded=result.loaded, skipped_dupes=result.skipped_dupes, invalid=result.invalid
+        "hydrate",
+        loaded=result.loaded,
+        skipped_dupes=result.skipped_dupes,
+        invalid=result.invalid,
+        **result.disposition(),
     )
 
 
@@ -463,12 +601,25 @@ def inspect(uri: str, count_rows: bool, sample_size: int, full_validation: bool,
 @main.command()
 @click.option("--db", "db_path", default=None, type=click.Path(), help="Database file path.")
 @click.option("--url", default=None, help="Running server URL (e.g. http://127.0.0.1:8711).")
-def playground(db_path: str | None, url: str | None):
+@_embedder_options
+@_reranker_options
+def playground(
+    db_path: str | None,
+    url: str | None,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+    reranker_spec: str | None,
+    reranker_lambda: float,
+    reranker_pool: int,
+):
     """Interactive terminal UI for add/search/inspect."""
     from hotmem.playground import run_playground
 
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    reranker = _resolve_reranker_or_fail(reranker_spec, reranker_lambda, reranker_pool)
+
     try:
-        run_playground(db_path=db_path, url=url)
+        run_playground(db_path=db_path, url=url, embedder=embedder, reranker=reranker)
     except ImportError as err:
         raise click.ClickException(str(err)) from err
     except ValueError as err:
@@ -504,12 +655,21 @@ def playground(db_path: str | None, url: str | None):
     type=click.Path(),
     help="Keep the intermediate HotMem swap JSONL at this path (default: temp, deleted).",
 )
-def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str | None):
+@_embedder_options
+def import_cmd(
+    source: str,
+    source_db: str,
+    target_db: str | None,
+    swap_out: str | None,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+):
     """Import memories from a foreign memory system into HotMem.
 
     One-command migration: read the source store, convert to HotMem swap JSONL,
-    hydrate into the target DB. Embeddings are re-computed by HotMem's
-    embedder (source dims differ, so reuse is not possible).
+    hydrate into the target DB. Embeddings are re-computed under the
+    configured embedder (source dims differ, so reuse is not possible) —
+    match the runtime the target is served with (issues #78/#79).
 
     OKF bundles (--from okf) convert every markdown concept page into one
     deterministic, reviewable JSONL record BEFORE hydration — keep it with
@@ -523,6 +683,7 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
     from hotmem.swap import hydrate as do_hydrate
     from hotmem.swap import write_record
 
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     reader = IMPORTERS[source.lower()]
     # OKF records serialize canonically (sorted, compact, UTF-8) so the
     # reviewable JSONL is byte-stable across runs (#68 acceptance); mem0
@@ -554,7 +715,7 @@ def import_cmd(source: str, source_db: str, target_db: str | None, swap_out: str
         try:
             total = os.path.getsize(swap_path) if os.path.exists(swap_path) else 0
             with ui.progress(total=total, desc="Hydrating") as tick:
-                result = do_hydrate(db, swap_path, on_progress=tick)
+                result = do_hydrate(db, swap_path, on_progress=tick, embedder=embedder)
         finally:
             db.close()
 
@@ -698,7 +859,13 @@ def delta_produce(base_pkg: str, db_path: str, out_dir: str, gz: bool):
     help="Delta package directory (hotmem-delta-v1).",
 )
 @click.option("--db", "db_path", required=True, type=click.Path(), help="Receiver database path.")
-def delta_apply(delta_dir: str, db_path: str):
+@_embedder_options
+def delta_apply(
+    delta_dir: str,
+    db_path: str,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+):
     """Apply a verified delta to a receiver instance (all-or-nothing).
 
     Conflicts (diverged receiver, missing base) abort the whole delta and
@@ -710,9 +877,10 @@ def delta_apply(delta_dir: str, db_path: str):
     from hotmem.interchange.delta import apply_delta as do_apply
     from hotmem.interchange.hydrate import PackageError
 
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     db = MemoryDB(db_path)
     try:
-        result = do_apply(db, delta_dir)
+        result = do_apply(db, delta_dir, embedder=embedder)
     except DeltaConflictError as err:
         db.close()
         for conflict in err.conflicts:
@@ -733,4 +901,8 @@ def delta_apply(delta_dir: str, db_path: str):
         applied=result.applied,
         skipped=result.skipped,
         conflicts=len(result.conflicts),
+        embedding_reused=result.embedding_reused,
+        embedding_rebuilt=result.embedding_rebuilt,
+        embedding_missing=result.embedding_missing,
+        embedding_failed=result.embedding_failed,
     )

@@ -2,40 +2,7 @@
   "categories": {
     "cross_project_isolation": {
       "duplicate_slot_rate": {
-        "mean": 0.06666666666666667,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "false_positive_rate": {
-        "mean": 0.8999999999999999,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "mrr_at_5": {
-        "mean": 0.4166666666666667,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "ndcg_at_5": {
-        "mean": 0.4549143283834362,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "queries": 6,
-      "recall_at_1": {
-        "mean": 0.3333333333333333,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "recall_at_5": {
-        "mean": 0.5,
-        "n_applicable": 6,
-        "n_queries": 6
-      }
-    },
-    "exact_lexical": {
-      "duplicate_slot_rate": {
-        "mean": 0.10000000000000002,
+        "mean": 0.0,
         "n_applicable": 6,
         "n_queries": 6
       },
@@ -45,18 +12,51 @@
         "n_queries": 6
       },
       "mrr_at_5": {
-        "mean": 0.8333333333333334,
+        "mean": 0.8888888888888888,
         "n_applicable": 6,
         "n_queries": 6
       },
       "ndcg_at_5": {
-        "mean": 0.8769765845238191,
+        "mean": 0.840819380705287,
         "n_applicable": 6,
         "n_queries": 6
       },
       "queries": 6,
       "recall_at_1": {
-        "mean": 0.6666666666666666,
+        "mean": 0.75,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": 0.9166666666666666,
+        "n_applicable": 6,
+        "n_queries": 6
+      }
+    },
+    "exact_lexical": {
+      "duplicate_slot_rate": {
+        "mean": 0.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": 0.7999999999999999,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": 1.0,
         "n_applicable": 6,
         "n_queries": 6
       },
@@ -68,45 +68,12 @@
     },
     "identifier_or_entity_name": {
       "duplicate_slot_rate": {
-        "mean": 0.03333333333333333,
+        "mean": 0.0,
         "n_applicable": 6,
         "n_queries": 6
       },
       "false_positive_rate": {
-        "mean": 0.9333333333333332,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "mrr_at_5": {
-        "mean": 0.3333333333333333,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "ndcg_at_5": {
-        "mean": 0.31813139831270654,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "queries": 6,
-      "recall_at_1": {
-        "mean": 0.3333333333333333,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "recall_at_5": {
-        "mean": 0.3333333333333333,
-        "n_applicable": 6,
-        "n_queries": 6
-      }
-    },
-    "near_duplicate_diversity": {
-      "duplicate_slot_rate": {
-        "mean": 0.3,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "false_positive_rate": {
-        "mean": 0.49999999999999994,
+        "mean": 0.7999999999999999,
         "n_applicable": 6,
         "n_queries": 6
       },
@@ -116,7 +83,40 @@
         "n_queries": 6
       },
       "ndcg_at_5": {
-        "mean": 0.8724398938352298,
+        "mean": 0.990807992759931,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      }
+    },
+    "near_duplicate_diversity": {
+      "duplicate_slot_rate": {
+        "mean": 0.16666666666666666,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": 0.6333333333333334,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": 0.657352763033311,
         "n_applicable": 6,
         "n_queries": 6
       },
@@ -127,7 +127,7 @@
         "n_queries": 6
       },
       "recall_at_5": {
-        "mean": 0.8333333333333334,
+        "mean": 0.611111111111111,
         "n_applicable": 6,
         "n_queries": 6
       }
@@ -172,50 +172,17 @@
         "n_queries": 6
       },
       "false_positive_rate": {
-        "mean": 0.9333333333333332,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "mrr_at_5": {
-        "mean": 0.11666666666666665,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "ndcg_at_5": {
-        "mean": 0.16963042680099982,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "queries": 6,
-      "recall_at_1": {
-        "mean": 0.0,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "recall_at_5": {
-        "mean": 0.3333333333333333,
-        "n_applicable": 6,
-        "n_queries": 6
-      }
-    },
-    "snapshot_hydration_equivalence": {
-      "duplicate_slot_rate": {
-        "mean": 0.06666666666666667,
-        "n_applicable": 6,
-        "n_queries": 6
-      },
-      "false_positive_rate": {
         "mean": 0.8333333333333334,
         "n_applicable": 6,
         "n_queries": 6
       },
       "mrr_at_5": {
-        "mean": 0.5833333333333334,
+        "mean": 0.6166666666666667,
         "n_applicable": 6,
         "n_queries": 6
       },
       "ndcg_at_5": {
-        "mean": 0.643558852691131,
+        "mean": 0.6696304268009999,
         "n_applicable": 6,
         "n_queries": 6
       },
@@ -231,35 +198,68 @@
         "n_queries": 6
       }
     },
-    "temporal_or_revision": {
+    "snapshot_hydration_equivalence": {
       "duplicate_slot_rate": {
-        "mean": 0.03333333333333333,
+        "mean": 0.0,
         "n_applicable": 6,
         "n_queries": 6
       },
       "false_positive_rate": {
-        "mean": 0.7666666666666667,
+        "mean": 0.7999999999999999,
         "n_applicable": 6,
         "n_queries": 6
       },
       "mrr_at_5": {
-        "mean": 0.47222222222222215,
+        "mean": 0.9166666666666666,
         "n_applicable": 6,
         "n_queries": 6
       },
       "ndcg_at_5": {
-        "mean": 0.7648818755952194,
+        "mean": 0.9384882922619097,
         "n_applicable": 6,
         "n_queries": 6
       },
       "queries": 6,
       "recall_at_1": {
-        "mean": 0.0,
+        "mean": 0.8333333333333334,
         "n_applicable": 6,
         "n_queries": 6
       },
       "recall_at_5": {
         "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      }
+    },
+    "temporal_or_revision": {
+      "duplicate_slot_rate": {
+        "mean": 0.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": 0.7999999999999999,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": 0.46388888888888885,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": 0.6687378909364856,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": 0.25,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": 0.8333333333333334,
         "n_applicable": 6,
         "n_queries": 6
       }
@@ -269,42 +269,59 @@
     "clone_equivalence_rate": 1.0,
     "drift": [],
     "note": "local diagnostics on one machine \u2014 not cross-machine guarantees",
+    "package": {
+      "export_seconds": 0.0062,
+      "gz_bytes": 68937,
+      "hydrate_records_per_s": 11281.6,
+      "hydrate_seconds": 0.0053,
+      "records": 60,
+      "verify_records_per_s": 61895.6,
+      "verify_seconds": 0.001
+    },
     "queries_compared": 48
+  },
+  "cold_start": {
+    "cold_start_seconds": 0.356
   },
   "counts": {
     "corpus": 60,
     "ingested": 60,
     "queries": 48
   },
+  "latency_ms": {
+    "p50_ms": 4.458,
+    "p95_ms": 4.497,
+    "samples": 48
+  },
   "overall": {
     "duplicate_slot_rate": {
-      "mean": 0.07500000000000001,
+      "mean": 0.020833333333333332,
       "n_applicable": 48,
       "n_queries": 48
     },
     "false_positive_rate": {
-      "mean": 0.8333333333333329,
+      "mean": 0.8083333333333332,
       "n_applicable": 48,
       "n_queries": 48
     },
     "mrr_at_5": {
-      "mean": 0.5365079365079365,
+      "mean": 0.8408730158730158,
       "n_applicable": 42,
       "n_queries": 48
     },
     "ndcg_at_5": {
-      "mean": 0.5857904800203633,
+      "mean": 0.8236909637854178,
       "n_applicable": 42,
       "n_queries": 48
     },
     "queries": 48,
     "recall_at_1": {
-      "mean": 0.3095238095238095,
+      "mean": 0.6666666666666665,
       "n_applicable": 42,
       "n_queries": 48
     },
     "recall_at_5": {
-      "mean": 0.6904761904761905,
+      "mean": 0.884920634920635,
       "n_applicable": 42,
       "n_queries": 48
     }
@@ -312,33 +329,33 @@
   "per_query": [
     {
       "category": "exact_lexical",
-      "duplicate_slot_rate": 0.2,
+      "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
-      "mrr_at_5": 0.5,
-      "ndcg_at_5": 0.6309297535714574,
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
       "query": "What approval does an Acme invoice above EUR 5,000 need?",
       "query_id": "q-exact-001",
       "ranked_ids": [
-        "mem-outage-001",
         "mem-invoice-001",
-        "mem-handbook-002",
+        "mem-deadline-old-001",
+        "mem-meridian-fin-001",
         "mem-badge-001",
-        "mem-handbook-001"
+        "mem-ratelimit-001"
       ],
-      "recall_at_1": 0.0,
+      "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.3607,
-        0.3219,
-        0.3042,
-        0.3012,
-        0.2967
+        0.5954,
+        0.2226,
+        0.3249,
+        0.2281,
+        0.2663
       ]
     },
     {
       "category": "exact_lexical",
-      "duplicate_slot_rate": 0.2,
+      "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
       "mrr_at_5": 1.0,
@@ -347,19 +364,19 @@
       "query_id": "q-exact-002",
       "ranked_ids": [
         "mem-password-001",
-        "mem-deploy-001",
-        "mem-party-001",
-        "mem-travel-002",
-        "mem-travel-003"
+        "mem-vpn-001",
+        "mem-knitting-001",
+        "mem-portal-old-001",
+        "mem-handbook-002"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.5238,
-        0.3233,
-        0.2467,
-        0.233,
-        0.2279
+        0.5687,
+        0.2798,
+        0.1994,
+        0.2614,
+        0.2084
       ]
     },
     {
@@ -373,19 +390,19 @@
       "query_id": "q-exact-003",
       "ranked_ids": [
         "mem-backup-001",
-        "mem-cache-003",
-        "mem-portal-new-001",
-        "mem-garden-001",
-        "mem-portal-old-001"
+        "mem-charity-001",
+        "mem-password-001",
+        "mem-expense-001",
+        "mem-bike-001"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.4683,
-        0.2299,
-        0.2238,
-        0.2225,
-        0.1933
+        0.4819,
+        0.247,
+        0.3366,
+        0.2323,
+        0.2026
       ]
     },
     {
@@ -399,45 +416,45 @@
       "query_id": "q-exact-004",
       "ranked_ids": [
         "mem-expense-001",
-        "mem-handbook-003",
-        "mem-tea-001",
-        "mem-refund-001",
-        "mem-movie-001"
+        "mem-aurora-001",
+        "mem-cache-001",
+        "mem-deadline-old-001",
+        "mem-expensetool-001"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.316,
-        0.2769,
-        0.2411,
-        0.2362,
-        0.2164
+        0.5631,
+        0.3504,
+        0.2143,
+        0.2635,
+        0.3425
       ]
     },
     {
       "category": "exact_lexical",
-      "duplicate_slot_rate": 0.2,
+      "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
-      "mrr_at_5": 0.5,
-      "ndcg_at_5": 0.6309297535714574,
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
       "query": "Which days can we deploy to production?",
       "query_id": "q-exact-005",
       "ranked_ids": [
-        "mem-cache-001",
         "mem-deploy-001",
-        "mem-board-001",
-        "mem-aurora-001",
-        "mem-cache-002"
+        "mem-password-001",
+        "mem-refund-001",
+        "mem-falcon-001",
+        "mem-parking-001"
       ],
-      "recall_at_1": 0.0,
+      "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.304,
-        0.2985,
-        0.2814,
-        0.2803,
-        0.28
+        0.4356,
+        0.3587,
+        0.2947,
+        0.198,
+        0.2507
       ]
     },
     {
@@ -451,75 +468,19 @@
       "query_id": "q-exact-006",
       "ranked_ids": [
         "mem-ratelimit-001",
-        "mem-handbook-001",
         "mem-meridian-fin-001",
-        "mem-aurora-001",
-        "mem-origami-001"
+        "mem-handbook-002",
+        "mem-outage-001",
+        "mem-refund-001"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.4025,
-        0.32,
-        0.32,
-        0.3194,
-        0.3042
-      ]
-    },
-    {
-      "category": "semantic_paraphrase",
-      "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
-        "mem-badge-001"
-      ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
-      "query": "When do building cards stop working after someone exits?",
-      "query_id": "q-para-001",
-      "ranked_ids": [
-        "mem-stars-001",
-        "mem-plants-001",
-        "mem-cache-003",
-        "mem-photo-001",
-        "mem-knitting-001"
-      ],
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "scores": [
-        0.3259,
-        0.2629,
-        0.2533,
-        0.242,
-        0.2371
-      ]
-    },
-    {
-      "category": "semantic_paraphrase",
-      "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
-        "mem-standup-001"
-      ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
-      "query": "What time is the daily short meeting?",
-      "query_id": "q-para-002",
-      "ranked_ids": [
-        "mem-soup-001",
-        "mem-aurora-001",
-        "mem-cache-003",
-        "mem-deadline-old-001",
-        "mem-stars-001"
-      ],
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "scores": [
-        0.372,
-        0.3333,
-        0.3233,
-        0.3143,
-        0.2974
+        0.5838,
+        0.2581,
+        0.236,
+        0.1954,
+        0.2987
       ]
     },
     {
@@ -527,53 +488,103 @@
       "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
-      "mrr_at_5": 0.5,
-      "ndcg_at_5": 0.6309297535714574,
-      "query": "How do staff working from home reach internal systems?",
-      "query_id": "q-para-003",
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "When do building cards stop working after someone exits?",
+      "query_id": "q-para-001",
       "ranked_ids": [
-        "mem-northwind-log-001",
-        "mem-vpn-001",
-        "mem-movie-001",
-        "mem-parking-001",
-        "mem-travel-003"
+        "mem-badge-001",
+        "mem-outage-001",
+        "mem-photo-001",
+        "mem-northwind-fin-001",
+        "mem-vpn-001"
       ],
-      "recall_at_1": 0.0,
+      "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.3232,
-        0.2962,
-        0.292,
-        0.284,
-        0.284
+        0.3172,
+        0.3089,
+        0.2332,
+        0.2243,
+        0.2549
       ]
     },
     {
       "category": "semantic_paraphrase",
       "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
-        "mem-expensetool-001"
+      "false_positive_rate": 0.8,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What time is the daily short meeting?",
+      "query_id": "q-para-002",
+      "ranked_ids": [
+        "mem-standup-001",
+        "mem-language-001",
+        "mem-guitar-001",
+        "mem-books-001",
+        "mem-deadline-old-001"
       ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4044,
+        0.3249,
+        0.2991,
+        0.2802,
+        0.2772
+      ]
+    },
+    {
+      "category": "semantic_paraphrase",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.8,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "How do staff working from home reach internal systems?",
+      "query_id": "q-para-003",
+      "ranked_ids": [
+        "mem-vpn-001",
+        "mem-handbook-003",
+        "mem-plants-001",
+        "mem-falcon-001",
+        "mem-badge-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4081,
+        0.2988,
+        0.298,
+        0.2823,
+        0.298
+      ]
+    },
+    {
+      "category": "semantic_paraphrase",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.8,
+      "missed_relevant": [],
+      "mrr_at_5": 0.2,
+      "ndcg_at_5": 0.38685280723454163,
       "query": "Where do I file my trip receipts and how long do I have?",
       "query_id": "q-para-004",
       "ranked_ids": [
-        "mem-deadline-new-001",
-        "mem-handbook-003",
-        "mem-plants-001",
-        "mem-tea-001",
-        "mem-expense-001"
+        "mem-expense-001",
+        "mem-travel-003",
+        "mem-sunny-001",
+        "mem-cache-002",
+        "mem-expensetool-001"
       ],
       "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
+      "recall_at_5": 1.0,
       "scores": [
-        0.2865,
-        0.2828,
-        0.2678,
-        0.2624,
-        0.2579
+        0.3343,
+        0.3129,
+        0.2445,
+        0.2392,
+        0.2871
       ]
     },
     {
@@ -588,20 +599,20 @@
       "query": "Who helps newcomers learn the codebase at the start?",
       "query_id": "q-para-005",
       "ranked_ids": [
-        "mem-outage-001",
-        "mem-language-001",
-        "mem-stars-001",
-        "mem-running-001",
-        "mem-handbook-003"
+        "mem-onboard-001",
+        "mem-chess-001",
+        "mem-vpn-001",
+        "mem-charity-001",
+        "mem-badge-001"
       ],
       "recall_at_1": 0.0,
       "recall_at_5": 0.0,
       "scores": [
-        0.3446,
-        0.3359,
-        0.3268,
-        0.3121,
-        0.2945
+        0.2793,
+        0.2767,
+        0.2358,
+        0.2054,
+        0.2506
       ]
     },
     {
@@ -609,51 +620,51 @@
       "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
-      "mrr_at_5": 0.2,
-      "ndcg_at_5": 0.38685280723454163,
+      "mrr_at_5": 0.5,
+      "ndcg_at_5": 0.6309297535714574,
       "query": "What happens if the website stops responding for customers?",
       "query_id": "q-para-006",
       "ranked_ids": [
-        "mem-invoice-001",
-        "mem-parking-001",
-        "mem-northwind-fin-001",
-        "mem-travel-003",
-        "mem-outage-001"
+        "mem-refund-001",
+        "mem-outage-001",
+        "mem-deadline-old-001",
+        "mem-meridian-fin-001",
+        "mem-onboard-001"
       ],
       "recall_at_1": 0.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.346,
-        0.3192,
-        0.3119,
-        0.3024,
-        0.2863
+        0.3859,
+        0.3689,
+        0.2327,
+        0.2328,
+        0.2434
       ]
     },
     {
       "category": "identifier_or_entity_name",
-      "duplicate_slot_rate": 0.2,
+      "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
       "mrr_at_5": 1.0,
-      "ndcg_at_5": 0.9639404333166532,
+      "ndcg_at_5": 1.0,
       "query": "What does Meridian charge per transaction?",
       "query_id": "q-ent-001",
       "ranked_ids": [
         "mem-meridian-fin-001",
-        "mem-origami-001",
         "mem-meridian-log-001",
-        "mem-handbook-002",
-        "mem-handbook-001"
+        "mem-handbook-001",
+        "mem-expense-001",
+        "mem-portal-new-001"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.3547,
-        0.2659,
-        0.2474,
-        0.2284,
-        0.2238
+        0.5763,
+        0.321,
+        0.2215,
+        0.3048,
+        0.2321
       ]
     },
     {
@@ -667,157 +678,123 @@
       "query_id": "q-ent-002",
       "ranked_ids": [
         "mem-meridian-log-001",
-        "mem-cache-003",
-        "mem-outage-001",
+        "mem-orchid-001",
+        "mem-password-001",
         "mem-meridian-fin-001",
-        "mem-running-001"
+        "mem-travel-002"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.3441,
-        0.3025,
-        0.2944,
-        0.2603,
-        0.2503
+        0.55,
+        0.3405,
+        0.2107,
+        0.2997,
+        0.2539
       ]
     },
     {
       "category": "identifier_or_entity_name",
-      "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
-        "mem-falcon-001"
-      ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
-      "query": "What is Falcon?",
-      "query_id": "q-ent-003",
-      "ranked_ids": [
-        "mem-guitar-001",
-        "mem-stars-001",
-        "mem-cache-003",
-        "mem-outage-001",
-        "mem-meridian-fin-001"
-      ],
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "scores": [
-        0.2456,
-        0.2258,
-        0.2123,
-        0.2113,
-        0.1936
-      ]
-    },
-    {
-      "category": "identifier_or_entity_name",
-      "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
-        "mem-quill-001"
-      ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
-      "query": "What is Quill?",
-      "query_id": "q-ent-004",
-      "ranked_ids": [
-        "mem-board-001",
-        "mem-outage-001",
-        "mem-cache-003",
-        "mem-stars-001",
-        "mem-portal-old-001"
-      ],
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "scores": [
-        0.25,
-        0.2475,
-        0.2443,
-        0.201,
-        0.1926
-      ]
-    },
-    {
-      "category": "identifier_or_entity_name",
-      "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
-        "mem-aurora-001"
-      ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
-      "query": "What is Aurora?",
-      "query_id": "q-ent-005",
-      "ranked_ids": [
-        "mem-board-001",
-        "mem-garden-001",
-        "mem-handbook-001",
-        "mem-meridian-log-001",
-        "mem-hike-001"
-      ],
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "scores": [
-        0.2449,
-        0.2278,
-        0.2242,
-        0.221,
-        0.22
-      ]
-    },
-    {
-      "category": "identifier_or_entity_name",
-      "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
-        "mem-orchid-001"
-      ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
-      "query": "What is the returns vendor called Orchid responsible for?",
-      "query_id": "q-ent-006",
-      "ranked_ids": [
-        "mem-photo-001",
-        "mem-hike-001",
-        "mem-language-001",
-        "mem-bike-001",
-        "mem-aurora-001"
-      ],
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "scores": [
-        0.292,
-        0.2888,
-        0.2861,
-        0.2842,
-        0.2803
-      ]
-    },
-    {
-      "category": "temporal_or_revision",
       "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
-      "mrr_at_5": 0.5,
-      "ndcg_at_5": 0.7967075809905066,
-      "query": "What is the current quarterly report deadline?",
-      "query_id": "q-temp-001",
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What is Falcon?",
+      "query_id": "q-ent-003",
       "ranked_ids": [
-        "mem-deadline-old-001",
-        "mem-deadline-new-001",
-        "mem-portal-old-001",
-        "mem-portal-new-001",
-        "mem-meridian-fin-001"
+        "mem-falcon-001",
+        "mem-board-001",
+        "mem-soup-001",
+        "mem-stars-001",
+        "mem-quill-001"
       ],
-      "recall_at_1": 0.0,
+      "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.5394,
-        0.4933,
-        0.3023,
-        0.2878,
-        0.2752
+        0.4127,
+        0.1957,
+        0.115,
+        0.1458,
+        0.1613
+      ]
+    },
+    {
+      "category": "identifier_or_entity_name",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.8,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What is Quill?",
+      "query_id": "q-ent-004",
+      "ranked_ids": [
+        "mem-quill-001",
+        "mem-tea-001",
+        "mem-cache-003",
+        "mem-hike-001",
+        "mem-portal-old-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.3617,
+        0.1829,
+        0.1615,
+        0.1318,
+        0.137
+      ]
+    },
+    {
+      "category": "identifier_or_entity_name",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.8,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What is Aurora?",
+      "query_id": "q-ent-005",
+      "ranked_ids": [
+        "mem-aurora-001",
+        "mem-photowalk-001",
+        "mem-books-001",
+        "mem-sunny-001",
+        "mem-vpn-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.2826,
+        0.1994,
+        0.1867,
+        0.1893,
+        0.1521
+      ]
+    },
+    {
+      "category": "identifier_or_entity_name",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.8,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What is the returns vendor called Orchid responsible for?",
+      "query_id": "q-ent-006",
+      "ranked_ids": [
+        "mem-orchid-001",
+        "mem-northwind-fin-001",
+        "mem-coffee-001",
+        "mem-falcon-001",
+        "mem-plants-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4953,
+        0.2782,
+        0.1791,
+        0.1794,
+        0.1946
       ]
     },
     {
@@ -827,23 +804,51 @@
       "missed_relevant": [],
       "mrr_at_5": 0.3333333333333333,
       "ndcg_at_5": 0.6885288809404666,
+      "query": "What is the current quarterly report deadline?",
+      "query_id": "q-temp-001",
+      "ranked_ids": [
+        "mem-deadline-old-001",
+        "mem-expensetool-001",
+        "mem-deadline-new-001",
+        "mem-books-001",
+        "mem-cache-003"
+      ],
+      "recall_at_1": 0.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5707,
+        0.3781,
+        0.5638,
+        0.2707,
+        0.2529
+      ]
+    },
+    {
+      "category": "temporal_or_revision",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 1.0,
+      "missed_relevant": [
+        "mem-portal-new-001"
+      ],
+      "mrr_at_5": 0.0,
+      "ndcg_at_5": 0.27541155237618664,
       "query": "Where is the vendor portal login now?",
       "query_id": "q-temp-002",
       "ranked_ids": [
         "mem-portal-old-001",
-        "mem-deadline-old-001",
-        "mem-portal-new-001",
-        "mem-running-001",
+        "mem-orchid-001",
+        "mem-backup-001",
+        "mem-northwind-fin-001",
         "mem-falcon-001"
       ],
       "recall_at_1": 0.0,
-      "recall_at_5": 1.0,
+      "recall_at_5": 0.0,
       "scores": [
-        0.4739,
-        0.3465,
-        0.324,
-        0.2846,
-        0.2798
+        0.6257,
+        0.2711,
+        0.2371,
+        0.3279,
+        0.2382
       ]
     },
     {
@@ -851,25 +856,25 @@
       "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
-      "mrr_at_5": 0.5,
-      "ndcg_at_5": 0.7967075809905066,
+      "mrr_at_5": 0.2,
+      "ndcg_at_5": 0.5950427489208391,
       "query": "What is the standard delivery lead time today?",
       "query_id": "q-temp-003",
       "ranked_ids": [
         "mem-leadtime-old-001",
-        "mem-leadtime-new-001",
-        "mem-aurora-001",
-        "mem-cache-003",
-        "mem-falcon-001"
+        "mem-deploy-001",
+        "mem-refund-001",
+        "mem-meridian-log-001",
+        "mem-leadtime-new-001"
       ],
       "recall_at_1": 0.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.4253,
-        0.4203,
-        0.3437,
-        0.325,
-        0.2987
+        0.5268,
+        0.2839,
+        0.3284,
+        0.28,
+        0.5016
       ]
     },
     {
@@ -877,51 +882,51 @@
       "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
-      "mrr_at_5": 0.5,
-      "ndcg_at_5": 0.8597186998521972,
+      "mrr_at_5": 0.25,
+      "ndcg_at_5": 0.7074887171046738,
       "query": "What was the quarterly report deadline before the change?",
       "query_id": "q-temp-004",
       "ranked_ids": [
         "mem-deadline-new-001",
+        "mem-expensetool-001",
+        "mem-books-001",
         "mem-deadline-old-001",
-        "mem-quill-001",
-        "mem-bike-001",
-        "mem-knitting-001"
+        "mem-cache-003"
       ],
       "recall_at_1": 0.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.4958,
-        0.4783,
-        0.3161,
-        0.3033,
-        0.302
+        0.558,
+        0.3567,
+        0.2804,
+        0.5522,
+        0.2528
       ]
     },
     {
       "category": "temporal_or_revision",
-      "duplicate_slot_rate": 0.2,
+      "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.6,
       "missed_relevant": [],
-      "mrr_at_5": 0.5,
-      "ndcg_at_5": 0.6509209298071326,
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.9197207891481876,
       "query": "Did the vendor portal address ever change?",
       "query_id": "q-temp-005",
       "ranked_ids": [
-        "mem-cache-001",
-        "mem-portal-old-001",
-        "mem-cache-002",
         "mem-portal-new-001",
-        "mem-origami-001"
+        "mem-orchid-001",
+        "mem-portal-old-001",
+        "mem-party-001",
+        "mem-invoice-001"
       ],
-      "recall_at_1": 0.0,
+      "recall_at_1": 0.5,
       "recall_at_5": 1.0,
       "scores": [
-        0.3604,
-        0.354,
-        0.3216,
-        0.293,
-        0.2861
+        0.5152,
+        0.2723,
+        0.4876,
+        0.1948,
+        0.3079
       ]
     },
     {
@@ -929,186 +934,194 @@
       "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
-      "mrr_at_5": 0.5,
-      "ndcg_at_5": 0.7967075809905066,
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.8262346571285599,
       "query": "How long was standard delivery lead time in early 2026?",
       "query_id": "q-temp-006",
       "ranked_ids": [
-        "mem-leadtime-new-001",
         "mem-leadtime-old-001",
-        "mem-badge-001",
-        "mem-aurora-001",
-        "mem-garden-001"
+        "mem-deadline-new-001",
+        "mem-refund-001",
+        "mem-northwind-log-001",
+        "mem-parking-001"
       ],
-      "recall_at_1": 0.0,
+      "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.3941,
-        0.379,
-        0.2694,
-        0.2402,
-        0.2395
+        0.52,
+        0.3062,
+        0.3091,
+        0.3338,
+        0.2995
       ]
     },
     {
       "category": "near_duplicate_diversity",
-      "duplicate_slot_rate": 0.2,
-      "false_positive_rate": 0.6,
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.8,
       "missed_relevant": [
+        "mem-handbook-002",
         "mem-handbook-003"
       ],
       "mrr_at_5": 1.0,
-      "ndcg_at_5": 0.7653606369886218,
+      "ndcg_at_5": 0.4692787260227565,
       "query": "How often is the employee handbook reviewed?",
       "query_id": "q-dup-001",
       "ranked_ids": [
         "mem-handbook-001",
-        "mem-handbook-002",
-        "mem-aurora-001",
-        "mem-falcon-001",
-        "mem-meridian-fin-001"
-      ],
-      "recall_at_1": 0.3333333333333333,
-      "recall_at_5": 0.6666666666666666,
-      "scores": [
-        0.4712,
-        0.4338,
-        0.3538,
-        0.3453,
-        0.3292
-      ]
-    },
-    {
-      "category": "near_duplicate_diversity",
-      "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 0.8,
-      "missed_relevant": [
-        "mem-handbook-001",
-        "mem-handbook-002"
-      ],
-      "mrr_at_5": 1.0,
-      "ndcg_at_5": 0.4692787260227565,
-      "query": "Who reviews the staff handbook and how often?",
-      "query_id": "q-dup-002",
-      "ranked_ids": [
-        "mem-handbook-003",
-        "mem-knitting-001",
-        "mem-cache-003",
-        "mem-photowalk-001",
-        "mem-deploy-001"
+        "mem-outage-001",
+        "mem-board-001",
+        "mem-cache-002",
+        "mem-onboard-001"
       ],
       "recall_at_1": 0.3333333333333333,
       "recall_at_5": 0.3333333333333333,
       "scores": [
-        0.3929,
-        0.3254,
-        0.3218,
-        0.3034,
-        0.2917
+        0.5567,
+        0.2282,
+        0.1889,
+        0.2441,
+        0.2732
       ]
     },
     {
       "category": "near_duplicate_diversity",
-      "duplicate_slot_rate": 0.4,
-      "false_positive_rate": 0.4,
-      "missed_relevant": [],
+      "duplicate_slot_rate": 0.2,
+      "false_positive_rate": 0.6,
+      "missed_relevant": [
+        "mem-handbook-002"
+      ],
       "mrr_at_5": 1.0,
-      "ndcg_at_5": 1.0,
+      "ndcg_at_5": 0.7039180890341348,
+      "query": "Who reviews the staff handbook and how often?",
+      "query_id": "q-dup-002",
+      "ranked_ids": [
+        "mem-handbook-001",
+        "mem-outage-001",
+        "mem-handbook-003",
+        "mem-cache-001",
+        "mem-board-001"
+      ],
+      "recall_at_1": 0.3333333333333333,
+      "recall_at_5": 0.6666666666666666,
+      "scores": [
+        0.4816,
+        0.242,
+        0.4809,
+        0.2262,
+        0.1751
+      ]
+    },
+    {
+      "category": "near_duplicate_diversity",
+      "duplicate_slot_rate": 0.2,
+      "false_positive_rate": 0.6,
+      "missed_relevant": [
+        "mem-cache-001"
+      ],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.7653606369886218,
       "query": "How often does the search cache refresh?",
       "query_id": "q-dup-003",
       "ranked_ids": [
-        "mem-cache-001",
         "mem-cache-002",
         "mem-cache-003",
-        "mem-stars-001",
-        "mem-running-001"
+        "mem-orchid-001",
+        "mem-soup-001",
+        "mem-onboard-001"
       ],
       "recall_at_1": 0.3333333333333333,
-      "recall_at_5": 1.0,
+      "recall_at_5": 0.6666666666666666,
       "scores": [
-        0.4645,
-        0.4342,
-        0.4246,
-        0.3566,
-        0.32
+        0.5803,
+        0.5537,
+        0.1694,
+        0.1923,
+        0.2177
       ]
     },
     {
       "category": "near_duplicate_diversity",
-      "duplicate_slot_rate": 0.4,
-      "false_positive_rate": 0.4,
-      "missed_relevant": [],
+      "duplicate_slot_rate": 0.2,
+      "false_positive_rate": 0.6,
+      "missed_relevant": [
+        "mem-cache-001"
+      ],
       "mrr_at_5": 1.0,
-      "ndcg_at_5": 1.0,
+      "ndcg_at_5": 0.6508205185601091,
       "query": "When is the search cache refreshed during business hours?",
       "query_id": "q-dup-004",
       "ranked_ids": [
         "mem-cache-002",
-        "mem-cache-001",
-        "mem-cache-003",
-        "mem-stars-001",
-        "mem-charity-001"
+        "mem-portal-old-001",
+        "mem-party-001",
+        "mem-onboard-001",
+        "mem-cache-003"
       ],
       "recall_at_1": 0.3333333333333333,
-      "recall_at_5": 1.0,
+      "recall_at_5": 0.6666666666666666,
       "scores": [
-        0.558,
-        0.5263,
-        0.4265,
-        0.325,
-        0.2774
+        0.6486,
+        0.1973,
+        0.2191,
+        0.2518,
+        0.5732
       ]
     },
     {
       "category": "near_duplicate_diversity",
-      "duplicate_slot_rate": 0.4,
-      "false_positive_rate": 0.4,
-      "missed_relevant": [],
+      "duplicate_slot_rate": 0.2,
+      "false_positive_rate": 0.6,
+      "missed_relevant": [
+        "mem-travel-003"
+      ],
       "mrr_at_5": 1.0,
-      "ndcg_at_5": 1.0,
+      "ndcg_at_5": 0.6508205185601091,
       "query": "Do international travel bookings need approval?",
       "query_id": "q-dup-005",
       "ranked_ids": [
         "mem-travel-001",
-        "mem-travel-002",
-        "mem-travel-003",
-        "mem-vpn-001",
-        "mem-handbook-002"
+        "mem-expense-001",
+        "mem-northwind-log-001",
+        "mem-expensetool-001",
+        "mem-travel-002"
       ],
       "recall_at_1": 0.3333333333333333,
-      "recall_at_5": 1.0,
+      "recall_at_5": 0.6666666666666666,
       "scores": [
-        0.5493,
-        0.4289,
-        0.4011,
-        0.3006,
-        0.2545
+        0.6152,
+        0.2864,
+        0.4124,
+        0.3919,
+        0.5742
       ]
     },
     {
       "category": "near_duplicate_diversity",
-      "duplicate_slot_rate": 0.4,
-      "false_positive_rate": 0.4,
-      "missed_relevant": [],
+      "duplicate_slot_rate": 0.2,
+      "false_positive_rate": 0.6,
+      "missed_relevant": [
+        "mem-travel-001"
+      ],
       "mrr_at_5": 1.0,
-      "ndcg_at_5": 1.0,
+      "ndcg_at_5": 0.7039180890341348,
       "query": "Who approves international trips before ticketing?",
       "query_id": "q-dup-006",
       "ranked_ids": [
-        "mem-travel-002",
         "mem-travel-003",
-        "mem-travel-001",
-        "mem-vpn-001",
-        "mem-hike-001"
+        "mem-standup-001",
+        "mem-travel-002",
+        "mem-hike-001",
+        "mem-onboard-001"
       ],
       "recall_at_1": 0.3333333333333333,
-      "recall_at_5": 1.0,
+      "recall_at_5": 0.6666666666666666,
       "scores": [
-        0.5188,
-        0.5048,
-        0.502,
-        0.2971,
-        0.276
+        0.5975,
+        0.2109,
+        0.5608,
+        0.2115,
+        0.2719
       ]
     },
     {
@@ -1121,20 +1134,20 @@
       "query": "How do I fix a flat tire on my car?",
       "query_id": "q-neg-001",
       "ranked_ids": [
-        "mem-backup-001",
-        "mem-standup-001",
-        "mem-language-001",
-        "mem-expensetool-001",
-        "mem-vpn-001"
+        "mem-bike-001",
+        "mem-parking-001",
+        "mem-hike-001",
+        "mem-vpn-001",
+        "mem-stars-001"
       ],
       "recall_at_1": null,
       "recall_at_5": null,
       "scores": [
-        0.2345,
-        0.1953,
-        0.1904,
-        0.1773,
-        0.1757
+        0.3214,
+        0.2602,
+        0.2329,
+        0.2013,
+        0.199
       ]
     },
     {
@@ -1147,20 +1160,20 @@
       "query": "What wine pairs well with salmon?",
       "query_id": "q-neg-002",
       "ranked_ids": [
-        "mem-knitting-001",
-        "mem-expensetool-001",
-        "mem-quill-001",
-        "mem-bike-001",
+        "mem-tea-001",
+        "mem-mentor-001",
+        "mem-garden-001",
+        "mem-language-001",
         "mem-board-001"
       ],
       "recall_at_1": null,
       "recall_at_5": null,
       "scores": [
-        0.3622,
-        0.3346,
-        0.3338,
-        0.3328,
-        0.316
+        0.2039,
+        0.1747,
+        0.1754,
+        0.1744,
+        0.1742
       ]
     },
     {
@@ -1173,20 +1186,20 @@
       "query": "Who won the last football world cup?",
       "query_id": "q-neg-003",
       "ranked_ids": [
-        "mem-language-001",
-        "mem-falcon-001",
-        "mem-aurora-001",
+        "mem-party-001",
+        "mem-photo-001",
         "mem-movie-001",
-        "mem-outage-001"
+        "mem-standup-001",
+        "mem-chess-001"
       ],
       "recall_at_1": null,
       "recall_at_5": null,
       "scores": [
-        0.3088,
-        0.2759,
-        0.2638,
-        0.2554,
-        0.2428
+        0.2278,
+        0.2127,
+        0.2221,
+        0.1982,
+        0.1759
       ]
     },
     {
@@ -1199,20 +1212,20 @@
       "query": "What is the freezing point of liquid nitrogen?",
       "query_id": "q-neg-004",
       "ranked_ids": [
-        "mem-sunny-001",
-        "mem-board-001",
-        "mem-coffee-001",
-        "mem-charity-001",
-        "mem-photowalk-001"
+        "mem-soup-001",
+        "mem-meridian-fin-001",
+        "mem-vpn-001",
+        "mem-garden-001",
+        "mem-cache-003"
       ],
       "recall_at_1": null,
       "recall_at_5": null,
       "scores": [
-        0.3209,
-        0.3044,
-        0.2937,
-        0.287,
-        0.2815
+        0.2453,
+        0.2233,
+        0.2044,
+        0.2322,
+        0.1933
       ]
     },
     {
@@ -1225,20 +1238,20 @@
       "query": "How do I care for an orchid houseplant?",
       "query_id": "q-neg-005",
       "ranked_ids": [
-        "mem-charity-001",
-        "mem-sunny-001",
-        "mem-tea-001",
-        "mem-standup-001",
-        "mem-mentor-001"
+        "mem-orchid-001",
+        "mem-garden-001",
+        "mem-vpn-001",
+        "mem-coffee-001",
+        "mem-plants-001"
       ],
       "recall_at_1": null,
       "recall_at_5": null,
       "scores": [
-        0.2241,
-        0.2138,
-        0.1916,
-        0.1829,
-        0.1649
+        0.2329,
+        0.2315,
+        0.1908,
+        0.1749,
+        0.2079
       ]
     },
     {
@@ -1251,102 +1264,46 @@
       "query": "Which guitar chords should a beginner learn first?",
       "query_id": "q-neg-006",
       "ranked_ids": [
-        "mem-board-001",
-        "mem-stars-001",
         "mem-guitar-001",
-        "mem-aurora-001",
-        "mem-travel-001"
+        "mem-vpn-001",
+        "mem-chess-001",
+        "mem-knitting-001",
+        "mem-onboard-001"
       ],
       "recall_at_1": null,
       "recall_at_5": null,
       "scores": [
-        0.2934,
-        0.2481,
-        0.2451,
-        0.2378,
-        0.234
+        0.3261,
+        0.2151,
+        0.2397,
+        0.1618,
+        0.1962
       ]
     },
     {
       "category": "cross_project_isolation",
       "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
-        "mem-northwind-fin-001"
-      ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
+      "false_positive_rate": 0.8,
+      "missed_relevant": [],
+      "mrr_at_5": 0.3333333333333333,
+      "ndcg_at_5": 0.58688267143572,
       "query": "In the finance project, what are Northwind's payment terms?",
       "query_id": "q-iso-001",
       "ranked_ids": [
-        "mem-expensetool-001",
         "mem-meridian-fin-001",
-        "mem-handbook-002",
-        "mem-running-001",
-        "mem-books-001"
-      ],
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "scores": [
-        0.3167,
-        0.3133,
-        0.2829,
-        0.2748,
-        0.231
-      ]
-    },
-    {
-      "category": "cross_project_isolation",
-      "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
-        "mem-northwind-log-001"
-      ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
-      "query": "In the logistics project, what lead time does Northwind freight need?",
-      "query_id": "q-iso-002",
-      "ranked_ids": [
-        "mem-sunny-001",
-        "mem-handbook-002",
-        "mem-badge-001",
-        "mem-leadtime-new-001",
-        "mem-language-001"
-      ],
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "scores": [
-        0.3036,
-        0.2811,
-        0.2785,
-        0.2697,
-        0.2691
-      ]
-    },
-    {
-      "category": "cross_project_isolation",
-      "duplicate_slot_rate": 0.2,
-      "false_positive_rate": 0.8,
-      "missed_relevant": [],
-      "mrr_at_5": 0.5,
-      "ndcg_at_5": 0.7967075809905066,
-      "query": "For payments, what is Meridian's fee?",
-      "query_id": "q-iso-003",
-      "ranked_ids": [
-        "mem-meridian-log-001",
-        "mem-meridian-fin-001",
-        "mem-cache-003",
-        "mem-travel-003",
-        "mem-travel-002"
+        "mem-northwind-log-001",
+        "mem-northwind-fin-001",
+        "mem-aurora-001",
+        "mem-expensetool-001"
       ],
       "recall_at_1": 0.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.3641,
-        0.3168,
-        0.2826,
-        0.267,
-        0.2622
+        0.4019,
+        0.339,
+        0.3547,
+        0.3306,
+        0.3315
       ]
     },
     {
@@ -1355,53 +1312,104 @@
       "false_positive_rate": 0.8,
       "missed_relevant": [],
       "mrr_at_5": 1.0,
-      "ndcg_at_5": 0.9327783893101107,
-      "query": "For overseas shipments, which Meridian do we book?",
-      "query_id": "q-iso-004",
+      "ndcg_at_5": 0.8262346571285599,
+      "query": "In the logistics project, what lead time does Northwind freight need?",
+      "query_id": "q-iso-002",
       "ranked_ids": [
-        "mem-meridian-log-001",
         "mem-northwind-log-001",
-        "mem-cache-003",
-        "mem-plants-001",
-        "mem-meridian-fin-001"
+        "mem-meridian-log-001",
+        "mem-aurora-001",
+        "mem-hike-001",
+        "mem-vpn-001"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.5101,
-        0.279,
-        0.235,
-        0.2102,
-        0.2097
+        0.4927,
+        0.4162,
+        0.2928,
+        0.2544,
+        0.2612
       ]
     },
     {
       "category": "cross_project_isolation",
-      "duplicate_slot_rate": 0.2,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.8,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.9639404333166532,
+      "query": "For payments, what is Meridian's fee?",
+      "query_id": "q-iso-003",
+      "ranked_ids": [
+        "mem-meridian-fin-001",
+        "mem-expensetool-001",
+        "mem-meridian-log-001",
         "mem-invoice-001",
-        "mem-northwind-fin-001"
+        "mem-knitting-001"
       ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5116,
+        0.3352,
+        0.2964,
+        0.2853,
+        0.1446
+      ]
+    },
+    {
+      "category": "cross_project_isolation",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.8,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.9639404333166532,
+      "query": "For overseas shipments, which Meridian do we book?",
+      "query_id": "q-iso-004",
+      "ranked_ids": [
+        "mem-meridian-log-001",
+        "mem-books-001",
+        "mem-meridian-fin-001",
+        "mem-travel-002",
+        "mem-orchid-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5966,
+        0.2161,
+        0.331,
+        0.2651,
+        0.2939
+      ]
+    },
+    {
+      "category": "cross_project_isolation",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.8,
+      "missed_relevant": [
+        "mem-invoice-001"
+      ],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.7039180890341347,
       "query": "Northwind invoice approval limit in the finance project?",
       "query_id": "q-iso-005",
       "ranked_ids": [
-        "mem-travel-002",
-        "mem-handbook-002",
-        "mem-cache-002",
+        "mem-northwind-fin-001",
+        "mem-aurora-001",
+        "mem-meridian-fin-001",
         "mem-expensetool-001",
-        "mem-travel-001"
+        "mem-northwind-log-001"
       ],
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
+      "recall_at_1": 0.5,
+      "recall_at_5": 0.5,
       "scores": [
-        0.3603,
-        0.3383,
-        0.3115,
-        0.3054,
-        0.2959
+        0.5156,
+        0.3266,
+        0.3416,
+        0.3368,
+        0.3409
       ]
     },
     {
@@ -1415,19 +1423,19 @@
       "query_id": "q-iso-006",
       "ranked_ids": [
         "mem-orchid-001",
-        "mem-party-001",
-        "mem-movie-001",
-        "mem-language-001",
-        "mem-badge-001"
+        "mem-meridian-log-001",
+        "mem-parking-001",
+        "mem-expense-001",
+        "mem-portal-old-001"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.3888,
-        0.2797,
-        0.2715,
-        0.2687,
-        0.25
+        0.581,
+        0.4047,
+        0.2181,
+        0.3045,
+        0.2711
       ]
     },
     {
@@ -1441,24 +1449,24 @@
       "query_id": "q-snap-001",
       "ranked_ids": [
         "mem-badge-001",
-        "mem-garden-001",
-        "mem-aurora-001",
-        "mem-hike-001",
-        "mem-origami-001"
+        "mem-handbook-002",
+        "mem-onboard-001",
+        "mem-soup-001",
+        "mem-photo-001"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.5168,
-        0.3479,
-        0.33,
-        0.3089,
-        0.3007
+        0.5418,
+        0.311,
+        0.3156,
+        0.1449,
+        0.1648
       ]
     },
     {
       "category": "snapshot_hydration_equivalence",
-      "duplicate_slot_rate": 0.2,
+      "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
       "mrr_at_5": 1.0,
@@ -1467,47 +1475,19 @@
       "query_id": "q-snap-002",
       "ranked_ids": [
         "mem-backup-001",
-        "mem-cache-003",
-        "mem-aurora-001",
-        "mem-travel-003",
-        "mem-travel-001"
+        "mem-board-001",
+        "mem-bike-001",
+        "mem-movie-001",
+        "mem-handbook-002"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.3813,
-        0.3282,
-        0.3265,
-        0.2892,
-        0.2849
-      ]
-    },
-    {
-      "category": "snapshot_hydration_equivalence",
-      "duplicate_slot_rate": 0.0,
-      "false_positive_rate": 1.0,
-      "missed_relevant": [
-        "mem-mentor-001"
-      ],
-      "mrr_at_5": 0.0,
-      "ndcg_at_5": 0.0,
-      "query": "How do new engineers get a mentor?",
-      "query_id": "q-snap-003",
-      "ranked_ids": [
-        "mem-quill-001",
-        "mem-running-001",
-        "mem-charity-001",
-        "mem-falcon-001",
-        "mem-photo-001"
-      ],
-      "recall_at_1": 0.0,
-      "recall_at_5": 0.0,
-      "scores": [
-        0.2849,
-        0.2678,
-        0.2596,
-        0.2596,
-        0.2549
+        0.5148,
+        0.2077,
+        0.1932,
+        0.2822,
+        0.2091
       ]
     },
     {
@@ -1515,25 +1495,51 @@
       "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
-      "mrr_at_5": 0.25,
-      "ndcg_at_5": 0.4306765580733931,
-      "query": "What happens during a service outage?",
-      "query_id": "q-snap-004",
+      "mrr_at_5": 0.5,
+      "ndcg_at_5": 0.6309297535714574,
+      "query": "How do new engineers get a mentor?",
+      "query_id": "q-snap-003",
       "ranked_ids": [
-        "mem-hike-001",
-        "mem-cache-001",
-        "mem-handbook-001",
+        "mem-vpn-001",
+        "mem-mentor-001",
         "mem-outage-001",
-        "mem-origami-001"
+        "mem-onboard-001",
+        "mem-chess-001"
       ],
       "recall_at_1": 0.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.2655,
-        0.2541,
-        0.245,
-        0.2402,
-        0.2346
+        0.3968,
+        0.3859,
+        0.3187,
+        0.3011,
+        0.2429
+      ]
+    },
+    {
+      "category": "snapshot_hydration_equivalence",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.8,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What happens during a service outage?",
+      "query_id": "q-snap-004",
+      "ranked_ids": [
+        "mem-outage-001",
+        "mem-expense-001",
+        "mem-cache-003",
+        "mem-onboard-001",
+        "mem-deploy-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.3765,
+        0.2198,
+        0.2375,
+        0.2433,
+        0.2565
       ]
     },
     {
@@ -1547,45 +1553,45 @@
       "query_id": "q-snap-005",
       "ranked_ids": [
         "mem-expensetool-001",
-        "mem-meridian-fin-001",
-        "mem-plants-001",
         "mem-travel-002",
-        "mem-books-001"
+        "mem-hike-001",
+        "mem-meridian-log-001",
+        "mem-handbook-001"
       ],
       "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.3622,
-        0.2299,
-        0.2234,
-        0.2231,
-        0.1918
+        0.5289,
+        0.3905,
+        0.2127,
+        0.2685,
+        0.2736
       ]
     },
     {
       "category": "snapshot_hydration_equivalence",
-      "duplicate_slot_rate": 0.2,
+      "duplicate_slot_rate": 0.0,
       "false_positive_rate": 0.8,
       "missed_relevant": [],
-      "mrr_at_5": 0.25,
-      "ndcg_at_5": 0.4306765580733931,
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
       "query": "When is the morning team sync?",
       "query_id": "q-snap-006",
       "ranked_ids": [
-        "mem-cache-003",
-        "mem-cache-002",
-        "mem-falcon-001",
         "mem-standup-001",
-        "mem-coffee-001"
+        "mem-deploy-001",
+        "mem-onboard-001",
+        "mem-mentor-001",
+        "mem-sunny-001"
       ],
-      "recall_at_1": 0.0,
+      "recall_at_1": 1.0,
       "recall_at_5": 1.0,
       "scores": [
-        0.46,
-        0.3831,
-        0.3517,
-        0.3507,
-        0.3086
+        0.5321,
+        0.3677,
+        0.2497,
+        0.2833,
+        0.2382
       ]
     }
   ],
@@ -1593,19 +1599,19 @@
     "action": "pursue_semantic_embedding_boundary_78",
     "measured": {
       "clone_equivalence_rate": 1.0,
-      "duplicate_slot_rate": 0.07500000000000001,
+      "duplicate_slot_rate": 0.020833333333333332,
       "exact_lexical_recall_at_5": 1.0,
-      "near_duplicate_diversity_duplicate_slot_rate": 0.3,
-      "semantic_recall_at_5": 0.3333333333333333
+      "near_duplicate_diversity_duplicate_slot_rate": 0.16666666666666666,
+      "semantic_recall_at_5": 0.8333333333333334
     },
-    "rationale": "semantic Recall@5 (0.333) trails exact-lexical Recall@5 (1.000) by 66.7 percentage points (threshold: 15pp) \u2014 the deterministic hash embedder cannot bridge wording differences; pursue #78."
+    "rationale": "semantic Recall@5 (0.833) trails exact-lexical Recall@5 (1.000) by 16.7 percentage points (threshold: 15pp) \u2014 the deterministic hash embedder cannot bridge wording differences; pursue #78."
   },
   "runtime": {
-    "embedding_dim": 64,
-    "embedding_model": "hotmem-hash-v1",
+    "embedding_dim": 256,
+    "embedding_model": "local-m2v/potion-base-8M/rev:v1/norm:l2/pp:m2v-static-v1",
     "fusion": "cosine 0.6 / fts5_bm25 0.2 / importance 0.2",
     "repeat": 1,
-    "reranker": "none",
+    "reranker": "hotmem/mmr-l0.5",
     "top_k": 5
   },
   "schema_version": 1

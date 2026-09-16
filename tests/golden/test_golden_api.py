@@ -18,13 +18,27 @@ def test_health_shape(client):
     resp = client.get("/v1/health")
     assert resp.status_code == 200
     body = resp.json()
-    assert_keys_exact(body, {"status", "memory_count", "db_path", "uptime_s"}, "GET /v1/health")
+    assert_keys_exact(
+        body,
+        {
+            "status",
+            "memory_count",
+            "db_path",
+            "uptime_s",
+            # Sanitized active embedding descriptor (issue #78) — additive.
+            "embedding",
+        },
+        "GET /v1/health",
+    )
     assert mask(body) == {
         "status": "<str>",
         "memory_count": "<int>",
         "db_path": "<path>",
         "uptime_s": "<float>",
+        "embedding": {"model": "<str>", "dim": "<int>"},
     }
+    # The default server runs the hash space — key/dim only, no paths.
+    assert body["embedding"] == {"model": "hotmem-hash-v1", "dim": 64}
 
 
 def test_health_trace_header(client):
@@ -155,13 +169,39 @@ def test_hydrate_response_shape(client, tmp_path):
     resp = client.post("/v1/hydrate", json={"file": str(swap)})
     assert resp.status_code == 200
     body = resp.json()
-    assert_keys_exact(body, {"loaded", "skipped_dupes", "invalid", "path"}, "POST /v1/hydrate")
+    assert_keys_exact(
+        body,
+        {
+            "loaded",
+            "skipped_dupes",
+            "invalid",
+            "path",
+            # Embedding disposition (issue #78) — additive response fields.
+            "embedding_reused",
+            "embedding_rebuilt",
+            "embedding_missing",
+            "embedding_failed",
+            # Annotation merge disposition (issue #79) — additive.
+            "annotations_merged",
+            "annotation_conflicts",
+        },
+        "POST /v1/hydrate",
+    )
     assert mask(body) == {
         "loaded": "<int>",
         "skipped_dupes": "<int>",
         "invalid": "<int>",
         "path": "<path>",
+        "embedding_reused": "<int>",
+        "embedding_rebuilt": "<int>",
+        "embedding_missing": "<int>",
+        "embedding_failed": "<int>",
+        "annotations_merged": "<int>",
+        "annotation_conflicts": "<int>",
     }
+    # A text-only legacy record without a stored vector is embedded fresh.
+    assert body["embedding_rebuilt"] == 1
+    assert body["embedding_reused"] == body["embedding_missing"] == body["embedding_failed"] == 0
 
 
 def test_hydrate_rejects_unsupported_extension(client, tmp_path):

@@ -206,7 +206,8 @@ def test_regression_search_response_unchanged(client: TestClient):
 
 def test_regression_hydrate_response_unchanged(client: TestClient, tmp_path: Path):
     # Snapshot then hydrate; response keys remain {loaded, skipped_dupes, path}
-    # plus the additive `invalid` count (#67, interchange contract §7).
+    # plus the additive `invalid` count (#67, interchange contract §7) and the
+    # additive embedding-disposition fields (#78).
     swap = tmp_path / "swap.jsonl"
     snap = client.post("/v1/snapshot", json={"path": str(swap)})
     assert snap.status_code == 200
@@ -214,7 +215,18 @@ def test_regression_hydrate_response_unchanged(client: TestClient, tmp_path: Pat
 
     hyd = client.post("/v1/hydrate", json={"path": str(swap)})
     assert hyd.status_code == 200
-    assert set(hyd.json().keys()) == {"loaded", "skipped_dupes", "invalid", "path"}
+    assert set(hyd.json().keys()) == {
+        "loaded",
+        "skipped_dupes",
+        "invalid",
+        "path",
+        "embedding_reused",
+        "embedding_rebuilt",
+        "embedding_missing",
+        "embedding_failed",
+        "annotations_merged",
+        "annotation_conflicts",
+    }
 
 
 def test_regression_discover_response_unchanged(client: TestClient, tmp_path: Path):

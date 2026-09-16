@@ -114,15 +114,49 @@ compressed or when they were exported.
 
 A stored embedding is reused as-is **iff all** hold:
 
-1. `embedding_model` equals the reader's current model (`hotmem-hash-v1`),
-2. `embedding_dim` equals the current dimension (64),
-3. the base64 blob decodes and its length is exactly `embedding_dim * 4`.
+1. `embedding_model` equals the reader's active embedding descriptor key,
+2. `embedding_dim` equals the active descriptor's dimension,
+3. the base64 blob decodes, its length is exactly `embedding_dim * 4` bytes,
+   every value is finite, and the vector satisfies the descriptor's
+   normalization policy (`l2` → unit norm within float32 tolerance).
 
 Otherwise the record is re-embedded from `fact_text` (inline) or
-`fact_summary` (file). If no usable text exists, the record is counted
-`invalid` and skipped — never silently stored with a foreign embedding.
-Embeddings are derived data: they are never part of logical identity and can
-always be rebuilt from canonical text.
+`fact_summary` (file) under the **active** embedder and stamped with its
+current descriptor — a stored vector is never relabeled as another model's.
+If no usable text exists, the record is counted `invalid` and skipped —
+never silently stored with a foreign embedding. Embeddings are derived data:
+they are never part of logical identity and can always be rebuilt from
+canonical text.
+
+### 5.1 Embedding descriptors (issue #78)
+
+`embedding_model` carries the canonical key of the producing embedder's
+immutable descriptor: implementation, model, revision (when known),
+dimension, normalization (`none`/`l2`), metric (`cosine`), and a
+preprocessing/version identifier. The key is a compact structured
+fingerprint — `implementation/model/rev:<r>/norm:<n>/pp:<p>` — so key equality
+means full descriptor equality. Equal dimensions alone never establish
+compatibility.
+
+| Stored values | Meaning |
+|---|---|
+| `embedding_model` absent/empty | Legacy default: `hotmem-hash-v1` semantics |
+| `embedding_dim` absent | Legacy default: 64 |
+| `hotmem-hash-v1` | The deterministic hash default — key unchanged, so existing records, packages, and markers stay valid |
+| structured key (e.g. `local/mini/rev:r1/norm:l2/pp:pp1`) | A semantic adapter's descriptor; reusable only by an active embedder with the identical key and dimension |
+
+The package/delta manifest `embedding` block is derived from the payload's
+embedded rows: a uniform store records `{"model": <descriptor key>,
+"dim": <dimension>}`; a mixed-space store records `{"model": "mixed",
+"dim": 0}` because no single key can describe it (per-record fields stay
+authoritative); a store with no embedded rows keeps the hash default.
+Hash-only packages are byte-identical to previous versions. Producers may
+add further descriptor detail additively — readers ignore unknown manifest
+fields. Rehydration reports four embedding statuses per
+run: `embedding_reused`, `embedding_rebuilt`, `embedding_missing`
+(textless file-backed rows keep the NULL-embedding convention), and
+`embedding_failed` (provider errors: the canonical record still loads; an
+explicitly requested reindex surfaces the provider error instead).
 
 ## 6. Manifest
 

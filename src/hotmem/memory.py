@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from hotmem.db import MemoryDB
-from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.provenance import (
     BackingFileMissingError,
     ChecksumMismatchError,
@@ -108,14 +108,16 @@ def add_file_backed(
     metadata: dict[str, Any] | None = None,
     source: str = "",
     provenance: dict[str, Any] | None = None,
+    embedder: Embedder | None = None,
 ) -> tuple[str, str]:
     """Add a file-backed memory with zero bytes copied.
 
     Validates the scheme is local (rejects s3://, hdfs://, abfs://, gs://),
     confirms the backing file exists via a cheap stat (not a full read), and
-    stores the reference. If ``summary`` is provided it is embedded so the
-    memory is searchable; otherwise the embedding is NULL and the memory is
-    excluded from cosine/keyword search (still retrievable via get_memory).
+    stores the reference. If ``summary`` is provided it is embedded under
+    ``embedder`` (issue #78; ``None`` = the hash default) so the memory is
+    searchable; otherwise the embedding is NULL and the memory is excluded
+    from cosine/keyword search (still retrievable via get_memory).
 
     Returns (memory_id, content_hash). Raises UnsupportedSchemeError for
     non-local URIs and FileNotFoundError if the backing file is missing.
@@ -128,13 +130,14 @@ def add_file_backed(
         if not adapter.exists(resolved_uri):
             raise FileNotFoundError(f"backing file not found: {file_ref.source_uri}")
 
+        active = embedder if embedder is not None else DEFAULT_EMBEDDER
         memory_id = uuid.uuid4().hex
         content_hash = _file_ref_content_hash(identifier, file_ref)
 
         if summary:
-            vec = embed_text(summary)
+            vec = active.embed(summary)
             blob = pack_embedding(vec)
-            embedding_model = EMBEDDING_MODEL
+            embedding_model = active.descriptor.key
         else:
             blob = b""
             embedding_model = ""
@@ -149,7 +152,7 @@ def add_file_backed(
             source_checksum=file_ref.source_checksum,
             fact_summary=summary,
             embedding=blob,
-            embedding_dim=EMBEDDING_DIM,
+            embedding_dim=active.descriptor.dimension,
             embedding_model=embedding_model,
             source=source,
             importance=importance,

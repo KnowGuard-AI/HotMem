@@ -9,17 +9,25 @@ from __future__ import annotations
 
 import base64
 import json
+import struct
 
 import pytest
 
-from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, embed_text, pack_embedding
+from hotmem.embed import (
+    EMBEDDING_DIM,
+    EMBEDDING_MODEL,
+    EmbeddingDescriptor,
+    embed_text,
+    pack_embedding,
+    unpack_embedding,
+)
 from hotmem.interchange.canonical import (
     canonical_dumps,
     canonical_line,
     compute_content_hash,
     logical_id,
 )
-from hotmem.interchange.compat import compatible_embedding_blob
+from hotmem.interchange.compat import compatible_embedding_blob, resolve_embedding
 from hotmem.interchange.record import normalize_record, validate_record
 from hotmem.snapshot.format import compute_snapshot_id
 from hotmem.swap import compute_content_hash as swap_compute_content_hash
@@ -206,3 +214,177 @@ def test_hydrate_result_invalid_field_is_additive():
 
     assert SwapResult(loaded=1, skipped_dupes=0).invalid == 0
     assert V2Result(loaded=1, skipped_dupes=0).invalid == 0
+
+
+# ── descriptor-based compatibility (issue #78) ───────────────────────────────
+
+
+def _semantic_descriptor(dim: int = 8) -> EmbeddingDescriptor:
+    return EmbeddingDescriptor(
+        implementation="local",
+        model="mini",
+        dimension=dim,
+        revision="r1",
+        preprocessing="pp1",
+    )
+
+
+class _FakeEmbedder:
+    """Deterministic test embedder: alternating +/- unit vector."""
+
+    def __init__(self, descriptor: EmbeddingDescriptor) -> None:
+        self._descriptor = descriptor
+        self.calls = 0
+
+    @property
+    def descriptor(self) -> EmbeddingDescriptor:
+        return self._descriptor
+
+    def embed(self, text: str) -> list[float]:
+        self.calls += 1
+        dim = self._descriptor.dimension
+        vec = [0.0] * dim
+        norm = (dim) ** 0.5
+        for i in range(dim):
+            vec[i] = (1.0 if i % 2 == 0 else -1.0) / norm
+        return vec
+
+
+def test_descriptor_compatible_blob_reused():
+    desc = _semantic_descriptor()
+    fake = _FakeEmbedder(desc)
+    blob = pack_embedding(fake.embed("semantic fact"))
+    b64 = base64.b64encode(blob).decode("ascii")
+    record = {"embedding": b64, "embedding_model": desc.key, "embedding_dim": desc.dimension}
+    assert compatible_embedding_blob(record, descriptor=desc) == blob
+
+
+def test_equal_dimensions_never_compatible():
+    """#78: matching dimension is not evidence of a shared embedding space."""
+    desc = _semantic_descriptor()
+    fake = _FakeEmbedder(desc)
+    blob = pack_embedding(fake.embed("semantic fact"))
+    b64 = base64.b64encode(blob).decode("ascii")
+    same_dim = {"embedding": b64, "embedding_model": "foreign/v9", "embedding_dim": desc.dimension}
+    assert compatible_embedding_blob(same_dim, descriptor=desc) is None
+    # And the hash default never adopts a foreign key's blob either.
+    assert (
+        compatible_embedding_blob(
+            {"embedding": b64, "embedding_model": desc.key, "embedding_dim": desc.dimension}
+        )
+        is None
+    )
+
+
+def test_legacy_absent_fields_keep_hash_semantics():
+    b64 = _blob_b64()
+    # Absent model/dim = hash defaults — reusable by the hash embedder only.
+    assert compatible_embedding_blob({"embedding": b64}) is not None
+    assert (
+        compatible_embedding_blob(
+            {"embedding": b64}, descriptor=_semantic_descriptor(EMBEDDING_DIM)
+        )
+        is None
+    )
+
+
+def test_nonfinite_or_unnormalized_vector_rejected():
+    desc = _semantic_descriptor()
+    nan_blob = struct.pack(f"{desc.dimension}f", *([float("nan")] * desc.dimension))
+    inf_blob = struct.pack(f"{desc.dimension}f", *([float("inf")] * desc.dimension))
+    zeros_blob = struct.pack(f"{desc.dimension}f", *([0.0] * desc.dimension))
+    for bad in (nan_blob, inf_blob, zeros_blob):
+        record = {
+            "embedding": base64.b64encode(bad).decode("ascii"),
+            "embedding_model": desc.key,
+            "embedding_dim": desc.dimension,
+        }
+        assert compatible_embedding_blob(record, descriptor=desc) is None
+    # A "none"-normalization descriptor accepts the unnormalized vector but
+    # still rejects non-finite values.
+    none_desc = EmbeddingDescriptor(
+        implementation="local",
+        model="mini",
+        dimension=desc.dimension,
+        revision="r1",
+        normalization="none",
+        preprocessing="pp1",
+    )
+    raw = struct.pack(f"{desc.dimension}f", *([0.5] * desc.dimension))
+    ok = {
+        "embedding": base64.b64encode(raw).decode("ascii"),
+        "embedding_model": none_desc.key,
+        "embedding_dim": none_desc.dimension,
+    }
+    assert compatible_embedding_blob(ok, descriptor=none_desc) == raw
+
+
+def test_malformed_dimension_is_incompatible_not_error():
+    b64 = _blob_b64()
+    assert compatible_embedding_blob({"embedding": b64, "embedding_dim": "sixty-four"}) is None
+
+
+# ── resolve_embedding statuses (issue #78) ───────────────────────────────────
+
+
+def test_resolve_reused_without_calling_embedder():
+    desc = _semantic_descriptor()
+    fake = _FakeEmbedder(desc)
+    unit = [(1.0 if i % 2 == 0 else -1.0) / (desc.dimension**0.5) for i in range(desc.dimension)]
+    blob = pack_embedding(unit)
+    stored, model, dim, status = resolve_embedding(
+        {
+            "embedding": base64.b64encode(blob).decode("ascii"),
+            "embedding_model": desc.key,
+            "embedding_dim": desc.dimension,
+            "fact_text": "semantic fact",
+        },
+        embedder=fake,
+    )
+    assert status == "reused"
+    assert fake.calls == 0
+    assert stored == blob and model == desc.key and dim == desc.dimension
+
+
+def test_resolve_rebuilt_stamps_active_descriptor():
+    desc = _semantic_descriptor()
+    fake = _FakeEmbedder(desc)
+    blob, model, dim, status = resolve_embedding(
+        {
+            "embedding": _blob_b64(),
+            "embedding_model": "foreign-v9",
+            "embedding_dim": EMBEDDING_DIM,
+            "fact_text": "rebuild me",
+        },
+        embedder=fake,
+    )
+    assert status == "rebuilt"
+    assert fake.calls == 1
+    assert model == desc.key and dim == desc.dimension
+    assert len(unpack_embedding(blob)) == desc.dimension
+
+
+def test_resolve_missing_for_textless_file_backed():
+    blob, model, dim, status = resolve_embedding(
+        {"memory_type": "file", "fact_summary": "", "fact_text": ""},
+    )
+    assert status == "missing"
+    assert blob == b"" and model == "" and dim == EMBEDDING_DIM
+
+
+def test_resolve_failed_when_embedder_raises():
+    class ExplodingEmbedder(_FakeEmbedder):
+        def embed(self, text: str) -> list[float]:
+            self.calls += 1
+            raise RuntimeError("provider down")
+
+    desc = _semantic_descriptor()
+    exploding = ExplodingEmbedder(desc)
+    blob, model, dim, status = resolve_embedding(
+        {"fact_text": "still canonical", "embedding_model": "foreign-v9"},
+        embedder=exploding,
+    )
+    assert status == "failed"
+    assert exploding.calls == 1
+    assert blob == b"" and model == ""
+    assert dim == desc.dimension

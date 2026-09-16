@@ -1,0 +1,696 @@
+"""Lossless annotation envelope — issue #79 acceptance tests.
+
+Validation taxonomy (structural only, unknown preserved), deterministic
+merge matrix, transport round-trips (JSONL, gz, Snapshot v2, package,
+delta), idempotent replay, conflict retention, and fingerprint sensitivity.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from hotmem.annotations import (
+    AnnotationValidationError,
+    merge_annotations,
+    validate_annotations,
+    validate_metadata,
+)
+from hotmem.db import MemoryDB
+from hotmem.interchange.delta import apply_delta, produce_delta
+from hotmem.interchange.fingerprint import state_fingerprint
+from hotmem.interchange.hydrate import hydrate_package
+from hotmem.interchange.package import write_package
+from hotmem.snapshot import hydrate as snapshot_hydrate
+from hotmem.snapshot import snapshot as snapshot_write
+from hotmem.snapshot.writer import write_snapshot_v2
+from hotmem.swap import add_memory
+from hotmem.swap import hydrate as swap_hydrate
+
+
+def _envelope(
+    ns: str = "org.example.entities",
+    items: list | None = None,
+    **extra: object,
+) -> dict:
+    return {
+        "schema_version": 1,
+        "namespaces": {
+            ns: items
+            if items is not None
+            else [{"id": "vendor-x", "type": "Organization", "confidence": 0.9}]
+        },
+        **extra,
+    }
+
+
+def _meta(annotations: dict) -> dict:
+    return {"annotations": annotations}
+
+
+def _write_pkg(db: MemoryDB, tmp_path: Path, name: str) -> Path:
+    pkg = tmp_path / f"{name}.pkg"
+    write_package(db, pkg, gz=False)
+    return pkg
+
+
+# ── validation taxonomy ──────────────────────────────────────────────────────
+
+
+def test_valid_envelope_with_full_surface():
+    envelope = _envelope(
+        items=[
+            {
+                "id": "vendor-x",
+                "type": "Organization",
+                "confidence": 0.92,
+                "scope": "finance",
+                "authority": "manual",
+                "valid_time": {"start": "2026-01-01"},
+                "classification": "internal",
+                "evidence": [
+                    {"memory_id": "mem-1"},  # local, resolved
+                    {"uri": "https://example.com/doc"},  # external, never fetched
+                    "urn:example:plain-string",  # external string form
+                ],
+            }
+        ],
+        producers={"org.example.enricher": {"version": "1.2"}},
+    )
+    validate_annotations(envelope, known_ids={"mem-1"})  # no raise
+
+
+def test_malformed_envelope_structural_errors():
+    cases = [
+        ([], "must be a JSON object"),
+        ({"schema_version": 2}, "must be 1"),
+        ({"schema_version": 1, "namespaces": "nope"}, "must be an object"),
+        ({"schema_version": 1, "namespaces": {"singlelabel": []}}, "reverse-DNS"),
+        ({"schema_version": 1, "namespaces": {"org.bad-Label": []}}, "lowercase"),
+        ({"schema_version": 1, "namespaces": {"org.x": {"not": "list"}}}, "list of item"),
+        ({"schema_version": 1, "namespaces": {"org.x": ["not-an-object"]}}, "objects"),
+        (
+            {
+                "schema_version": 1,
+                "namespaces": {"org.x": [{"type": "Organization"}]},
+            },
+            "non-empty string 'id'",
+        ),
+        (
+            {"schema_version": 1, "namespaces": {"org.x": [{"id": "a", "confidence": 1.5}]}},
+            "in \[0, 1\]",
+        ),
+        (
+            {"schema_version": 1, "namespaces": {"org.x": [{"id": "a", "confidence": "high"}]}},
+            "must be a number",
+        ),
+        (
+            {"schema_version": 1, "namespaces": {"org.x": [{"id": "a", "evidence": {"x": 1}}]}},
+            "must be a list",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "namespaces": {"org.x": [{"id": "a", "evidence": [{"weird": 1}]}]},
+            },
+            "evidence entries must carry",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "namespaces": {"org.x": [{"id": "a"}, {"id": "a"}]},
+            },
+            "duplicate item id",
+        ),
+        ({"schema_version": 1, "producers": "nope"}, "must be an object"),
+    ]
+    for payload, needle in cases:
+        with pytest.raises(AnnotationValidationError, match=needle):
+            validate_annotations(payload)
+
+
+def test_unknown_namespaces_and_keys_are_preserved():
+    """Unknown content never fails validation and round-trips losslessly."""
+    envelope = _envelope(
+        items=[{"id": "a", "future_field": {"nested": [1, 2, {"k": "v"}]}}],
+        producers={"org.unknown.tool": {"anything": True}},
+    )
+    envelope["future_top_level"] = {"preserved": ["in", "order"]}
+    validate_annotations(envelope)  # unknown never fails
+    # A future schema version IS a known field: gated, not silently read.
+    with pytest.raises(AnnotationValidationError, match="must be 1"):
+        validate_annotations({**envelope, "schema_version": 2})
+
+
+def test_local_evidence_resolution_and_dangling_errors():
+    envelope = _envelope(items=[{"id": "a", "evidence": [{"memory_id": "mem-fwd"}]}])
+    # Without a resolver: structural check only.
+    validate_annotations(envelope)
+    # Forward reference resolved when the id set includes the whole package.
+    validate_annotations(envelope, known_ids={"mem-fwd", "mem-other"})
+    # Dangling local reference: actionable error.
+    with pytest.raises(AnnotationValidationError, match="unknown memory 'mem-fwd'"):
+        validate_annotations(envelope, known_ids={"mem-other"})
+    # External URIs are never fetched or validated beyond non-emptiness.
+    external = _envelope(items=[{"id": "a", "evidence": [{"uri": "https://anywhere.example/x"}]}])
+    validate_annotations(external, known_ids=set())
+
+
+def test_envelope_limits_enforced():
+    big = _envelope(items=[{"id": f"i{n}", "blob": "x" * 100} for n in range(1001)])
+    with pytest.raises(AnnotationValidationError, match="1000 total items"):
+        validate_annotations(big)
+    wide = _envelope(items=[{"id": "a", "blob": "x" * (130 * 1024)}])
+    with pytest.raises(AnnotationValidationError, match="exceeds"):
+        validate_annotations(wide)
+    deep_value = {"v": 1}
+    for _ in range(12):
+        deep_value = {"nested": deep_value}
+    with pytest.raises(AnnotationValidationError, match="maximum JSON depth"):
+        envelope = {"schema_version": 1, "namespaces": {"org.x": [{"id": "a", "d": deep_value}]}}
+        validate_annotations(envelope)
+
+
+def test_metadata_without_annotations_has_zero_overhead_path():
+    validate_metadata(None)  # no raise
+    validate_metadata({"unrelated": True})  # one membership check
+    validate_metadata({"annotations": {"schema_version": 1}})  # valid minimal
+    with pytest.raises(AnnotationValidationError):
+        validate_metadata({"annotations": {"schema_version": 9}})
+
+
+# ── merge matrix ──────────────────────────────────────────────────────────────
+
+
+def test_merge_rules_by_namespace_and_item_id():
+    target = _envelope(
+        items=[
+            {"id": "a", "confidence": 0.9},
+            {"id": "b", "confidence": 0.8},
+        ]
+    )
+    incoming = _envelope(
+        items=[
+            {"id": "a", "confidence": 0.9},  # same id, same content -> no-op
+            {"id": "b", "confidence": 0.1},  # same id, different content -> conflict
+            {"id": "c", "confidence": 0.7},  # disjoint -> merged
+        ]
+    )
+    outcome = merge_annotations(target, incoming)
+    assert outcome.merged_items == 1
+    assert len(outcome.conflicts) == 1
+    conflict = outcome.conflicts[0]
+    assert conflict.item_id == "b"
+    assert conflict.target == {"id": "b", "confidence": 0.8}  # retained
+    assert conflict.incoming == {"id": "b", "confidence": 0.1}  # preserved
+    merged_ids = {item["id"] for item in outcome.merged["namespaces"]["org.example.entities"]}
+    assert merged_ids == {"a", "b", "c"}
+    assert outcome.merged["namespaces"]["org.example.entities"][1]["confidence"] == 0.8
+
+
+def test_merge_is_map_order_insensitive():
+    """MAP insertion order never affects identity — arrays are data, kept."""
+    first_in = {
+        "namespaces": {"org.example.entities": [{"id": "a", "note": "x"}]},
+        "schema_version": 1,
+    }
+    second_in = {
+        "schema_version": 1,
+        "namespaces": {"org.example.entities": [{"note": "x", "id": "a"}]},
+    }
+    first = merge_annotations(_envelope(items=[]), first_in).merged
+    second = merge_annotations(_envelope(items=[]), second_in).merged
+    assert first is not None and second is not None
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+
+def test_merge_idempotent_replay_is_noop():
+    target = _envelope()
+    outcome = merge_annotations(target, target)
+    assert outcome.merged is None
+    assert outcome.conflicts == []
+    assert outcome.merged_items == 0
+
+
+def test_merge_into_empty_and_from_empty():
+    envelope = _envelope()
+    assert merge_annotations({}, envelope).merged == envelope
+    assert merge_annotations(envelope, {}).merged is None
+
+
+def test_merge_preserves_producers_and_unknown_keys():
+    target = _envelope(producers={"org.a": {"version": "1"}}, future_top={"keep": 1})
+    incoming = _envelope(producers={"org.b": {"version": "2"}})
+    outcome = merge_annotations(target, incoming)
+    assert outcome.merged["producers"] == {"org.a": {"version": "1"}, "org.b": {"version": "2"}}
+    assert outcome.merged["future_top"] == {"keep": 1}
+
+
+# ── transport round-trips: lossless movement ─────────────────────────────────
+
+
+def _seed_annotated_db(tmp_path: Path, name: str) -> MemoryDB:
+    db = MemoryDB(tmp_path / f"{name}.sqlite")
+    add_memory(
+        db,
+        "vendor-x",
+        "vendor x invoices are paid net 30",
+        metadata=_meta(_envelope(items=[{"id": "vendor-x", "type": "Organization"}])),
+    )
+    return db
+
+
+def _assert_envelope_survives(db: MemoryDB, expected_items: int = 1) -> None:
+    rows = db.all_rows()
+    metadata = json.loads(rows[0]["metadata_json"])
+    envelope = metadata["annotations"]
+    assert envelope["schema_version"] == 1
+    items = envelope["namespaces"]["org.example.entities"]
+    assert len(items) == expected_items
+    assert items[0]["id"] == "vendor-x"
+    assert items[0]["type"] == "Organization"
+
+
+def test_round_trip_through_jsonl_and_gz(tmp_path: Path):
+    db = _seed_annotated_db(tmp_path, "src")
+    swap = tmp_path / "swap.jsonl"
+    snapshot_write(db, swap)
+    for path in (swap, tmp_path / "swap.jsonl.gz"):
+        if path != swap:
+            import gzip
+
+            with gzip.open(path, "wt", encoding="utf-8") as gz:
+                gz.write(swap.read_text())
+        target = MemoryDB(tmp_path / f"t-{path.name}.sqlite")
+        result = snapshot_hydrate(target, path)
+        assert result.loaded == 1
+        _assert_envelope_survives(target)
+        target.close()
+    db.close()
+
+
+def test_round_trip_through_snapshot_v2(tmp_path: Path):
+    db = _seed_annotated_db(tmp_path, "v2src")
+    snap_dir = tmp_path / "snap"
+    write_snapshot_v2(db, snap_dir)
+    target = MemoryDB(tmp_path / "v2target.sqlite")
+    result = snapshot_hydrate(target, snap_dir)
+    assert result.loaded == 1
+    _assert_envelope_survives(target)
+    db.close()
+    target.close()
+
+
+def test_round_trip_through_package_and_repeat_hydrate(tmp_path: Path):
+    db = _seed_annotated_db(tmp_path, "pkgsrc")
+    pkg = tmp_path / "pkg"
+    write_package(db, pkg, gz=True)
+
+    target = MemoryDB(tmp_path / "pkgtarget.sqlite")
+    first = hydrate_package(target, pkg)
+    assert first.loaded == 1
+    _assert_envelope_survives(target)
+    second = hydrate_package(target, pkg)
+    assert second.loaded == 0 and second.skipped_dupes == 1
+    assert second.annotations_merged == 0  # identical replay is a pure no-op
+    db.close()
+    target.close()
+
+
+def test_hydrate_merges_annotation_only_changes(tmp_path: Path):
+    """The #79 battleground: same content, new annotations -> merged, not skipped."""
+    db = _seed_annotated_db(tmp_path, "mergesrc")
+    pkg = tmp_path / "pkg1"
+    write_package(db, pkg, gz=True)
+
+    target = MemoryDB(tmp_path / "mergetarget.sqlite")
+    hydrate_package(target, pkg)
+
+    # A second package: same canonical fact, an ADDITIONAL disjoint item.
+    producer = MemoryDB(tmp_path / "producer.sqlite")
+    hydrate_package(producer, pkg)
+    # Same content hash, richer envelope.
+    row = producer.all_rows()[0]
+    enriched = _envelope(
+        items=[
+            {"id": "vendor-x", "type": "Organization"},
+            {"id": "vendor-x-alias", "type": "Alias", "value": "VX"},
+        ]
+    )
+    producer.update_metadata_json(row["id"], json.dumps(_meta(enriched), sort_keys=True))
+    pkg2 = tmp_path / "pkg2"
+    write_package(producer, pkg2, gz=True)
+
+    result = hydrate_package(target, pkg2)
+    assert result.loaded == 0  # canonical content unchanged
+    assert result.skipped_dupes == 1
+    assert result.annotations_merged == 1  # the disjoint alias item merged
+    assert result.annotation_conflicts == 0
+    _assert_envelope_survives(target, expected_items=2)
+    db.close()
+    target.close()
+    producer.close()
+
+
+def test_hydrate_conflicts_retain_both_versions(tmp_path: Path):
+    """Same id, different content: target retained, incoming preserved, reported."""
+    db = _seed_annotated_db(tmp_path, "confsrc")
+    pkg = tmp_path / "pkgA"
+    write_package(db, pkg, gz=True)
+    target = MemoryDB(tmp_path / "conftarget.sqlite")
+    hydrate_package(target, pkg)
+
+    producer = MemoryDB(tmp_path / "confproducer.sqlite")
+    hydrate_package(producer, pkg)
+    row = producer.all_rows()[0]
+    conflicting = _envelope(
+        items=[{"id": "vendor-x", "type": "Person"}],  # same id, different content
+    )
+    producer.update_metadata_json(row["id"], json.dumps(_meta(conflicting), sort_keys=True))
+    pkgB = tmp_path / "pkgB"
+    write_package(producer, pkgB, gz=True)
+
+    result = hydrate_package(target, pkgB)
+    assert result.annotation_conflicts == 1
+    assert result.annotations_merged == 0
+    metadata = json.loads(target.all_rows()[0]["metadata_json"])
+    # Target version retained — never last-write-wins.
+    items = metadata["annotations"]["namespaces"]["org.example.entities"]
+    assert items[0]["type"] == "Organization"
+    db.close()
+    target.close()
+    producer.close()
+
+
+def test_annotation_only_delta_through_real_cas(tmp_path: Path):
+    """Annotation-only changes flow as CAS upserts; fingerprints react."""
+    db = _seed_annotated_db(tmp_path, "deltasrc")
+    base_pkg = tmp_path / "base.pkg"
+    write_package(db, base_pkg, gz=True)
+
+    producer = MemoryDB(tmp_path / "deltaproducer.sqlite")
+    hydrate_package(producer, base_pkg)
+    original_fingerprint = state_fingerprint([dict(r) for r in producer.all_rows()])
+    row = producer.all_rows()[0]
+    enriched = _envelope(
+        items=[{"id": "vendor-x", "type": "Organization", "source_verified": True}]
+    )
+    producer.update_metadata_json(row["id"], json.dumps(_meta(enriched), sort_keys=True))
+    assert state_fingerprint([dict(r) for r in producer.all_rows()]) != (original_fingerprint), (
+        "annotation changes must be integrity-visible"
+    )
+
+    delta_dir = tmp_path / "delta"
+    produce_delta(producer, base_pkg, delta_dir)
+
+    receiver = MemoryDB(tmp_path / "deltareceiver.sqlite")
+    hydrate_package(receiver, base_pkg)  # receiver starts from the base state
+    result = apply_delta(receiver, delta_dir)
+    assert result.applied == 1
+    metadata = json.loads(receiver.all_rows()[0]["metadata_json"])
+    assert (
+        metadata["annotations"]["namespaces"]["org.example.entities"][0]["source_verified"] is True
+    )
+    # Idempotent replay: zero applies, no annotation churn.
+    replay = apply_delta(receiver, delta_dir)
+    assert replay.applied == 0
+    db.close()
+    producer.close()
+    receiver.close()
+
+
+def test_invalid_envelope_record_is_counted_invalid(tmp_path: Path):
+    db = _seed_annotated_db(tmp_path, "validsrc")
+    pkg = tmp_path / "validpkg"
+    write_package(db, pkg, gz=True)
+
+    # Corrupt one record's envelope in a second package: malformed known
+    # structure — the record is invalid, not the whole restore.
+    producer = MemoryDB(tmp_path / "badproducer.sqlite")
+    hydrate_package(producer, pkg)
+    row = producer.all_rows()[0]
+    producer.update_metadata_json(
+        row["id"], json.dumps(_meta({"schema_version": 9, "namespaces": {}}), sort_keys=True)
+    )
+    bad_pkg = tmp_path / "bad.pkg"
+    write_package(producer, bad_pkg, gz=True)
+
+    target = MemoryDB(tmp_path / "badtarget.sqlite")
+    result = hydrate_package(target, bad_pkg)
+    assert result.invalid == 1  # counted invalid and skipped
+    assert target.count() == 0  # never stored malformed
+    db.close()
+    target.close()
+    producer.close()
+
+
+def test_server_add_validates_envelope_with_actionable_error(tmp_path: Path):
+    from fastapi.testclient import TestClient
+
+    from hotmem.server import create_app
+
+    app = create_app(db_path=tmp_path / "server.sqlite")
+    with TestClient(app) as client:
+        bad = client.post(
+            "/v1/add",
+            json={
+                "identifier": "v",
+                "fact": "fact text",
+                "metadata": {"annotations": {"schema_version": 9}},
+            },
+        )
+        assert bad.status_code == 400
+        assert bad.json()["error"] == "invalid_annotations"
+        assert "must be 1" in bad.json()["message"]
+
+        good = client.post(
+            "/v1/add",
+            json={
+                "identifier": "v",
+                "fact": "fact text",
+                "metadata": _meta(_envelope()),
+            },
+        )
+        assert good.status_code == 200
+        row = MemoryDB(tmp_path / "server.sqlite").all_rows()[0]
+        assert json.loads(row["metadata_json"])["annotations"]["schema_version"] == 1
+
+
+# ── review regressions: durability, adjacent-invalid, merge limits ──────────
+
+
+def test_annotation_merge_is_durable_across_close_on_every_path(tmp_path: Path):
+    """Regression: the v2 and legacy swap duplicate paths must commit merges.
+
+    An all-duplicate batch (annotation-only change) never reaches an insert,
+    so nothing else commits — the merge itself must. Verified against silent
+    rollback-on-close: reopen the database before asserting.
+    """
+    db = _seed_annotated_db(tmp_path, "dur")
+
+    # Legacy JSONL path: load the original, then a metadata-only variant.
+    swap = tmp_path / "dur.jsonl"
+    snapshot_write(db, swap)
+    target = MemoryDB(tmp_path / "dur-target.sqlite")
+    assert snapshot_hydrate(target, swap).loaded == 1
+
+    producer = MemoryDB(tmp_path / "dur-producer.sqlite")
+    swap_hydrate(producer, swap)
+    row = producer.all_rows()[0]
+    enriched = _envelope(
+        items=[
+            {"id": "vendor-x", "type": "Organization"},
+            {"id": "vendor-x-alias", "type": "Alias"},
+        ]
+    )
+    producer.update_metadata_json(row["id"], json.dumps(_meta(enriched), sort_keys=True))
+    swap2 = tmp_path / "dur2.jsonl"
+    snapshot_write(producer, swap2)
+    result = snapshot_hydrate(target, swap2)
+    assert result.loaded == 0  # all-duplicate batch: no insert carries the commit
+    assert result.annotations_merged == 1
+    target.close()
+    reopened = MemoryDB(tmp_path / "dur-target.sqlite")
+    stored = json.loads(reopened.all_rows()[0]["metadata_json"])
+    items = stored["annotations"]["namespaces"]["org.example.entities"]
+    assert [i["id"] for i in items] == ["vendor-x", "vendor-x-alias"]  # durable
+    reopened.close()
+    producer.close()
+
+    # Snapshot v2 path: same shape through the directory format.
+    v2a = tmp_path / "dur-v2-a"
+    write_snapshot_v2(db, v2a)
+    target2 = MemoryDB(tmp_path / "dur-v2-target.sqlite")
+    assert snapshot_hydrate(target2, v2a).loaded == 1
+
+    producer2 = MemoryDB(tmp_path / "dur-v2-producer.sqlite")
+    hydrate_package(producer2, _write_pkg(db, tmp_path, "dur-v2-base"))
+    row2 = producer2.all_rows()[0]
+    enriched2 = _envelope(
+        items=[
+            {"id": "vendor-x", "type": "Organization"},
+            {"id": "vendor-x-2", "type": "Alias"},
+        ]
+    )
+    producer2.update_metadata_json(row2["id"], json.dumps(_meta(enriched2), sort_keys=True))
+    v2b = tmp_path / "dur-v2-b"
+    write_snapshot_v2(producer2, v2b)
+    result2 = snapshot_hydrate(target2, v2b)
+    assert result2.loaded == 0
+    assert result2.annotations_merged == 1
+    target2.close()
+    reopened2 = MemoryDB(tmp_path / "dur-v2-target.sqlite")
+    stored2 = json.loads(reopened2.all_rows()[0]["metadata_json"])
+    assert [i["id"] for i in stored2["annotations"]["namespaces"]["org.example.entities"]] == [
+        "vendor-x",
+        "vendor-x-2",
+    ]
+    reopened2.close()
+    producer2.close()
+    db.close()
+
+
+def test_consecutive_invalid_annotation_records_are_both_counted(tmp_path: Path):
+    """Regression: the validation pass must never skip the record after a
+    removed one (mutation-during-iteration)."""
+    src = MemoryDB(tmp_path / "adj.sqlite")
+    add_memory(src, "a", "adjacent record one")
+    add_memory(src, "b", "adjacent record two")
+    pkg = _write_pkg(src, tmp_path, "adj")
+
+    # Both records get dangling local evidence: the FIRST record is also
+    # missing its id, so pass-1 cannot collect it — both must be invalid.
+    lines = (pkg / "memories.jsonl").read_text().splitlines()
+    modified = []
+    for line in lines:
+        rec = json.loads(line)
+        bad = _meta(_envelope(items=[{"id": "x", "evidence": [{"memory_id": "ghost"}]}]))
+        if rec["identifier"] == "a":
+            rec.pop("id", None)  # dangling ref to an unknown, unmintable id
+            rec["metadata"] = bad
+        else:
+            rec["metadata"] = bad  # dangling ref: invalid too
+        modified.append(json.dumps(rec))
+    (pkg / "memories.jsonl").write_text("\n".join(modified) + "\n")
+    manifest = json.loads((pkg / "manifest.json").read_text())
+    import hashlib
+
+    payload = pkg / "memories.jsonl"
+    manifest["files"]["memories.jsonl"] = {
+        "size": payload.stat().st_size,
+        "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
+    }
+    (pkg / "manifest.json").write_text(json.dumps(manifest))
+
+    target = MemoryDB(tmp_path / "adj-target.sqlite")
+    result = hydrate_package(target, pkg)
+    assert result.invalid == 2  # both counted — neither silently stored
+    assert target.count() == 0
+    src.close()
+    target.close()
+
+
+def test_merge_refused_when_result_would_exceed_limits(tmp_path: Path):
+    """Regression: merged envelopes are re-checked against the documented
+    limits before persisting — unbounded growth is refused, not stored."""
+    from hotmem.annotations import MAX_ITEMS, envelope_exceeds_limits
+
+    db = _seed_annotated_db(tmp_path, "cap")
+    pkg = tmp_path / "cap.pkg"
+    write_package(db, pkg, gz=True)
+
+    producer = MemoryDB(tmp_path / "cap-producer.sqlite")
+    hydrate_package(producer, pkg)
+    row = producer.all_rows()[0]
+    # Same content, an envelope that alone is legal but overflows when
+    # merged on top of the stored one.
+    overflow = _meta(_envelope(items=[{"id": f"j{n}"} for n in range(MAX_ITEMS)]))
+    producer.update_metadata_json(row["id"], json.dumps(overflow, sort_keys=True))
+    pkg2 = tmp_path / "cap2.pkg"
+    write_package(producer, pkg2, gz=True)
+
+    target = MemoryDB(tmp_path / "cap-target.sqlite")
+    hydrate_package(target, pkg)
+    result = hydrate_package(target, pkg2)
+    assert result.annotations_merged == 0  # over-limit merge refused
+    stored = json.loads(target.all_rows()[0]["metadata_json"])
+    assert not envelope_exceeds_limits(stored["annotations"])  # target intact
+    assert len(stored["annotations"]["namespaces"]["org.example.entities"]) == 1
+    db.close()
+    producer.close()
+    target.close()
+
+
+def test_evidence_reference_resolves_against_target_without_full_scan(tmp_path: Path):
+    """Evidence pointing at an id that exists ONLY in the target store
+    resolves (one chunked existence query — no full-table id scan)."""
+    target = MemoryDB(tmp_path / "tgt.sqlite")
+    add_memory(target, "known", "a record already in the target store")
+    existing_id = target.all_rows()[0]["id"]
+
+    src = MemoryDB(tmp_path / "ref-src.sqlite")
+    add_memory(
+        src,
+        "ref",
+        "a record with target-side evidence",
+        metadata=_meta(_envelope(items=[{"id": "e1", "evidence": [{"memory_id": existing_id}]}])),
+    )
+    pkg = tmp_path / "ref.pkg"
+    write_package(src, pkg, gz=True)
+    result = hydrate_package(target, pkg)
+    assert result.invalid == 0
+    assert result.loaded == 1
+    src.close()
+    target.close()
+
+
+# ── committed mapping fixture (#79 reference) ────────────────────────────────
+
+
+def test_committed_mapping_fixture_is_valid_and_round_trips(tmp_path: Path):
+    """The synthetic reference mapping (annotations-v1.md): no vendor
+    runtime, no network — validates, hydrates, and survives movement."""
+    fixture_path = Path(__file__).resolve().parents[1] / "bench" / "annotations"
+    fixture = json.loads((fixture_path / "mapping-fixture.json").read_text())
+    # Local evidence references the two canonical records seeded below.
+    validate_annotations(fixture, known_ids={"mem-vendor-x-001", "mem-vendor-x-002"})
+
+    # Round-trip with explicit record ids matching the fixture's evidence.
+    source = MemoryDB(tmp_path / "fixture-src.sqlite")
+    source.insert(
+        id="mem-vendor-x-001",
+        identifier="vendor-x",
+        fact_text="vendor x invoices are paid net 30",
+        embedding=b"",
+        content_hash="hash-1",
+    )
+    source.insert(
+        id="mem-vendor-x-002",
+        identifier="vendor-x",
+        fact_text="vendor x ap contact is ap@vendorx.example",
+        embedding=b"",
+        content_hash="hash-2",
+    )
+    row = source.all_rows()[0]
+    source.update_metadata_json(row["id"], json.dumps(_meta(fixture), sort_keys=True))
+    pkg = tmp_path / "fixture.pkg"
+    write_package(source, pkg, gz=True)
+
+    target = MemoryDB(tmp_path / "fixture-target.sqlite")
+    result = hydrate_package(target, pkg)
+    assert result.invalid == 0
+    assert result.loaded == 2
+    stored = json.loads(
+        [r for r in target.all_rows() if r["id"] == "mem-vendor-x-001"][0]["metadata_json"]
+    )
+    assert stored["annotations"] == fixture  # lossless: byte-equal after movement
+    # The namespace surface round-trips: entity, alias, contact, relationship.
+    assert set(stored["annotations"]["namespaces"]) == {
+        "org.example.entities",
+        "org.example.relationships",
+    }
+    assert stored["annotations"]["producers"]["org.example.enricher"]["version"] == "1.2.0"
+    source.close()
+    target.close()

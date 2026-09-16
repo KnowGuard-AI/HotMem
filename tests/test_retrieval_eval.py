@@ -415,10 +415,146 @@ def test_recommendation_decision_rule(tmp_path: Path):
     broken = json.loads(json.dumps(doc))
     broken["clone_equivalence"]["clone_equivalence_rate"] = 0.9
     assert retrieval_eval.build_recommendation(broken)["action"] == "fix_clone_index_compatibility"
-    # Duplicate-slot rule only fires when the semantic gap is closed.
+    # Duplicate-slot rule only fires when the semantic gap is closed. Its
+    # gate is the near_duplicate_diversity category (#80 denominator).
     narrowed = json.loads(json.dumps(doc))
     narrowed["categories"]["semantic_paraphrase"]["recall_at_5"]["mean"] = 0.95
-    narrowed["overall"]["duplicate_slot_rate"]["mean"] = 0.25
+    narrowed["categories"]["near_duplicate_diversity"]["duplicate_slot_rate"]["mean"] = 0.25
     assert retrieval_eval.build_recommendation(narrowed)["action"] == "pursue_reranking_hook_80"
-    narrowed["overall"]["duplicate_slot_rate"]["mean"] = 0.1
+    narrowed["categories"]["near_duplicate_diversity"]["duplicate_slot_rate"]["mean"] = 0.1
     assert retrieval_eval.build_recommendation(narrowed)["action"] == "retain_current_stack"
+
+
+def test_duplicate_slot_denominators_pinned():
+    """Hand-calculated from the committed fixtures: 3.6 duplicate slots
+    over 48 query slots = 0.075 aggregate; 1.8 over 6 = 0.300 in the
+    near-duplicate diversity category. #80's entry gate reads the
+    category; the aggregate is context (guide vs issue reconciliation).
+    """
+    baseline = json.loads(BASELINE_PATH.read_text())
+    overall = baseline["overall"]["duplicate_slot_rate"]
+    diversity = baseline["categories"]["near_duplicate_diversity"]["duplicate_slot_rate"]
+    assert overall["n_applicable"] == 48
+    assert overall["mean"] == pytest.approx(0.075)
+    assert diversity["n_applicable"] == 6
+    assert diversity["mean"] == pytest.approx(0.300)
+
+
+def test_recommendation_reports_both_duplicate_denominators(tmp_path: Path):
+    doc = retrieval_eval.run_eval(
+        FIXTURE_DIR / "corpus.jsonl", FIXTURE_DIR / "queries.jsonl", work_dir=tmp_path
+    )
+    measured = doc["recommendation"]["measured"]
+    assert measured["duplicate_slot_rate"] == pytest.approx(0.075)
+    assert measured["near_duplicate_diversity_duplicate_slot_rate"] == pytest.approx(0.300)
+
+
+def test_semantic_report_key_numbers_pinned():
+    """#78 evidence: the committed semantic report's headline numbers.
+
+    Hand-checked from the potion-base-8M run: the 66.7pp semantic gap
+    closed at zero lexical cost (<=5pp allowance), clone equivalence holds
+    under the semantic space, and the #80 gate metric (diversity
+    duplicate-slot rate) is 0.400. baseline.json stays untouched — this is
+    a separate report, never an overwrite of default-behavior evidence.
+    """
+    report = json.loads((FIXTURE_DIR / "semantic-local-m2v.json").read_text())
+    assert report["runtime"]["embedding_model"] == (
+        "local-m2v/potion-base-8M/rev:v1/norm:l2/pp:m2v-static-v1"
+    )
+    assert report["runtime"]["embedding_dim"] == 256
+    assert report["categories"]["semantic_paraphrase"]["recall_at_5"]["mean"] == pytest.approx(1.0)
+    assert report["categories"]["exact_lexical"]["recall_at_5"]["mean"] == pytest.approx(1.0)
+    assert report["overall"]["recall_at_5"]["mean"] == pytest.approx(1.0)
+    assert report["clone_equivalence"]["clone_equivalence_rate"] == pytest.approx(1.0)
+    diversity = report["categories"]["near_duplicate_diversity"]["duplicate_slot_rate"]["mean"]
+    assert diversity == pytest.approx(0.400)
+    assert report["recommendation"]["action"] == "pursue_reranking_hook_80"
+
+
+def test_rerank_report_key_numbers_pinned():
+    """#80 evidence: the committed MMR report's headline numbers.
+
+    Hand-checked from the semantic+MMR run: the gate-opening diversity
+    duplicate-slot rate drops below the 20% gate (0.400 -> 0.167), clone
+    equivalence holds at 1.0 under the reranker (deterministic), and the
+    recall allowance is measured in full (overall Recall@5 1.000 -> 0.885;
+    lexical parity unchanged at 1.000). Reranking stays opt-in —
+    baseline.json default evidence is untouched.
+    """
+    report = json.loads((FIXTURE_DIR / "rerank-mmr.json").read_text())
+    assert report["runtime"]["reranker"] == "hotmem/mmr-l0.5"
+    c = report["categories"]
+    assert c["near_duplicate_diversity"]["duplicate_slot_rate"]["mean"] == pytest.approx(1 / 6)
+    assert report["overall"]["duplicate_slot_rate"]["mean"] == pytest.approx(1 / 48)
+    assert report["overall"]["recall_at_5"]["mean"] == pytest.approx(0.884920634920635)
+    assert c["exact_lexical"]["recall_at_5"]["mean"] == pytest.approx(1.0)
+    assert report["clone_equivalence"]["clone_equivalence_rate"] == pytest.approx(1.0)
+
+
+def test_run_eval_threads_injected_embedder(tmp_path: Path):
+    """run_eval(embedder=...) runs the whole pipeline in the injected space."""
+
+    class FakeEmbedder:
+        @property
+        def descriptor(self):
+            from hotmem.embed import EmbeddingDescriptor
+
+            return EmbeddingDescriptor(
+                implementation="test", model="fake", dimension=64, preprocessing="pp1"
+            )
+
+        def embed(self, text: str):
+            return retrieval_eval_if_needed().embed_text(text)
+
+    def retrieval_eval_if_needed():
+        import hotmem.embed as embed_mod
+
+        return embed_mod
+
+    doc = retrieval_eval.run_eval(
+        FIXTURE_DIR / "corpus.jsonl",
+        FIXTURE_DIR / "queries.jsonl",
+        work_dir=tmp_path,
+        embedder=FakeEmbedder(),
+    )
+    assert doc["runtime"]["embedding_model"] == "test/fake/norm:l2/pp:pp1"
+    assert doc["runtime"]["embedding_dim"] == 64
+    # The pipeline completed end to end under the injected descriptor.
+    assert doc["counts"]["ingested"] == doc["counts"]["corpus"]
+
+
+def test_reranking_gate_falls_back_to_aggregate_without_diversity_category():
+    """Corpora without the diversity category: the aggregate governs #80."""
+
+    def doc_with(dup_mean: float, diversity: dict | None):
+        categories = {
+            "semantic_paraphrase": {"recall_at_5": {"mean": 0.95}},
+            "exact_lexical": {"recall_at_5": {"mean": 1.0}},
+        }
+        if diversity is not None:
+            categories["near_duplicate_diversity"] = {"duplicate_slot_rate": diversity}
+        return {
+            "overall": {"duplicate_slot_rate": {"mean": dup_mean}},
+            "categories": categories,
+            "clone_equivalence": {"clone_equivalence_rate": 1.0},
+        }
+
+    # Absent category -> aggregate drives the branch.
+    assert (
+        retrieval_eval.build_recommendation(doc_with(0.25, None))["action"]
+        == "pursue_reranking_hook_80"
+    )
+    assert (
+        retrieval_eval.build_recommendation(doc_with(0.10, None))["action"]
+        == "retain_current_stack"
+    )
+    # Present category -> it overrides a lower aggregate (and vice versa).
+    assert (
+        retrieval_eval.build_recommendation(doc_with(0.075, {"mean": 0.30}))["action"]
+        == "pursue_reranking_hook_80"
+    )
+    assert (
+        retrieval_eval.build_recommendation(doc_with(0.25, {"mean": 0.10}))["action"]
+        == "retain_current_stack"
+    )
