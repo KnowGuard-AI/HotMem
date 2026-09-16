@@ -38,8 +38,20 @@ SECRET_VALUE = "hotmem_sk_9f3d2c8b7a6e5f4d"
 
 # ── Byte-stability goldens (AC 6, 12) ───────────────────────────────────────
 
+# Fields the golden comparison masks because they vary per prepare or per
+# release rather than describing package CONTENT. Masking hotmem_version is
+# deliberate: it is producer metadata, changes on every version bump (the
+# planned 0.2.5 release would otherwise fail CI), and is not part of the
+# content-derived identity.
+_VOLATILE_MANIFEST_FIELDS = {
+    "handoff_id": "<uuid>",
+    "created_at": "<ts>",
+    "hotmem_version": "<producer-version>",
+}
 
-def test_reprepare_matches_committed_goldens(tmp_path):
+
+def _assert_matches_goldens(tmp_path):
+    """Prepare from the fixture and assert it equals the committed goldens."""
     result = prepare_handoff(FIXTURE, tmp_path / "pkg", mode="resume", consent=CONSENT)
     pkg = Path(result.path)
 
@@ -48,10 +60,27 @@ def test_reprepare_matches_committed_goldens(tmp_path):
 
     actual = json.loads((pkg / "manifest.json").read_text())
     golden = json.loads((GOLDEN / "manifest.json").read_text())
-    actual["handoff_id"] = "<uuid>"
-    actual["created_at"] = "<ts>"
-    actual["consent"]["at"] = "<ts>"
+    for manifest in (actual, golden):
+        for field, sentinel in _VOLATILE_MANIFEST_FIELDS.items():
+            manifest[field] = sentinel
+        manifest["consent"]["at"] = "<ts>"
     assert actual == golden
+    return result
+
+
+def test_reprepare_matches_committed_goldens(tmp_path):
+    _assert_matches_goldens(tmp_path)
+
+
+def test_golden_comparison_ignores_producer_version(tmp_path, monkeypatch):
+    """M3: a version bump must not break byte-stability goldens.
+
+    hotmem_version is producer metadata, not package content: patching it to
+    an arbitrary value must leave the golden comparison passing.
+    """
+    monkeypatch.setattr("hotmem.handoff.package._hotmem_version", lambda: "9.9.9-unreleased")
+    result = _assert_matches_goldens(tmp_path)
+    assert result.manifest["hotmem_version"] == "9.9.9-unreleased"
 
 
 def test_golden_package_itself_verifies():
