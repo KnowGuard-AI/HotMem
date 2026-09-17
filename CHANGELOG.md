@@ -6,6 +6,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-09-17
+
 ### Added — session handoff showcase: Codex → HotMem → Claude (#101)
 
 - **`hotmem-handoff-v1` package contract** (docs/okf/handoff-v1.md): one
