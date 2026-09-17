@@ -48,7 +48,7 @@ from hotmem.snapshot.format import (
     compute_overall,
     sha256_file,
 )
-from hotmem.swap import _HYDRATE_BATCH, HydrateResult, record_to_memory_record
+from hotmem.swap import HYDRATE_BATCH, HydrateResult, record_to_memory_record
 from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("snapshot.reader")
@@ -245,7 +245,7 @@ def hydrate_v2(
                     continue
                 batch_seen.add(content_hash)
                 pending.append(rec)
-                if len(pending) >= _HYDRATE_BATCH:
+                if len(pending) >= HYDRATE_BATCH:
                     flush()
         flush()
 

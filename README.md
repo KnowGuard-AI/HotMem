@@ -46,6 +46,13 @@ message objects you can stitch directly into prompts. It supports Python 3.11,
 - **Preserve provenance and integrity.** Snapshot v2 carries a versioned
   manifest, deterministic identifiers, SHA-256 file checksums, and optional
   file references.
+- **Hand sessions across agents with verification.** `hotmem-handoff-v1`
+  packages (#101) move a Codex session's useful working context into a
+  Claude target: ordered stream, bounded resume brief, selected durable
+  memories, explicit consent, deny-by-default redaction, fail-closed
+  verification, and atomic idempotent hydration — one implementation
+  behind CLI, MCP, and HTTP. Clean-room walkthrough:
+  [examples/handoff_showcase](examples/handoff_showcase/).
 - **Avoid a migration cliff.** HotMem supports legacy JSONL/JSONL.GZ snapshots
   and includes a one-command importer for a Mem0 SQLite history database.
 

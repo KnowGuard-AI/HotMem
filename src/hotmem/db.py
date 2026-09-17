@@ -380,6 +380,24 @@ class MemoryDB:
             self._conn.commit()
             _trace.info("migrate", "sync checkpoints available; user_version=4")
 
+        # #101: handoff ledger — one row per first-time applied handoff
+        # package, committed in the same transaction as the package's record
+        # writes so a rolled-back hydration never marks a package applied.
+        # Repeat hydration of the same package_id short-circuits here.
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS handoff_ledger (
+               package_id TEXT PRIMARY KEY,
+               handoff_id TEXT NOT NULL,
+               mode TEXT NOT NULL,
+               applied_at TEXT NOT NULL,
+               counts_json TEXT NOT NULL
+           )"""
+        )
+        if current_version < 5:
+            self._conn.execute("PRAGMA user_version = 5")
+            self._conn.commit()
+            _trace.info("migrate", "handoff ledger available; user_version=5")
+
         try:
             self._conn.execute(
                 """CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash_unique
@@ -1152,6 +1170,39 @@ class MemoryDB:
                FROM sync_checkpoints WHERE base_logical_id = ?
                ORDER BY id DESC LIMIT 1""",
             (base_logical_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def record_handoff(
+        self,
+        *,
+        package_id: str,
+        handoff_id: str,
+        mode: str,
+        counts_json: str,
+        applied_at: str,
+        _commit: bool = True,
+    ) -> None:
+        """Persist one applied-handoff ledger row (#101).
+
+        ``_commit=False`` commits together with the handoff's record writes
+        so the ledger and canonical state advance atomically.
+        """
+        self._conn.execute(
+            """INSERT INTO handoff_ledger
+               (package_id, handoff_id, mode, applied_at, counts_json)
+               VALUES (?, ?, ?, ?, ?)""",
+            (package_id, handoff_id, mode, applied_at, counts_json),
+        )
+        if _commit:
+            self._conn.commit()
+
+    def get_handoff(self, package_id: str) -> dict[str, Any] | None:
+        """Return the ledger row for an applied handoff package, if any."""
+        row = self._conn.execute(
+            """SELECT package_id, handoff_id, mode, applied_at, counts_json
+               FROM handoff_ledger WHERE package_id = ?""",
+            (package_id,),
         ).fetchone()
         return dict(row) if row is not None else None
 

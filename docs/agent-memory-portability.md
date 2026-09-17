@@ -89,6 +89,32 @@ SQLite history database into its own portable records:
 hotmem import --from mem0 --db ./mem0/history.db --target ./hotmem.sqlite
 ```
 
+## Session handoff across agents (#101)
+
+Snapshot and restore moves the whole memory store; **session handoff** moves
+the useful working context of one agent session to another — Codex to Claude
+through HotMem — with the same verify-before-hydrate discipline:
+
+```bash
+# 1. Prepare a verified package from a documented source export (consent
+#    is explicit; secrets are redacted deny-by-default; omissions listed).
+hotmem handoff prepare --source ./codex_export --out ./handoff \
+    --mode resume --consent "I consent to capturing this session"
+
+# 2. Verify, inspect the coverage, and hydrate a clean target.
+hotmem handoff verify ./handoff
+hotmem handoff inspect ./handoff --json
+hotmem handoff hydrate ./handoff --db ./claude.sqlite
+```
+
+The target receives the selected durable memories plus one bounded resume
+brief (`handoff/<label>/resume-brief`), so the next session retrieves it
+through the normal search path with source ids visible. Session history and
+durable memories stay distinct; historical tools are inert data and are
+never re-executed. The clean-room walkthrough lives in
+`examples/handoff_showcase/`; the contract is
+[`docs/okf/handoff-v1.md`](https://github.com/KnowGuard-AI/HotMem/blob/main/docs/okf/handoff-v1.md).
+
 ## Accurate interoperability statement
 
 HotMem can already move context **between compatible HotMem runtimes**. Its

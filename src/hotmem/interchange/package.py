@@ -38,6 +38,7 @@ from typing import Any
 
 from hotmem.db import MemoryDB
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL
+from hotmem.fsutil import atomic_publish, fsync_dir
 from hotmem.interchange.canonical import canonical_line, logical_id, sha256_file
 from hotmem.trace import get_tracer
 
@@ -107,35 +108,6 @@ def _parse_json(value: str | None) -> Any:
         return json.loads(value)
     except (json.JSONDecodeError, TypeError):
         return None
-
-
-def _fsync_dir(path: Path) -> None:
-    """Flush a directory entry to disk so a rename survives a crash."""
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _atomic_publish(staging: Path, final: Path) -> None:
-    """Move a fully-written staging directory into place atomically.
-
-    If ``final`` exists it is moved aside first, then removed after the
-    swap — a failed publish never destroys the previous package.
-    """
-    backup: Path | None = None
-    if final.exists():
-        backup = final.with_name(f".{final.name}.old-{uuid.uuid4().hex[:8]}")
-        os.replace(final, backup)
-    try:
-        os.replace(staging, final)
-    except Exception:
-        if backup is not None and not final.exists():
-            os.replace(backup, final)  # restore the previous package
-        raise
-    if backup is not None:
-        shutil.rmtree(backup, ignore_errors=True)
 
 
 def _write_payload(db: MemoryDB, sink, hasher) -> tuple[int, list[str], set[tuple[str, int]]]:
@@ -248,8 +220,8 @@ def write_package(
             f.flush()
             os.fsync(f.fileno())
 
-        _fsync_dir(staging)
-        _atomic_publish(staging, final)
+        fsync_dir(staging)
+        atomic_publish(staging, final)
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise

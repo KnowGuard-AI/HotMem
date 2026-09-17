@@ -124,7 +124,7 @@ def test_migration_adds_events_table(v1_db_path: Path):
         # The event log starts empty; no backfill of historical rows.
         rows = db._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         assert rows == 0
-        # user_version bumped to 3.
-        assert db._conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        # user_version bumped through the additive migrations (now 5: #101 ledger).
+        assert db._conn.execute("PRAGMA user_version").fetchone()[0] == 5
     finally:
         db.close()

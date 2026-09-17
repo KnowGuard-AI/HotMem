@@ -151,7 +151,18 @@ def test_list_tools_wiring():
         server.request_handlers[ListToolsRequest](ListToolsRequest(method="tools/list"))
     )
     names = {t.name for t in result.root.tools}
-    assert names == {"add_memory", "search_memories", "memory_health", "snapshot", "hydrate"}
+    # Session handoff surface added additively (#101).
+    assert names == {
+        "add_memory",
+        "search_memories",
+        "memory_health",
+        "snapshot",
+        "hydrate",
+        "handoff_prepare",
+        "handoff_inspect",
+        "handoff_verify",
+        "handoff_hydrate",
+    }
 
 
 def test_call_tool_wiring(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):

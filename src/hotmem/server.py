@@ -33,6 +33,10 @@ from hotmem.annotations import AnnotationValidationError, validate_metadata
 from hotmem.db import MemoryDB
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.events import EventType, append_event, emit_import_event, query_events
+from hotmem.handoff.codex_source import SourceError
+from hotmem.handoff.hydrate import hydrate_handoff
+from hotmem.handoff.package import prepare_handoff
+from hotmem.handoff.verify import HandoffError, inspect_handoff, verify_handoff
 from hotmem.hygiene import check_hygiene
 from hotmem.interchange.hydrate import PackageError
 from hotmem.lifecycle import (
@@ -171,6 +175,30 @@ class SnapshotRequest(BaseModel):
         default=False,
         description="Gzip the package payload (with package=true)",
     )
+
+
+class HandoffPrepareRequest(BaseModel):
+    """Prepare a handoff package from a source export (#101)."""
+
+    source: str = Field(description="Source export directory (codex-export-v1).")
+    output: str = Field(description="Handoff package output directory.")
+    mode: str = Field(
+        default="resume",
+        description="resume (bounded brief + memories) or archive (full ordered stream)",
+    )
+    consent: str = Field(
+        description="Explicit consent statement. Required; capture is never implicit."
+    )
+    session: str | None = Field(
+        default=None,
+        description="Require this session id in the export envelope (fail if it differs).",
+    )
+
+
+class HandoffPackageRequest(BaseModel):
+    """Point at a handoff package directory."""
+
+    package: str = Field(description="Handoff package directory (hotmem-handoff-v1).")
 
 
 class HydrateOneRequest(BaseModel):
@@ -700,6 +728,101 @@ def create_app(
         return {
             "exported": result.exported,
             "path": result.path,
+        }
+
+    # ── Session handoff endpoints (#101) ───────────────────────────────
+
+    @app.post("/v1/handoff/prepare")
+    async def handoff_prepare(req: HandoffPrepareRequest):
+        """Prepare a hotmem-handoff-v1 package from a source export.
+
+        Consent is required and checked before any session content is
+        read; an HTTP client can never capture a session implicitly.
+        """
+        try:
+            result = prepare_handoff(
+                req.source,
+                req.output,
+                mode=req.mode,
+                consent=req.consent,
+                session_id=req.session,
+            )
+        except (SourceError, ValueError) as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+        counts = result.manifest["counts"]
+        return {
+            "handoff_id": result.handoff_id,
+            "package_id": result.package_id,
+            "mode": result.manifest["mode"],
+            "entries": counts["entries"],
+            "memories": counts["memories"],
+            "coverage": {
+                "omitted_count": result.coverage["omitted_count"],
+                "redacted_count": result.coverage["redacted_count"],
+                "recoverable_count": result.coverage["recoverable_count"],
+            },
+            "path": result.path,
+            "timings_ms": result.timings_ms,
+        }
+
+    @app.post("/v1/handoff/verify")
+    async def handoff_verify(req: HandoffPackageRequest):
+        """Fail-closed verification: 409 with structured diagnostics when invalid."""
+        try:
+            verified = verify_handoff(req.package)
+        except HandoffError as err:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "handoff_invalid",
+                    "reason": err.reason,
+                    "file": err.file,
+                    "expected": err.expected,
+                    "actual": err.actual,
+                    "message": str(err),
+                },
+            )
+        return {
+            "valid": True,
+            "package_id": verified.manifest["package_id"],
+            "mode": verified.manifest["mode"],
+            "entries": verified.entry_count,
+            "memories": verified.memory_count,
+        }
+
+    @app.get("/v1/handoff/inspect")
+    async def handoff_inspect(package: str):
+        """Read-only inspection; reports failures as data (criterion 11)."""
+        return inspect_handoff(package)
+
+    @app.post("/v1/handoff/hydrate")
+    async def handoff_hydrate(req: HandoffPackageRequest):
+        """Hydrate a verified package into this sidecar's database (atomic)."""
+        db: MemoryDB = _state["db"]
+        embedder: Embedder = _state["embedder"]
+        try:
+            result = hydrate_handoff(db, req.package, embedder=embedder)
+        except HandoffError as err:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "handoff_invalid",
+                    "reason": err.reason,
+                    "file": err.file,
+                    "expected": err.expected,
+                    "actual": err.actual,
+                    "message": str(err),
+                },
+            )
+        return {
+            "handoff_id": result.handoff_id,
+            "package_id": result.package_id,
+            "loaded": result.loaded,
+            "skipped": result.skipped_dupes,
+            "invalid": result.invalid,
+            "already_applied": result.already_applied,
+            "brief": result.brief_identifier,
+            **result.disposition(),
         }
 
     # ── Filesystem awareness endpoints (#43) ────────────────────────────

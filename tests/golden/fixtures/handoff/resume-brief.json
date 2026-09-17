@@ -1,0 +1,69 @@
+{
+  "char_count": 1325,
+  "links": {
+    "memory_ids": [
+      "9cd7d5bb180d13b830cdabef6dc91a89b40e13725e33542158f45ab09a3b7b35",
+      "3447218722200e4a8d7a9daa2c3ca7b70411b89f0bebd7299bd764bfcd59d7c2"
+    ],
+    "source_entry_ids": [
+      "cx-003",
+      "cx-004",
+      "cx-005",
+      "cx-006",
+      "cx-007",
+      "cx-008",
+      "cx-009"
+    ]
+  },
+  "omissions_note": "7 omission(s), 1 redaction(s)",
+  "sections": {
+    "commitments": [
+      {
+        "kind": "commitment",
+        "source_entry_id": "cx-004",
+        "text": "Durable memories hydrate through the existing hotmem-interchange-v1 record path with ids, annotations, provenance, and timestamps preserved."
+      }
+    ],
+    "decisions": [
+      {
+        "kind": "decision",
+        "source_entry_id": "cx-003",
+        "text": "Use one canonical handoff package (hotmem-handoff-v1) for every surface; CLI, MCP, and HTTP wrap the same core functions."
+      }
+    ],
+    "file_references": [
+      {
+        "kind": "file_reference",
+        "source_entry_id": "cx-009",
+        "text": "The normative handoff contract this session produced."
+      }
+    ],
+    "next_actions": [
+      {
+        "kind": "next_action",
+        "source_entry_id": "cx-006",
+        "text": "Wire the hotmem handoff CLI group after hydration and verification land."
+      }
+    ],
+    "tool_activity": [
+      {
+        "kind": "tool_call",
+        "source_entry_id": "cx-007",
+        "text": "shell uv run pytest tests/test_package.py -q"
+      },
+      {
+        "kind": "tool_result",
+        "source_entry_id": "cx-008",
+        "text": "41 passed in 1.72s"
+      }
+    ],
+    "unresolved_questions": [
+      {
+        "kind": "unresolved_question",
+        "source_entry_id": "cx-005",
+        "text": "Should archive packages carry tool-result payloads verbatim or bounded with omission records?"
+      }
+    ]
+  },
+  "text": "# Resume brief — hotmem-showcase-planning\n\nSession `sess-7f3a2b` (2026-09-16T09:00:00Z → 2026-09-16T11:45:00Z) captured from codex-export v1.\n\n## Goal\nPrepare the end-to-end session handoff showcase for HotMem issue #101: Codex session to HotMem handoff package to Claude resume.\n\n## Decisions\n- Use one canonical handoff package (hotmem-handoff-v1) for every surface; CLI, MCP, and HTTP wrap the same core functions. [source: cx-003]\n\n## Commitments\n- Durable memories hydrate through the existing hotmem-interchange-v1 record path with ids, annotations, provenance, and timestamps preserved. [source: cx-004]\n\n## Unresolved questions\n- Should archive packages carry tool-result payloads verbatim or bounded with omission records? [source: cx-005]\n\n## Next actions\n- Wire the hotmem handoff CLI group after hydration and verification land. [source: cx-006]\n\n## Historical tool activity — do not re-run\n- shell uv run pytest tests/test_package.py -q [source: cx-007]\n- 41 passed in 1.72s [source: cx-008]\n\n## Files\n- The normative handoff contract this session produced. [source: cx-009]\n\n## Durable memories\n- showcase/handoff-package-contract [memory: 9cd7d5bb180d]\n- showcase/handoff-mode-semantics [memory: 344721872220]\n\nCoverage: 11 entries transferred; 7 omission(s), 1 redaction(s) — see the package coverage report.\n"
+}

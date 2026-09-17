@@ -6,6 +6,84 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added — session handoff showcase: Codex → HotMem → Claude (#101)
+
+- **`hotmem-handoff-v1` package contract** (docs/okf/handoff-v1.md): one
+  canonical, self-describing package — a versioned manifest (identity, mode,
+  counts, per-file SHA-256, consent record, selection scope, compatibility,
+  limits, and the full coverage/omission/redaction report), an ordered
+  `session.jsonl` stream, `memories.jsonl` records in the existing
+  interchange format, and a bounded `resume-brief.json`. Content-derived
+  `package_id` (the interchange `logical_id` algorithm) stays stable across
+  re-prepares; `handoff_id` identifies each prepare. Payloads are
+  byte-stable, proven by committed goldens whose masked manifest itself
+  verifies.
+- **Source adapter with explicit selection + consent** (`codex-export-v1`
+  documented local export format): consent is required and checked BEFORE
+  any session content is read; session selection must match the envelope;
+  hidden prompts are policy-denied and never read; unsupported fields are
+  listed, never silently dropped; bounds truncate or cap with omission
+  records and never crash; malformed sources fail closed with line-numbered
+  diagnostics. Durable memories map to deterministic interchange records
+  with handoff provenance.
+- **Deny-by-default redaction** (layer 2 patterns: api-key/token/password
+  assignments with the name kept visible, bearer tokens, PEM private keys,
+  vendor-prefixed credentials → `[REDACTED:<kind>]` with records carrying
+  the secret KIND and location only, never the value) plus a layer-3 output
+  gate that re-scans briefs, entries, and error strings — and a
+  bracket-excluded value charset so the engine's own placeholder can never
+  re-match.
+- **Bounded deterministic resume brief**: goal, decisions, commitments,
+  unresolved questions, next actions, historical tool activity explicitly
+  marked "do not re-run", files, and the durable-memory index — every item
+  linked to its source entry id; trims least-important items first under
+  the char budget.
+- **Resume vs archive modes**: resume bounds the turn stream to head/tail
+  windows with omission records; archive keeps the full ordered stream —
+  demonstrably different packages, never inferred at the target.
+- **Fail-closed verification and read-only inspect**: manifest schema
+  ceiling, path confinement via `confined_relpath` (traversal + symlink
+  escapes), size/digest checks, record-count checks, entry schema with
+  duplicate-id and seq-order enforcement, interchange validity plus 64-hex
+  `content_hash` strictness, provenance consistency, coverage arithmetic,
+  content-derived `package_id` recomputation (tampering fails closed even
+  with refreshed checksums), and the secret gate as a package invariant.
+  `inspect` reports the full criterion-11 field list and degrades to a
+  structured failure block on invalid packages.
+- **Atomic idempotent hydration**: verify → ledger check → one transaction
+  (memories + exactly one resume-brief record, a normal interchange record
+  at `handoff/<label>/resume-brief`, so it is retrievable through the
+  UNMODIFIED search path) → additive `handoff_ledger` row
+  (user_version 5) + one `handoff.applied` event → commit. Insert-only;
+  unrelated state preserved; content-hash identity dedupes shared memories
+  across packages; repeats are true no-ops (`already_applied`, zero
+  writes, zero events, identical fingerprint); mid-transaction failures
+  roll back to state-equivalent targets.
+- **One implementation, three surfaces**: `hotmem handoff
+  prepare|verify|inspect|hydrate` (CLI), `handoff_prepare/inspect/verify/
+  hydrate` MCP tools (consent is a REQUIRED argument — no host can capture
+  a session implicitly), and `/v1/handoff/*` HTTP endpoints (409 with
+  structured `error/reason/file/expected/actual` bodies; 400 on missing
+  consent before anything is written).
+- **Showcase walkthrough** (`examples/handoff_showcase/`): clean-room
+  runbook + script — no cloud account, network, provider secret, or manual
+  database editing — proving retrieval of the brief and durable memories
+  through the normal search path with source ids visible, plus the support
+  matrix and explicit limitations (documented `codex-export-v1` adapter
+  boundary, no native transcript restoration, no cloud/encryption/
+  multi-writer, tombstone limitation until #98).
+- **Packaging fix**: restores the `[mcp]` extra accidentally dropped in
+  #38 (CI already references it) — un-skipping the MCP test suites in CI
+  and unmasking the #104 health `embedding` block, whose golden lock is
+  updated here, plus a broken-since-ship embedder-injection test now
+  exercising the real singleton wiring with proper isolation.
+- **Golden proofs**: committed handoff package goldens (byte-stable
+  payloads; masked manifest verifies), MCP tool-list/schema additive
+  updates, migration version pins to user_version 5, and the end-to-end
+  acceptance mirror including the no-second-source-of-truth proof —
+  hydrated rows re-export through the EXISTING interchange writer and the
+  clone verifies.
+
 ### Added — portable embeddings, lossless annotations, gated reranking (#78/#79/#80)
 - **Portable embedding boundary (#78).** `Embedder` protocol + immutable
   `EmbeddingDescriptor` whose canonical key persists as the record

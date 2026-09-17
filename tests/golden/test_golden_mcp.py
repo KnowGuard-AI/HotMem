@@ -31,6 +31,11 @@ LOCKED_TOOLS = {
     "memory_health",
     "snapshot",
     "hydrate",
+    # Session handoff surface (#101) — additive, same core functions as CLI.
+    "handoff_prepare",
+    "handoff_inspect",
+    "handoff_verify",
+    "handoff_hydrate",
 }
 
 LOCKED_REQUIRED = {
@@ -39,6 +44,10 @@ LOCKED_REQUIRED = {
     "memory_health": [],
     "snapshot": [],
     "hydrate": [],
+    "handoff_prepare": ["source", "output", "consent"],
+    "handoff_inspect": ["package"],
+    "handoff_verify": ["package"],
+    "handoff_hydrate": ["package"],
 }
 
 
@@ -99,6 +108,20 @@ def test_mcp_search_memory_argument_shape_locked(tmp_path):
     assert props["max_chars"] == {"type": "integer", "minimum": 1}
 
 
+def test_mcp_handoff_prepare_argument_shape_locked(tmp_path):
+    """#101: consent is a REQUIRED argument — capture is never implicit."""
+    tools = _tools(tmp_path / "m.sqlite")
+    props = tools["handoff_prepare"]["inputSchema"]["properties"]
+    assert set(props) == {"source", "output", "mode", "consent", "session"}
+    assert props["consent"] == {
+        "type": "string",
+        "description": "Explicit consent statement. Required; capture is never implicit.",
+    }
+    assert props["mode"]["enum"] == ["resume", "archive"]
+    for tool in ("handoff_inspect", "handoff_verify", "handoff_hydrate"):
+        assert set(tools[tool]["inputSchema"]["properties"]) == {"package"}
+
+
 # ── payload (CallToolResult) shape contracts ──────────────────────────────────
 
 
@@ -154,7 +177,10 @@ def test_mcp_health_result_shape_locked(tmp_path):
     st = _state(tmp_path)
     try:
         payload = _text(_handle_memory_health(st, {}))
-        assert set(payload) == {"status", "memory_count", "db_path", "uptime_s"}
+        # "embedding" is the sanitized active-descriptor block (#78/#104) —
+        # additive; locked here since the [mcp] extra was restored (#101).
+        assert set(payload) == {"status", "memory_count", "db_path", "uptime_s", "embedding"}
+        assert payload["embedding"] == {"model": "hotmem-hash-v1", "dim": 64}
     finally:
         st.db.close()
 

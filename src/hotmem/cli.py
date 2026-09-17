@@ -906,3 +906,185 @@ def delta_apply(
         embedding_missing=result.embedding_missing,
         embedding_failed=result.embedding_failed,
     )
+
+
+# ── handoff: Codex -> HotMem -> Claude session handoff (#101) ────────────────
+
+
+@main.group()
+def handoff():
+    """Verified session handoff with preserved context (#101).
+
+    Prepare a hotmem-handoff-v1 package from a documented source export,
+    verify it fail-closed, inspect its coverage, and hydrate a target —
+    atomic and idempotent, through the same core functions the MCP and
+    HTTP surfaces use.
+    """
+
+
+@handoff.command("prepare")
+@click.option(
+    "--source",
+    required=True,
+    type=click.Path(exists=True),
+    help="Source export directory (e.g. codex-export-v1).",
+)
+@click.option(
+    "--out",
+    "out_dir",
+    required=True,
+    type=click.Path(),
+    help="Handoff package output directory.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["resume", "archive"]),
+    default="resume",
+    help="resume: bounded brief + memories; archive: full ordered stream.",
+)
+@click.option(
+    "--consent",
+    required=True,
+    help="Explicit consent statement. Required; capture never happens implicitly.",
+)
+@click.option(
+    "--session",
+    "session_id",
+    default=None,
+    help="Require this session id in the export envelope (fail if it differs).",
+)
+def handoff_prepare(source: str, out_dir: str, mode: str, consent: str, session_id: str | None):
+    """Prepare a verified handoff package from a source export."""
+    from hotmem.handoff.codex_source import SourceError
+    from hotmem.handoff.package import prepare_handoff as do_prepare
+
+    try:
+        result = do_prepare(source, out_dir, mode=mode, consent=consent, session_id=session_id)
+    except (SourceError, ValueError) as err:
+        raise click.ClickException(str(err)) from err
+
+    ui = get_renderer()
+    ui.summary(
+        "handoff-prepare",
+        handoff_id=result.handoff_id,
+        package_id=result.package_id[:12],
+        mode=mode,
+        entries=result.manifest["counts"]["entries"],
+        memories=result.manifest["counts"]["memories"],
+        omissions=result.coverage["omitted_count"],
+        redactions=result.coverage["redacted_count"],
+        path=result.path,
+        total_ms=result.timings_ms["total_ms"],
+    )
+
+
+@handoff.command("verify")
+@click.argument("package", type=click.Path(exists=True))
+def handoff_verify(package: str):
+    """Fail-closed verification: exit non-zero on any integrity problem."""
+    from hotmem.handoff.verify import HandoffError, verify_handoff
+
+    try:
+        verified = verify_handoff(package)
+    except HandoffError as err:
+        raise click.ClickException(
+            f"verification failed ({err.reason})"
+            + (f" [{err.file}]" if err.file else "")
+            + (f": expected {err.expected}, got {err.actual}" if err.expected else "")
+        ) from err
+
+    ui = get_renderer()
+    ui.summary(
+        "handoff-verify",
+        package_id=verified.manifest["package_id"][:12],
+        mode=verified.manifest["mode"],
+        entries=verified.entry_count,
+        memories=verified.memory_count,
+        valid=True,
+    )
+
+
+@handoff.command("inspect")
+@click.argument("package", type=click.Path(exists=True))
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit the full report as JSON.",
+)
+def handoff_inspect(package: str, as_json: bool):
+    """Read-only inspection: identity, coverage, omissions, failure reason."""
+    from hotmem.handoff.verify import inspect_handoff
+
+    report = inspect_handoff(package)
+    if as_json:
+        click.echo(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return
+
+    if not report["valid"]:
+        failure = report["failure"]
+        ui = get_renderer()
+        ui.summary(
+            "handoff-inspect",
+            valid=False,
+            reason=failure["reason"],
+            file=failure["file"] or "-",
+        )
+        raise click.ClickException(f"package is not valid: {failure['reason']}")
+    coverage = report["coverage"]
+    counts = report["counts"]
+    ui = get_renderer()
+    ui.summary(
+        "handoff-inspect",
+        handoff_id=report["handoff_id"],
+        package_id=report["package_id"][:12],
+        mode=report["mode"],
+        entries=counts["entries"],
+        memories=counts["memories"],
+        omissions=coverage["omitted_count"],
+        redactions=coverage["redacted_count"],
+        recoverable=coverage["recoverable_count"],
+        source_adapter=report["source"]["adapter"],
+        valid=True,
+    )
+
+
+@handoff.command("hydrate")
+@click.argument("package", type=click.Path(exists=True))
+@click.option("--db", "db_path", required=True, type=click.Path(), help="Target database path.")
+@_embedder_options
+def handoff_hydrate(
+    package: str,
+    db_path: str,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+):
+    """Hydrate a verified package into a target database (atomic, idempotent)."""
+    from hotmem.db import MemoryDB
+    from hotmem.handoff.hydrate import hydrate_handoff as do_hydrate
+    from hotmem.handoff.verify import HandoffError
+
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    db = MemoryDB(db_path)
+    try:
+        result = do_hydrate(db, package, embedder=embedder)
+    except HandoffError as err:
+        db.close()
+        raise click.ClickException(
+            f"hydration not applied — verification failed ({err.reason}): {err}"
+        ) from err
+    db.close()
+
+    ui = get_renderer()
+    ui.summary(
+        "handoff-hydrate",
+        handoff_id=result.handoff_id,
+        package_id=result.package_id[:12],
+        loaded=result.loaded,
+        skipped=result.skipped_dupes,
+        invalid=result.invalid,
+        already_applied=result.already_applied,
+        brief=result.brief_identifier,
+        **result.disposition(),
+    )

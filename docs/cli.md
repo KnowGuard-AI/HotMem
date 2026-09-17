@@ -112,3 +112,53 @@ Living-wiki conventions that import cleanly:
 Safety envelope: per-file size cap (16 MiB), safe YAML only, symlink
 escapes rejected, zero network access. Pages with malformed frontmatter
 warn and are skipped — they never crash the import.
+
+### 4.7 `handoff`
+
+Verified session handoff: Codex → HotMem → Claude (#101). One canonical
+`hotmem-handoff-v1` package; verify-before-hydrate; atomic, idempotent
+hydration; explicit consent required.
+
+#### `handoff prepare`
+
+| Flag | Default | Description |
+|---|---|---|
+| `--source` | required | Source export directory (`codex-export-v1`) |
+| `--out` | required | Handoff package output directory |
+| `--mode` | `resume` | `resume` (bounded brief) or `archive` (full ordered stream) |
+| `--consent` | required | Explicit consent statement; capture is never implicit |
+| `--session` | — | Require this session id in the export envelope |
+
+#### `handoff verify`
+
+Fail-closed verification: exits non-zero with the structured reason on any
+integrity problem. Read-only.
+
+#### `handoff inspect`
+
+Read-only report: identity, mode, counts, coverage, omissions, and
+redactions — or the failure reason for invalid packages. `--json` emits
+the full report and exits 0 with `valid: false` so scripts can parse
+failures; the human mode fails loudly.
+
+#### `handoff hydrate`
+
+| Flag | Default | Description |
+|---|---|---|
+| `--db` | required | Target database path |
+| `--embedder` | `hash` | Runtime embedder (see §4.1) |
+| `--embedder-model-path` | — | Local model artifact for `--embedder local-semantic` (or `HOTMEM_EMBEDDER_MODEL_PATH`) |
+
+Atomic and idempotent: the selected durable memories plus exactly one
+resume-brief record hydrate in one transaction; a repeat run of the same
+package is a no-op reporting `already_applied`. The brief is a normal
+memory record (`handoff/<label>/resume-brief`), retrievable through the
+unmodified search path.
+
+```bash
+hotmem handoff prepare --source ./codex_export --out ./handoff \
+    --mode resume --consent "I consent to capturing this session"
+hotmem handoff verify ./handoff
+hotmem handoff inspect ./handoff --json
+hotmem handoff hydrate ./handoff --db ./claude.sqlite
+```

@@ -1,0 +1,132 @@
+{
+  "compatibility": {
+    "interchange_schema": 1,
+    "min_hotmem": "0.2.4"
+  },
+  "consent": {
+    "at": "<ts>",
+    "given": true,
+    "statement": "I consent to capturing this session for the handoff showcase."
+  },
+  "counts": {
+    "brief_chars": 1325,
+    "entries": 11,
+    "entries_by_kind": {
+      "commitment": 1,
+      "decision": 1,
+      "file_reference": 1,
+      "next_action": 1,
+      "tool_call": 1,
+      "tool_result": 1,
+      "turn": 4,
+      "unresolved_question": 1
+    },
+    "memories": 2
+  },
+  "coverage": {
+    "omitted": [
+      {
+        "field": "model",
+        "reason": "unsupported source field",
+        "recoverable": true,
+        "where": "cx-002"
+      },
+      {
+        "field": "reasoning_tokens",
+        "reason": "unsupported source field",
+        "recoverable": true,
+        "where": "cx-002"
+      },
+      {
+        "field": "owner",
+        "reason": "unsupported source field",
+        "recoverable": true,
+        "where": "cx-004"
+      },
+      {
+        "field": "asked_by",
+        "reason": "unsupported source field",
+        "recoverable": true,
+        "where": "cx-005"
+      },
+      {
+        "field": "priority",
+        "reason": "unsupported source field",
+        "recoverable": true,
+        "where": "cx-006"
+      },
+      {
+        "field": null,
+        "reason": "policy: hidden prompts are never captured",
+        "recoverable": false,
+        "where": "cx-014"
+      },
+      {
+        "field": null,
+        "reason": "resume mode bounds the session stream; not transferred",
+        "recoverable": true,
+        "where": "cx-010"
+      }
+    ],
+    "omitted_count": 7,
+    "recoverable_count": 7,
+    "redacted": [
+      {
+        "field": "text",
+        "kind": "api_key",
+        "reason": "credential pattern: key/password assignment",
+        "recoverable": true,
+        "where": "cx-010"
+      }
+    ],
+    "redacted_count": 1,
+    "transferred": 11
+  },
+  "created_at": "<ts>",
+  "files": {
+    "memories.jsonl": {
+      "sha256": "a96f14546d68ee49bcaaa9f363353d9f20802713113554a4c04b83ffb2b26e94",
+      "size": 1685
+    },
+    "resume-brief.json": {
+      "sha256": "0f4651ac0b8328196040baf6916e90a948aa2dda6628ca91722dbfc2052fca53",
+      "size": 3261
+    },
+    "session.jsonl": {
+      "sha256": "d247be783c0c85699badbd55cc9c93dbe547edbb0fa490cb8edfc51248b12949",
+      "size": 4722
+    }
+  },
+  "format": "hotmem-handoff-v1",
+  "handoff_id": "<uuid>",
+  "hotmem_version": "0.2.4",
+  "limits": {
+    "brief_char_budget": 6000,
+    "max_consent_chars": 512,
+    "max_entry_bytes": 65536,
+    "max_memories": 200,
+    "max_session_entries": 5000,
+    "max_tool_result_bytes": 16384
+  },
+  "mode": "resume",
+  "package_id": "be0da68685c854294f808b8e7b4da018fa70a4da5c21b54717049ebc68648939",
+  "schema_version": 1,
+  "source": {
+    "adapter": "codex-export",
+    "adapter_version": "1",
+    "codex_version": "1.4.2",
+    "label": "hotmem-showcase-planning",
+    "selection_scope": {
+      "requested_session": null,
+      "scope": "session:sess-7f3a2b"
+    },
+    "session_id": "sess-7f3a2b",
+    "time_range": {
+      "ended_at": "2026-09-16T11:45:00Z",
+      "started_at": "2026-09-16T09:00:00Z"
+    }
+  },
+  "target": {
+    "adapter": "hotmem"
+  }
+}

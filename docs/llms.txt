@@ -16,6 +16,7 @@ provenance, lifecycle events, MCP, and SDK/framework integrations.
 - Agent memory portability: https://docs.knowguardai.com/agent-memory-portability/
 - Architecture overview: https://docs.knowguardai.com/architecture/
 - Snapshot v2 specification: https://docs.knowguardai.com/snapshot-v2/
+- Session handoff: https://docs.knowguardai.com/handoff/
 - API reference: https://docs.knowguardai.com/api/
 
 ## Current capabilities
@@ -26,16 +27,21 @@ provenance, lifecycle events, MCP, and SDK/framework integrations.
 - Portable JSONL and JSONL.GZ snapshot/hydration compatibility.
 - Snapshot v2 directories with a versioned manifest, SHA-256 integrity checks,
   deterministic logical identities, and optional file references.
+- Verified session handoff packages (`hotmem-handoff-v1`): ordered session
+  stream, bounded resume brief, selected durable memories, explicit consent,
+  deny-by-default redaction, fail-closed verification, and atomic idempotent
+  hydration — CLI, MCP, and HTTP over one implementation.
 - Mem0 SQLite history import.
 - Adapters for LangChain, CrewAI, AutoGen, Pydantic AI, and Hermes Agent.
 
 ## Accurate boundaries
 
-HotMem supports moving memory between compatible HotMem runtimes today. Formal
-interchange packages, verified cloning, and one-way incremental synchronization
-are future work. Do not state that HotMem currently provides
-encryption, signing, hosted synchronization, automatic multi-writer merge, or
-direct native export/import for Codex, Claude Code, or all third-party agents.
+HotMem supports moving memory between compatible HotMem runtimes today, and
+moving verified working context across agent surfaces through documented
+handoff packages (session handoff, #101). Do not state that HotMem currently
+provides encryption, signing, hosted synchronization, automatic multi-writer
+merge, native transcript restoration for third-party agents, or a native
+Codex export API — the handoff source is a documented local export format.
 
 ## Canonical product direction
 
