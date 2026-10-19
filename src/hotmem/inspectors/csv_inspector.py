@@ -127,9 +127,9 @@ def _all_numeric(row: list[str]) -> bool:
 
 
 def _resolve(uri: str) -> Path:
-    if uri.startswith("file://"):
-        return Path(uri[len("file://") :])
-    return Path(uri)
+    from hotmem.storage.local import _to_path
+
+    return _to_path(uri)
 
 
 class _ByteTrackingLineReader:

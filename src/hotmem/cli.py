@@ -705,7 +705,10 @@ def import_cmd(
         try:
             # Reading phase: indeterminate progress (we don't know the row
             # count up front); the byte-total bar applies to the hydrate phase.
-            with open(swap_path, "w") as f, ui.progress(total=None, desc="Reading source"):
+            with (
+                open(swap_path, "w", encoding="utf-8", newline="\n") as f,
+                ui.progress(total=None, desc="Reading source"),
+            ):
                 for record in reader(_Path(source_db)):
                     serialize(f, record)
         except (ValueError, FileNotFoundError) as err:

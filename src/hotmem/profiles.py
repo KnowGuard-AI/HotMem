@@ -121,6 +121,8 @@ def _resolve_source_uri(source_uri: str, base_dir: str | None) -> str:
     raw = source_uri
     if raw.startswith("file://"):
         raw = raw[len("file://") :]
+        if len(raw) >= 3 and raw[0] == "/" and raw[1].isalpha() and raw[2] == ":":
+            raw = raw[1:]
     if "://" in raw:
         return source_uri  # non-file scheme, leave as-is
     path = Path(raw)

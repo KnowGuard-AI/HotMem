@@ -35,7 +35,10 @@ _FORMAT_MAP: dict[str, str] = {
 def _to_path(uri: str) -> Path:
     """Resolve a file:// URI or bare path to a filesystem Path."""
     if uri.startswith("file://"):
-        return Path(uri[len("file://") :])
+        raw = uri[len("file://") :]
+        if len(raw) >= 3 and raw[0] == "/" and raw[1].isalpha() and raw[2] == ":":
+            raw = raw[1:]
+        return Path(raw)
     return Path(uri)
 
 

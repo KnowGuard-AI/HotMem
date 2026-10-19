@@ -527,7 +527,7 @@ def _parse_attachments(
 
         # Store a relative URI for portability (re-resolvable against base_dir).
         try:
-            rel_uri = str(resolved.relative_to(base_resolved))
+            rel_uri = resolved.relative_to(base_resolved).as_posix()
         except ValueError:
             rel_uri = str(resolved)
 
