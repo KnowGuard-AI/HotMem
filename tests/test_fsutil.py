@@ -77,3 +77,30 @@ def test_atomic_publish_restores_previous_final_on_failure(tmp_path: Path, monke
 def test_fsync_dir_smoke(tmp_path: Path):
     fsync_dir(tmp_path)
     assert tmp_path.is_dir()
+
+
+def test_fsync_dir_windows_noop(tmp_path: Path, monkeypatch):
+    """On Windows (os.name == 'nt'), os.open on a directory raises PermissionError;
+    fsync_dir must no-op cleanly so atomic package/delta/handoff publish succeeds (#118)."""
+    monkeypatch.setattr("hotmem.fsutil.os.name", "nt")
+
+    def forbid_dir_open(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("hotmem.fsutil.os.open", forbid_dir_open)
+    fsync_dir(tmp_path)
+
+
+def test_confined_relpath_rejects_windows_drive_and_backslash_escapes(tmp_path: Path):
+    """Manifest path confinement rejects Windows drive-relative, drive-absolute,
+    and leading-backslash paths on all platforms (#118)."""
+    from hotmem.interchange.paths import confined_relpath
+
+    for unsafe in (
+        r"\outside.txt",
+        r"\\server\share\secret.txt",
+        "C:outside.txt",
+        r"C:\outside.txt",
+        "C:/outside.txt",
+    ):
+        assert not confined_relpath(tmp_path, unsafe), f"expected {unsafe!r} to be rejected"

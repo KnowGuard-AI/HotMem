@@ -537,3 +537,39 @@ def test_hydrate_reports_invalid_records(tmp_db: MemoryDB, tmp_path: Path):
     assert result.skipped_dupes == 0
     assert result.invalid == 2
     assert tmp_db.count() == 2
+
+
+def test_swap_unicode_and_lf_roundtrip(
+    tmp_db: MemoryDB, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Legacy .jsonl and .jsonl.gz snapshot/hydrate preserve non-ASCII UTF-8
+    and write LF line endings even when default text streams use CRLF (#118)."""
+    import builtins
+
+    real_open = builtins.open
+
+    def windows_default_open(file, mode="r", *args, **kwargs):
+        if "b" not in mode and ("w" in mode or "a" in mode) and kwargs.get("newline") is None:
+            kwargs["newline"] = "\r\n"
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", windows_default_open)
+
+    fact = "Café résumé — 東京 — 🧠"
+    add_memory(tmp_db, "unicode-swap", fact)
+
+    plain = tmp_path / "swap.jsonl"
+    gz = tmp_path / "swap.jsonl.gz"
+    snapshot(tmp_db, plain)
+    snapshot(tmp_db, gz)
+
+    assert b"\r\n" not in plain.read_bytes()
+
+    db_plain = MemoryDB(tmp_path / "plain.sqlite")
+    db_gz = MemoryDB(tmp_path / "gz.sqlite")
+    assert hydrate(db_plain, plain).loaded == 1
+    assert hydrate(db_gz, gz).loaded == 1
+    assert db_plain.all_rows()[0]["fact_text"] == fact
+    assert db_gz.all_rows()[0]["fact_text"] == fact
+    db_plain.close()
+    db_gz.close()

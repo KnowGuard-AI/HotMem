@@ -156,7 +156,10 @@ Hydration semantics (shared with the interchange contract,
 ## Determinism
 
 Identical DBs produce byte-identical `memories.jsonl` and `attachments/`
-contents, and an identical `snapshot_id`. `manifest.json` bytes may differ by
+contents, and an identical `snapshot_id`. `memories.jsonl` is always written as
+raw UTF-8 with LF (`\n`) record terminators on every platform (including
+Windows) so on-disk file sizes and SHA-256 digests match `manifest.json`
+regardless of host OS newline conventions. `manifest.json` bytes may differ by
 the informational `created_at`/`hotmem_version` fields, and `metadata.json`
 by `created_at`/`host` — neither is checksummed, so verification and logical
 identity are unaffected.

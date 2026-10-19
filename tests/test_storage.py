@@ -106,3 +106,28 @@ def test_adapter_is_runtime_checkable():
     from hotmem.storage.base import StorageAdapter
 
     assert isinstance(LocalFilesystemAdapter(), StorageAdapter)
+
+
+def test_to_path_normalizes_windows_and_posix_file_uris():
+    """RFC 8089 Windows file:///C:/... URIs strip the leading slash before the
+    drive letter while POSIX file:///tmp/... URIs keep their root slash (#118)."""
+    from pathlib import Path
+
+    from hotmem.storage.local import _to_path
+
+    assert _to_path("file:///C:/Users/test/data.txt") == Path("C:/Users/test/data.txt")
+    assert _to_path("file://C:/Users/test/data.txt") == Path("C:/Users/test/data.txt")
+    assert _to_path("file:///tmp/data.txt") == Path("/tmp/data.txt")
+
+
+def test_storage_handles_unicode_and_spaces_in_path(adapter, tmp_path):
+    """Portable file-backed reads and checksums work on paths with spaces and Unicode (#118)."""
+    subdir = tmp_path / "dir with spaces" / "données_東京"
+    subdir.mkdir(parents=True)
+    target = subdir / "notes file.txt"
+    payload = "Café résumé — 東京\nline two\n".encode()
+    target.write_bytes(payload)
+
+    assert adapter.exists(str(target))
+    assert adapter.read_range(str(target), 0, 10) == payload[:10]
+    assert adapter.checksum(str(target)) == hashlib.sha256(payload).hexdigest()
