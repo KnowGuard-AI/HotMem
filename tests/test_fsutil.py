@@ -102,5 +102,7 @@ def test_confined_relpath_rejects_windows_drive_and_backslash_escapes(tmp_path: 
         "C:outside.txt",
         r"C:\outside.txt",
         "C:/outside.txt",
+        r"sub\..\..\outside.txt",
+        "attachments\\..\\secret",
     ):
         assert not confined_relpath(tmp_path, unsafe), f"expected {unsafe!r} to be rejected"
