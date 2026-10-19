@@ -158,7 +158,7 @@ def write_snapshot_v2(
         payload_hasher = hashlib.sha256()
 
         memories_path = out_dir / MEMORIES_NAME
-        with open(memories_path, "w", encoding="utf-8") as f:
+        with open(memories_path, "wb") as f:
             for row in db.iter_rows(include_embedding=True):
                 rec = _row_to_record(row)
                 memory_count += 1
@@ -195,7 +195,7 @@ def write_snapshot_v2(
                 encoded = line.encode("utf-8")
                 payload_hasher.update(encoded)
                 payload_bytes += len(encoded)
-                f.write(line)
+                f.write(encoded)
 
         # Write metadata.json (informational only — NOT included in checksums
         # so wall-clock timestamps/host don't break manifest determinism).
@@ -207,7 +207,11 @@ def write_snapshot_v2(
             counts={"inline": inline_count, "file": file_backed_count, "total": memory_count},
         )
         metadata_path = out_dir / METADATA_NAME
-        metadata_path.write_text(json.dumps(meta.to_dict(), sort_keys=True, indent=2) + "\n")
+        metadata_path.write_text(
+            json.dumps(meta.to_dict(), sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
 
         # Per-file checksums for manifest (metadata.json excluded for
         # determinism — it carries created_at/host which vary per run).
@@ -252,7 +256,11 @@ def write_snapshot_v2(
 
         # Write manifest.json with stable key ordering.
         manifest_path = out_dir / MANIFEST_NAME
-        manifest_path.write_text(json.dumps(manifest.to_dict(), sort_keys=True, indent=2) + "\n")
+        manifest_path.write_text(
+            json.dumps(manifest.to_dict(), sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
 
     _trace.info(
         "snapshot_v2",
