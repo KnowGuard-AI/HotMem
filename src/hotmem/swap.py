@@ -102,10 +102,10 @@ def _swap_format(path: Path) -> str:
 def _open_swap_read(path: Path) -> Iterator[TextIO]:
     swap_format = _swap_format(path)
     if swap_format == "jsonl.gz":
-        with gzip.open(path, "rt") as f:
+        with gzip.open(path, "rt", encoding="utf-8") as f:
             yield f
     else:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             yield f
 
 
@@ -113,10 +113,10 @@ def _open_swap_read(path: Path) -> Iterator[TextIO]:
 def _open_swap_write(path: Path) -> Iterator[TextIO]:
     swap_format = _swap_format(path)
     if swap_format == "jsonl.gz":
-        with gzip.open(path, "wt") as f:
+        with gzip.open(path, "wt", encoding="utf-8", newline="\n") as f:
             yield f
     else:
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             yield f
 
 

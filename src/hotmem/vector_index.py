@@ -151,13 +151,17 @@ class _MarkerMixin:
 
     def _read_marker(self) -> dict[str, Any] | None:
         try:
-            return json.loads(self.marker_path.read_text())
+            return json.loads(self.marker_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
 
     def _write_marker(self, marker: dict[str, Any]) -> None:
         self.marker_path.parent.mkdir(parents=True, exist_ok=True)
-        self.marker_path.write_text(json.dumps(marker, indent=2, sort_keys=True) + "\n")
+        self.marker_path.write_text(
+            json.dumps(marker, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
 
     def _delete_marker(self) -> None:
         with _suppress_oserror():
