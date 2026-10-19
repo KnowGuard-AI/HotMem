@@ -204,7 +204,7 @@ def produce_delta(
                 "hotmem_version": _hotmem_version(),
             }
             manifest_path = staging / MANIFEST_NAME
-            with open(manifest_path, "w", encoding="utf-8") as f:
+            with open(manifest_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
@@ -388,8 +388,8 @@ def verify_delta(delta_dir: str | Path) -> VerifiedDelta:
             spool = Path(spool_name)
             try:
                 with (
-                    open(ops_path, "rb") as raw,
                     os.fdopen(fd, "wb") as out,
+                    open(ops_path, "rb") as raw,
                     gzip.GzipFile(fileobj=raw, mode="rb") as gz,
                 ):
                     while chunk := gz.read(64 * 1024):

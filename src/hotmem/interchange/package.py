@@ -215,7 +215,7 @@ def write_package(
             "hotmem_version": _hotmem_version(),
         }
         manifest_path = staging / MANIFEST_NAME
-        with open(manifest_path, "w", encoding="utf-8") as f:
+        with open(manifest_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
             f.flush()
             os.fsync(f.fileno())
