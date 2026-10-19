@@ -47,6 +47,11 @@ hotmem snapshot --file swap.jsonl --db ./hotmem/hotmem.sqlite
 
 # Hydrate on another machine
 hotmem hydrate --file swap.jsonl --db ./my.sqlite
+
+# Or export/restore a verified Snapshot v2 directory (macOS / Linux / Windows PowerShell)
+hotmem snapshot --file ./snapshot-v2 --db ./hotmem/hotmem.sqlite
+hotmem verify ./snapshot-v2
+hotmem hydrate --file ./snapshot-v2 --db ./my.sqlite
 ```
 
 JSONL remains a stable compatibility format. Snapshot v2 directories are
