@@ -542,3 +542,147 @@ def test_verify_manifest_rejects_path_escape(tmp_path: Path):
 
     with pytest.raises(SnapshotChecksumError, match="path_escape"):
         verify_manifest(d)
+
+
+# ── Windows byte-integrity & newline regressions (#118 Gate 1) ───────────────
+
+
+def test_windows_crlf_stream_regression_and_idempotent_restore(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Gate 1 (#118): writer must emit exact LF-hashed bytes even when default
+    text streams translate LF -> CRLF as on Windows; clean restore reuses both
+    stored embeddings and a second hydrate is idempotent."""
+    import builtins
+
+    real_open = builtins.open
+
+    def windows_default_open(file, mode="r", *args, **kwargs):
+        # Emulate Windows TextIOWrapper default: text writes without an explicit
+        # newline policy translate '\n' into '\r\n'.
+        if "b" not in mode and ("w" in mode or "a" in mode) and kwargs.get("newline") is None:
+            kwargs["newline"] = "\r\n"
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", windows_default_open)
+
+    from hotmem.swap import add_memory
+
+    src_db = MemoryDB(tmp_path / "src.sqlite")
+    add_memory(src_db, "windows-check", "Synthetic training note one.")
+    add_memory(src_db, "windows-check", "Synthetic training note two.")
+
+    snap_dir = tmp_path / "windows-snapshot-check"
+    res = write_snapshot_v2(src_db, snap_dir)
+    src_db.close()
+    assert res.exported == 2
+
+    raw_memories = (snap_dir / MEMORIES_NAME).read_bytes()
+    assert b"\r\n" not in raw_memories
+    assert b"\r\n" not in (snap_dir / MANIFEST_NAME).read_bytes()
+    assert b"\r\n" not in (snap_dir / METADATA_NAME).read_bytes()
+
+    manifest = verify_manifest(snap_dir)
+    entry = manifest.files[MEMORIES_NAME]
+    assert entry.size == len(raw_memories)
+    assert entry.sha256 == hashlib.sha256(raw_memories).hexdigest()
+
+    # Clean-store restore: 2 loaded, 2 embeddings reused, 0 rebuilt.
+    clean_db = MemoryDB(tmp_path / "clean.sqlite")
+    first = hydrate(clean_db, snap_dir)
+    assert first.loaded == 2
+    assert first.skipped_dupes == 0
+    assert first.invalid == 0
+    assert first.embedding_reused == 2
+    assert first.embedding_rebuilt == 0
+    assert first.embedding_missing == 0
+    assert first.embedding_failed == 0
+
+    # Second hydrate into the same store is idempotent.
+    second = hydrate(clean_db, snap_dir)
+    assert second.loaded == 0
+    assert second.skipped_dupes == 2
+    assert second.invalid == 0
+    assert second.embedding_reused == 0
+    assert second.embedding_rebuilt == 0
+    clean_db.close()
+
+
+def test_roundtrip_preserves_unicode_and_embedded_newlines(tmp_path: Path):
+    """Gate 1 (#118): non-ASCII content and embedded LF/CRLF inside record fields
+    survive Snapshot v2 round-trip without altering logical record content."""
+    from hotmem.swap import add_memory
+
+    src_db = MemoryDB(tmp_path / "src.sqlite")
+    fact_one = "Café résumé — 東京 — line1\nline2\r\nline3"
+    fact_two = " Cyrillic: Привет мир\r\nTabbed:\tvalue "
+    id1, h1 = add_memory(
+        src_db,
+        "unicode-check",
+        fact_one,
+        metadata={"note": "multi\nline\r\nmeta — 雪"},
+    )
+    id2, h2 = add_memory(src_db, "unicode-check", fact_two)
+
+    snap_dir = tmp_path / "snap-unicode"
+    write_snapshot_v2(src_db, snap_dir)
+    src_db.close()
+
+    assert b"\r\n" not in (snap_dir / MEMORIES_NAME).read_bytes()
+    verify_manifest(snap_dir)
+
+    clean_db = MemoryDB(tmp_path / "clean.sqlite")
+    result = hydrate(clean_db, snap_dir)
+    assert result.loaded == 2
+    assert result.embedding_reused == 2
+    assert result.embedding_rebuilt == 0
+
+    r1 = clean_db.get_memory(id1)
+    r2 = clean_db.get_memory(id2)
+    assert r1 is not None and r2 is not None
+    assert r1["fact_text"] == fact_one
+    assert r1["content_hash"] == h1
+    assert json.loads(r1["metadata_json"]) == {"note": "multi\nline\r\nmeta — 雪"}
+    assert r2["fact_text"] == fact_two
+    assert r2["content_hash"] == h2
+    clean_db.close()
+
+
+def test_crlf_corrupted_or_truncated_payload_fails_closed_before_mutation(tmp_path: Path):
+    """Gate 1 (#118): CRLF-translated (+2 bytes for 2 records) or truncated
+    memories.jsonl fails verification before any target DB mutation."""
+    from hotmem.swap import add_memory
+
+    src_db = MemoryDB(tmp_path / "src.sqlite")
+    add_memory(src_db, "windows-check", "Synthetic training note one.")
+    add_memory(src_db, "windows-check", "Synthetic training note two.")
+    snap_dir = tmp_path / "snap"
+    write_snapshot_v2(src_db, snap_dir)
+    src_db.close()
+
+    original_bytes = (snap_dir / MEMORIES_NAME).read_bytes()
+    crlf_bytes = original_bytes.replace(b"\n", b"\r\n")
+    assert len(crlf_bytes) == len(original_bytes) + 2
+
+    target_db = MemoryDB(tmp_path / "target.sqlite")
+    seed_id, _ = add_memory(target_db, "existing", "Pre-existing target record.")
+
+    # 1. CRLF-mutated file (+2 bytes, matching the 0.2.5 Windows defect symptom).
+    (snap_dir / MEMORIES_NAME).write_bytes(crlf_bytes)
+    with pytest.raises(SnapshotChecksumError) as exc_crlf:
+        hydrate(target_db, snap_dir)
+    assert exc_crlf.value.reason == "mismatch"
+    assert exc_crlf.value.file == MEMORIES_NAME
+    assert exc_crlf.value.expected == f"size={len(original_bytes)}"
+    assert exc_crlf.value.actual == f"size={len(crlf_bytes)}"
+    assert target_db.count() == 1
+
+    # 2. Truncated file.
+    (snap_dir / MEMORIES_NAME).write_bytes(original_bytes[:-5])
+    with pytest.raises(SnapshotChecksumError) as exc_trunc:
+        hydrate(target_db, snap_dir)
+    assert exc_trunc.value.reason == "mismatch"
+    assert exc_trunc.value.file == MEMORIES_NAME
+    assert target_db.count() == 1
+    assert target_db.get_memory(seed_id) is not None
+    target_db.close()
