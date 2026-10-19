@@ -33,8 +33,9 @@ def confined_relpath(root: Path, rel: str) -> bool:
     rel_path = Path(rel)
     if (
         not rel
-        or rel.startswith(("/", "\\"))
-        or ":" in rel.split("/", 1)[0].split("\\", 1)[0]
+        or "\\" in rel
+        or rel.startswith("/")
+        or ":" in rel.split("/", 1)[0]
         or rel_path.is_absolute()
         or bool(rel_path.drive)
         or ".." in rel_path.parts

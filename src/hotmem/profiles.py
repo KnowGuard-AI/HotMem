@@ -35,11 +35,10 @@ from __future__ import annotations
 import contextlib
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Literal
 
 from hotmem.db import MemoryDB
-from hotmem.memory import hydrate_memory_detailed
+from hotmem.memory import _resolve_uri, hydrate_memory_detailed
 from hotmem.provenance import BackingFileMissingError, ProvenanceError
 from hotmem.storage import get_adapter
 from hotmem.trace import Timer, get_tracer
@@ -117,18 +116,15 @@ class ProfiledHydration:
 
 
 def _resolve_source_uri(source_uri: str, base_dir: str | None) -> str:
-    """Resolve a source_uri against base_dir (matches memory._resolve_uri)."""
-    raw = source_uri
-    if raw.startswith("file://"):
-        raw = raw[len("file://") :]
-        if len(raw) >= 3 and raw[0] == "/" and raw[1].isalpha() and raw[2] == ":":
-            raw = raw[1:]
-    if "://" in raw:
-        return source_uri  # non-file scheme, leave as-is
-    path = Path(raw)
-    if not path.is_absolute() and base_dir is not None:
-        path = Path(base_dir) / path
-    return str(path.resolve())
+    """Resolve a source_uri against base_dir — one rule, shared with memory.
+
+    Delegates to ``hotmem.memory._resolve_uri`` so every hydration profile
+    (compact/agent here; audit/full via hydrate_memory_detailed) and the
+    storage adapter resolve ``file://``/absolute/relative URIs identically.
+    The adapter normalizes ``file://`` (including Windows drive URIs) via its
+    own ``_to_path``, so no prefix stripping is duplicated here.
+    """
+    return _resolve_uri(source_uri, base_dir)
 
 
 def hydrate_with_profile(
