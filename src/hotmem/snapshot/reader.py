@@ -82,7 +82,7 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
         raise SnapshotChecksumError("missing_manifest", file=str(manifest_path))
 
     try:
-        raw = json.loads(manifest_path.read_text())
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as err:
         raise SnapshotChecksumError("malformed", file=MANIFEST_NAME) from err
 
