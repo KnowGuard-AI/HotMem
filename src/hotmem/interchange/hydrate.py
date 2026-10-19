@@ -182,8 +182,8 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
             spool = Path(spool_name)
             try:
                 with (
-                    open(payload_path, "rb") as raw,
                     os.fdopen(fd, "wb") as out,
+                    open(payload_path, "rb") as raw,
                     gzip.GzipFile(fileobj=raw, mode="rb") as gz,
                 ):
                     while chunk := gz.read(_SPOOL_CHUNK):
@@ -193,9 +193,6 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
                 raise PackageError(
                     "corrupt_compression", file=payload_name, actual=str(err)
                 ) from err
-                # Count non-blank lines as we go: split on the last complete
-                # chunk boundary is fiddly — count from the spool instead.
-                out.flush()
             with open(spool, "rb") as f:
                 for line in f:
                     if line.strip():

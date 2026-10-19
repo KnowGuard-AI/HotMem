@@ -30,6 +30,8 @@ from pathlib import Path
 
 def fsync_dir(path: Path) -> None:
     """Flush a directory entry to disk so a rename survives a crash."""
+    if os.name == "nt":
+        return
     fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(fd)

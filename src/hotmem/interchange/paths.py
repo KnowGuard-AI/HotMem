@@ -30,7 +30,15 @@ def confined_relpath(root: Path, rel: str) -> bool:
     the root are rejected; symlinked entries are rejected because they can
     point outside even with a clean relative name.
     """
-    if not rel or rel.startswith("/") or Path(rel).is_absolute() or ".." in Path(rel).parts:
+    rel_path = Path(rel)
+    if (
+        not rel
+        or rel.startswith(("/", "\\"))
+        or ":" in rel.split("/", 1)[0].split("\\", 1)[0]
+        or rel_path.is_absolute()
+        or bool(rel_path.drive)
+        or ".." in rel_path.parts
+    ):
         return False
     resolved = (root / rel).resolve()
     try:
