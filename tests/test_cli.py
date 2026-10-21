@@ -7,6 +7,13 @@ is deterministic in CI/headless environments.
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from contextlib import closing, contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -276,3 +283,244 @@ def test_cli_status_uses_renderer_directly(monkeypatch: pytest.MonkeyPatch):
         res = CliRunner().invoke(main, ["status"])
     assert res.exit_code == 0, res.output
     assert called.get("data") == {"status": "ok"}
+
+
+# Real installed entry points, sockets, persistence, and file handles (#118).
+def _installed_cli(*args: str) -> list[str]:
+    executable = shutil.which("hotmem", path=str(Path(sys.executable).parent))
+    assert executable, "the installed hotmem entry point must be available"
+    return [executable, *args]
+
+
+def _run_cli(*args: str, success: bool = True) -> subprocess.CompletedProcess:
+    result = subprocess.run(
+        _installed_cli(*args),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=20,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    if success:
+        assert result.returncode == 0, result.stdout + result.stderr
+    else:
+        assert result.returncode != 0, result.stdout + result.stderr
+    return result
+
+
+@contextmanager
+def _sidecar(mount: Path):
+    """Bound startup and teardown; log to a file so no pipe can fill."""
+    import httpx
+
+    from hotmem.client import HotMemClient
+
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    log_path = mount.parent / f"{mount.name}.log"
+    with log_path.open("w+b") as log:
+        proc = subprocess.Popen(
+            _installed_cli(
+                "serve",
+                "--mount",
+                str(mount),
+                "--port",
+                str(port),
+                "--host",
+                "127.0.0.1",
+                "--embedder",
+                "hash",
+                "--reranker",
+                "none",
+            ),
+            stdout=log,
+            stderr=log,
+        )
+        try:
+            with HotMemClient(f"http://127.0.0.1:{port}") as client:
+                deadline = time.monotonic() + 15
+                while True:
+                    if proc.poll() is not None or time.monotonic() > deadline:
+                        log.seek(0)
+                        pytest.fail(f"sidecar did not start: {log.read().decode('utf-8')}")
+                    try:
+                        if client.health()["status"] == "ok":
+                            break
+                    except httpx.HTTPError:
+                        pass
+                    time.sleep(0.05)
+                yield client, proc
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+            assert proc.poll() is not None
+
+
+def test_installed_cli_http_restart_and_verified_restore(tmp_path: Path):
+    """Real wheel entry point, acknowledged-write recovery, and clean restore."""
+    import hashlib
+
+    import httpx
+
+    from hotmem.snapshot.reader import verify_manifest
+
+    workspace = tmp_path / "workspace caf\u00e9 with spaces"
+    workspace.mkdir()
+    mount = workspace / "source"
+    snapshot = workspace / "verified snapshot"
+    facts = ["Invoice caf\u00e9 approval\nnext line\r\nlast line", "Payment terms are net 30"]
+    assert "0.2.6" in _run_cli("--version").stdout
+    with _sidecar(mount) as (client, proc):
+        for fact in facts:
+            client.add("windows-test", fact, source="synthetic-fixture", metadata={"run": "118"})
+        before = client.search("invoice approval", top_k=2)
+        assert len(before) == 2
+        assert all(row["role"] == "system" for row in before)
+        assert client.snapshot(str(snapshot))["exported"] == 2
+        # Windows terminate() is an abrupt stop: acknowledged writes must survive.
+        proc.kill()
+        proc.wait(timeout=10)
+    with _sidecar(mount) as (client, _):
+        assert client.health()["memory_count"] == 2
+        rows = client.list("windows-test")
+        assert {row["fact_text"] for row in rows} == set(facts)
+        assert {row["source"] for row in rows} == {"synthetic-fixture"}
+        assert client.search("invoice approval", top_k=2) == before
+        assert "ok" in _run_cli("status", "--port", client.base_url.rsplit(":", 1)[1]).stdout
+
+    verify_manifest(snapshot)
+    payload = (snapshot / "memories.jsonl").read_bytes()
+    assert b"\r\n" not in payload  # embedded CRLF remains escaped JSON content
+    manifest = json.loads((snapshot / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["files"]["memories.jsonl"]["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert manifest["files"]["memories.jsonl"]["size"] == len(payload)
+    clone = workspace / "clone"
+    with _sidecar(clone) as (client, _):
+        restored = client.hydrate(str(snapshot))
+        assert restored["loaded"] == restored["embedding_reused"] == 2
+        assert restored["embedding_rebuilt"] == restored["invalid"] == 0
+        assert client.search("invoice approval", top_k=2) == before
+        repeated = client.hydrate(str(snapshot))
+        assert repeated["loaded"] == 0 and repeated["skipped_dupes"] == 2
+        (snapshot / "memories.jsonl").write_bytes(payload + b"corruption")
+        with pytest.raises(httpx.HTTPStatusError) as error:
+            client.hydrate(str(snapshot))
+        assert error.value.response.status_code == 409
+        assert client.health()["memory_count"] == 2
+    # Windows rejects this removal if any process/SQLite handle was left open.
+    shutil.rmtree(workspace)
+    assert not workspace.exists()
+
+
+@pytest.mark.parametrize("suffix", [".jsonl", ".jsonl.gz"])
+def test_installed_cli_legacy_restore_and_failure_cleanup(tmp_path: Path, suffix: str):
+    """Offline CLI round trips and failed verification release all DB/file handles."""
+    workspace = tmp_path / "portable caf\u00e9 workspace"
+    workspace.mkdir()
+    source = workspace / "source.sqlite"
+    with closing(MemoryDB(source)) as db:
+        from hotmem.swap import add_memory
+
+        add_memory(db, "portable", "Legacy caf\u00e9\nline two", source="synthetic")
+    artifact = workspace / f"legacy snapshot{suffix}"
+    target = workspace / "target.sqlite"
+    _run_cli("snapshot", "--db", str(source), "--file", str(artifact))
+    first = _run_cli("hydrate", "--db", str(target), "--file", str(artifact))
+    assert "loaded=1" in first.stdout and "embedding_reused=1" in first.stdout
+    assert (
+        "skipped_dupes=1"
+        in _run_cli("hydrate", "--db", str(target), "--file", str(artifact)).stdout
+    )
+    assert json.loads(_run_cli("search", "Legacy", "--db", str(target), "--json").stdout)
+    snapshot = workspace / "corrupt snapshot"
+    _run_cli("snapshot", "--db", str(source), "--file", str(snapshot))
+    with (snapshot / "memories.jsonl").open("ab") as handle:
+        handle.write(b"corruption")
+    failure = _run_cli("hydrate", "--db", str(target), "--file", str(snapshot), success=False)
+    assert "verification" in (failure.stdout + failure.stderr).lower()
+    with closing(MemoryDB(target)) as db:
+        assert db.count() == 1
+    shutil.rmtree(workspace)
+    assert not workspace.exists()
+
+
+def test_installed_http_file_reference_ranges_and_relocation(tmp_path: Path):
+    """Reference-only snapshots need explicit backing-file relocation."""
+    import hashlib
+
+    import httpx
+
+    source = tmp_path / "source mount"
+    source.mkdir()
+    name = "caf\u00e9 data 100%.txt"
+    data = b"header\r\nverified payload\r\ntrailer"
+    (source / name).write_bytes(data)
+    offset, length = 8, 16
+    expected = data[offset : offset + length]
+    snapshot = tmp_path / "reference snapshot"
+    with _sidecar(source) as (client, _):
+        checksum = hashlib.sha256(expected).hexdigest()
+        record = client.add_file_ref(
+            "file-ref",
+            name,
+            byte_offset=offset,
+            byte_length=length,
+            source_checksum=checksum,
+            summary="Synthetic range reference",
+        )
+        mid = record["memory_id"]
+        assert client.hydrate_memory(mid) == expected
+        absolute = client.add_file_ref(
+            "uri-ref",
+            (source / name).as_uri(),
+            byte_offset=offset,
+            byte_length=length,
+            source_checksum=checksum,
+        )
+        assert client.hydrate_memory(absolute["memory_id"]) == expected
+        client.snapshot(str(snapshot))
+    assert not (snapshot / name).exists()  # Snapshot v2 does not transport source files.
+    target = tmp_path / "relocated mount"
+    with _sidecar(target) as (client, _):
+        assert client.hydrate(str(snapshot))["loaded"] == 2
+        with pytest.raises(httpx.HTTPStatusError) as missing:
+            client.hydrate_memory(mid)
+        assert missing.value.response.status_code == 409
+        assert missing.value.response.json()["reason"] == "missing_file"
+        (target / name).write_bytes(data)
+        assert client.hydrate_memory(mid) == expected
+        (target / name).write_bytes(b"x" * len(data))
+        with pytest.raises(httpx.HTTPStatusError) as mismatch:
+            client.hydrate_memory(mid)
+        assert mismatch.value.response.status_code == 409
+    shutil.rmtree(source)
+    shutil.rmtree(target)
+
+
+def test_installed_server_bind_failure_releases_mount(tmp_path: Path):
+    """A failed startup exits within the CLI deadline and leaves no locked store."""
+    mount = tmp_path / "failed startup mount"
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        result = _run_cli(
+            "serve",
+            "--mount",
+            str(mount),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(occupied.getsockname()[1]),
+            success=False,
+        )
+        assert "error" in result.stderr.lower()
+    with _sidecar(mount) as (client, _):
+        assert client.health()["memory_count"] == 0
+    shutil.rmtree(mount)
+    assert not mount.exists()
