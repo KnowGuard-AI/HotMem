@@ -13,6 +13,7 @@ import mmap
 from collections.abc import Iterator
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from .base import StorageMetadata
 
@@ -34,8 +35,17 @@ _FORMAT_MAP: dict[str, str] = {
 
 def _to_path(uri: str) -> Path:
     """Resolve a file:// URI or bare path to a filesystem Path."""
-    if uri.startswith("file://"):
-        raw = uri[len("file://") :]
+    if uri.lower().startswith("file://"):
+        parts = urlsplit(uri)
+        authority = parts.netloc
+        if authority and authority.lower() != "localhost":
+            # Retain the legacy file://C:/path spelling alongside file:///C:/path.
+            if len(authority) != 2 or not authority[0].isalpha() or authority[1] != ":":
+                raise ValueError("only local file URI authorities are supported")
+            raw = authority + parts.path
+        else:
+            raw = parts.path
+        raw = unquote(raw, encoding="utf-8", errors="strict")
         if len(raw) >= 3 and raw[0] == "/" and raw[1].isalpha() and raw[2] == ":":
             raw = raw[1:]
         return Path(raw)

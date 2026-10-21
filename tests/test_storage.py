@@ -131,3 +131,20 @@ def test_storage_handles_unicode_and_spaces_in_path(adapter, tmp_path):
     assert adapter.exists(str(target))
     assert adapter.read_range(str(target), 0, 10) == payload[:10]
     assert adapter.checksum(str(target)) == hashlib.sha256(payload).hexdigest()
+
+
+def test_storage_reads_percent_encoded_local_file_uri(adapter, tmp_path):
+    """Path.as_uri() must round-trip spaces, Unicode, and literal percent signs."""
+    target = tmp_path / "caf\u00e9 notes 100%.txt"
+    payload = b"header\r\nverified range\r\n"
+    target.write_bytes(payload)
+    uri = target.as_uri()
+    assert adapter.exists(uri)
+    assert adapter.read_range(uri, 8, 14) == payload[8:22]
+    assert adapter.checksum(uri) == hashlib.sha256(payload).hexdigest()
+    assert adapter.read(uri.replace("file:///", "file://localhost/", 1)) == payload
+
+
+def test_storage_rejects_remote_file_authority(adapter):
+    with pytest.raises(ValueError, match="only local file URI authorities"):
+        adapter.read("file://remote-host/share/notes.txt")
