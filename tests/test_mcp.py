@@ -219,3 +219,77 @@ def test_call_tool_missing_argument_errors(monkeypatch: pytest.MonkeyPatch, tmp_
         assert "validation error" in result.root.content[0].text.lower()
     finally:
         db.close()
+
+
+@pytest.mark.parametrize("suffix", ["", ".jsonl", ".jsonl.gz"])
+def test_installed_mcp_stdio_session_restore_and_cleanup(tmp_path: Path, suffix: str):
+    """Actual stdio framing, optional-extra entry point, EOF, and clean restore."""
+    import shutil
+    import sys
+    from contextlib import asynccontextmanager
+    from datetime import timedelta
+
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    executable = shutil.which("hotmem", path=str(Path(sys.executable).parent))
+    assert executable
+    root = tmp_path / "mcp caf\u00e9 with spaces"
+    root.mkdir()
+    snapshot = root / f"verified snapshot{suffix}"
+
+    @asynccontextmanager
+    async def connected(mount: Path, log):
+        params = StdioServerParameters(
+            command=executable,
+            args=["mcp", "--mount", str(mount), "--embedder", "hash", "--reranker", "none"],
+        )
+        async with (
+            stdio_client(params, errlog=log) as (read, write),
+            ClientSession(read, write, read_timeout_seconds=timedelta(seconds=10)) as session,
+        ):
+            await session.initialize()
+            yield session
+
+    async def call(session, name, arguments):
+        result = await session.call_tool(name, arguments)
+        assert not result.isError, result
+        return _text(result)
+
+    async def exercise():
+        with (root / "stderr.log").open("w", encoding="utf-8") as log:
+            async with connected(root / "source", log) as session:
+                tools = {tool.name for tool in (await session.list_tools()).tools}
+                assert {"add_memory", "search_memories", "snapshot", "hydrate"} <= tools
+                fact = "MCP caf\u00e9 handoff\nsecond line"
+                added = await call(session, "add_memory", {"identifier": "mcp-test", "fact": fact})
+                assert added["memory_id"]
+                assert (await call(session, "memory_health", {}))["memory_count"] == 1
+                before = await call(session, "search_memories", {"query": "MCP caf\u00e9"})
+                assert before["memories"][0]["content"] == fact
+                assert (await call(session, "snapshot", {"file": str(snapshot)}))["exported"] == 1
+            # Closing stdio sends EOF; the server must close SQLite and exit.
+            async with connected(root / "source", log) as session:
+                assert (await call(session, "memory_health", {}))["memory_count"] == 1
+            async with connected(root / "clone", log) as session:
+                loaded = await call(session, "hydrate", {"file": str(snapshot)})
+                assert loaded["loaded"] == loaded["embedding_reused"] == 1
+                assert loaded["embedding_rebuilt"] == 0
+                replay = await call(session, "hydrate", {"file": str(snapshot)})
+                assert replay["loaded"] == 0 and replay["skipped_dupes"] == 1
+                if not suffix:
+                    with (snapshot / "memories.jsonl").open("ab") as handle:
+                        handle.write(b"corruption")
+                    corrupt = await session.call_tool("hydrate", {"file": str(snapshot)})
+                    assert corrupt.isError
+                    assert "mismatch" in corrupt.content[0].text
+                invalid = await session.call_tool("add_memory", {"identifier": "missing-fact"})
+                assert invalid.isError
+                assert (await call(session, "memory_health", {}))["memory_count"] == 1
+
+    asyncio.run(asyncio.wait_for(exercise(), timeout=45))
+    stderr = (root / "stderr.log").read_text(encoding="utf-8")
+    assert "mcp server ready" in stderr
+    assert stderr.count("mcp server closed") == 3
+    shutil.rmtree(root)
+    assert not root.exists()
