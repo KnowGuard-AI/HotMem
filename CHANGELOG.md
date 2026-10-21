@@ -6,6 +6,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Decode percent-encoded local file URIs so spaces, Unicode, and literal
+  percent signs round-trip through file-backed reads and checksums (#121).
+- Synchronize the editable root-package version in `uv.lock` with 0.2.6 (#121).
+- Preserve checksummed source fixtures on Windows Git checkouts and make
+  fixture encoding/newline/path expectations explicit (#121).
+
+### Added
+
+- MCP snapshot/hydrate format dispatch shared with CLI/HTTP, including
+  verified Snapshot v2 directories alongside legacy JSONL/JSONL.GZ (#121).
+- Native Windows built-wheel qualification and real CLI/HTTP/MCP lifecycle,
+  persistence, corrupt-restore rejection, provenance, and cleanup tests (#121).
+- PowerShell and absolute-path Windows MCP setup with explicit support limits
+  and a distinction between the candidate and published 0.2.6 package (#121).
+
 ## [0.2.6] - 2026-10-21
 
 ### Fixed

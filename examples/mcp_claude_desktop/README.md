@@ -40,3 +40,32 @@ Ask Claude:
 - "What UI preferences have I told you about?"
 
 Claude calls `search_memories` to recall and `add_memory` to persist.
+
+## Windows
+
+Install the `[mcp]` extra into a dedicated environment. Configure the actual
+absolute executable and mount paths; MCP hosts do not run these arguments
+through PowerShell and must not rely on `~`, `%USERPROFILE%`, activation,
+or the GUI process's PATH. Replace the example paths with your installation:
+
+```json
+{
+  "mcpServers": {
+    "hotmem": {
+      "command": "C:\\Users\\you\\HotMem\\.venv-check\\Scripts\\hotmem.exe",
+      "args": ["mcp", "--mount", "C:\\Users\\you\\HotMem data", "--embedder", "hash", "--reranker", "none"]
+    }
+  }
+}
+```
+
+Use `hotmem mcp` directly, without a shell wrapper that writes banners to
+stdout. Startup diagnostics belong on stderr; stdout is the MCP protocol.
+The real stdio regression tests check initialization, tools, writes/search,
+restart persistence, JSONL/JSONL.GZ and Snapshot v2 restore, verification
+failure, and EOF cleanup. Snapshot v2 over MCP is added by PR #121 and is
+not present in the previously published 0.2.6 package. These protocol tests
+do not claim that the Claude Desktop GUI itself was exercised.
+
+See [Windows setup and qualification](../../docs/quickstart.md#windows-qualification)
+for PowerShell installation, reproduction, and support limits.
