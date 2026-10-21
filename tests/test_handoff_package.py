@@ -42,7 +42,7 @@ def _prepare(out: Path, mode: str = "resume", **kwargs) -> object:
 
 
 def _load_manifest(pkg: Path) -> dict:
-    return json.loads((pkg / MANIFEST_NAME).read_text())
+    return json.loads((pkg / MANIFEST_NAME).read_text(encoding="utf-8"))
 
 
 # ── Happy path and manifest completeness (AC 6) ─────────────────────────────
@@ -72,9 +72,15 @@ def test_resume_package_layout_and_manifest(tmp_path):
 
     # Counts match the actual payload lines.
     session_lines = [
-        line for line in (pkg / SESSION_STREAM_NAME).read_text().splitlines() if line.strip()
+        line
+        for line in (pkg / SESSION_STREAM_NAME).read_text(encoding="utf-8").splitlines()
+        if line.strip()
     ]
-    memory_lines = [line for line in (pkg / MEMORIES_NAME).read_text().splitlines() if line.strip()]
+    memory_lines = [
+        line
+        for line in (pkg / MEMORIES_NAME).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert manifest["counts"]["entries"] == len(session_lines) == 11  # 12 - 1 bounded turn
     assert manifest["counts"]["memories"] == len(memory_lines) == 2
     assert manifest["counts"]["entries_by_kind"]["turn"] == 4
@@ -93,12 +99,12 @@ def test_coverage_report_is_complete_and_leak_free(tmp_path):
     assert coverage["redacted_count"] == 1
     assert any("resume mode bounds" in o["reason"] for o in coverage["omitted"])
     assert SECRET_VALUE not in json.dumps(result.manifest)
-    assert SECRET_VALUE not in (Path(result.path) / BRIEF_NAME).read_text()
+    assert SECRET_VALUE not in (Path(result.path) / BRIEF_NAME).read_text(encoding="utf-8")
 
 
 def test_brief_payload_is_linked_and_bounded(tmp_path):
     result = _prepare(tmp_path / "pkg")
-    brief = json.loads((Path(result.path) / BRIEF_NAME).read_text())
+    brief = json.loads((Path(result.path) / BRIEF_NAME).read_text(encoding="utf-8"))
     assert brief["char_count"] == len(brief["text"])
     assert brief["text"].startswith("# Resume brief — hotmem-showcase-planning")
     assert len(brief["links"]["memory_ids"]) == 2
@@ -132,8 +138,12 @@ def test_archive_keeps_full_stream_resume_bounds_turns(tmp_path):
     resume = _prepare(tmp_path / "resume", mode="resume")
     archive = _prepare(tmp_path / "archive", mode="archive")
 
-    resume_lines = (Path(resume.path) / SESSION_STREAM_NAME).read_text().splitlines()
-    archive_lines = (Path(archive.path) / SESSION_STREAM_NAME).read_text().splitlines()
+    resume_lines = (
+        (Path(resume.path) / SESSION_STREAM_NAME).read_text(encoding="utf-8").splitlines()
+    )
+    archive_lines = (
+        (Path(archive.path) / SESSION_STREAM_NAME).read_text(encoding="utf-8").splitlines()
+    )
     assert len(resume_lines) == 11
     assert len(archive_lines) == 12
     assert "turn" in {json.loads(line)["kind"] for line in archive_lines}

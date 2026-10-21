@@ -58,8 +58,8 @@ def _assert_matches_goldens(tmp_path):
     for name in ("session.jsonl", "memories.jsonl", "resume-brief.json"):
         assert (pkg / name).read_bytes() == (GOLDEN / name).read_bytes(), name
 
-    actual = json.loads((pkg / "manifest.json").read_text())
-    golden = json.loads((GOLDEN / "manifest.json").read_text())
+    actual = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
+    golden = json.loads((GOLDEN / "manifest.json").read_text(encoding="utf-8"))
     for manifest in (actual, golden):
         for field, sentinel in _VOLATILE_MANIFEST_FIELDS.items():
             manifest[field] = sentinel
@@ -177,7 +177,8 @@ def test_tool_entries_are_inert_data(tmp_path):
     """AC 10: tool history is inspectable data; nothing is ever executed."""
     prepare_handoff(FIXTURE, tmp_path / "pkg", mode="archive", consent=CONSENT)
     entries = [
-        json.loads(line) for line in (tmp_path / "pkg" / "session.jsonl").read_text().splitlines()
+        json.loads(line)
+        for line in (tmp_path / "pkg" / "session.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     tools = [e for e in entries if e["kind"] in (EntryKind.TOOL_CALL, EntryKind.TOOL_RESULT)]
     assert tools, "fixture must carry tool entries"
@@ -186,7 +187,7 @@ def test_tool_entries_are_inert_data(tmp_path):
         assert entry["text"] and "subprocess" not in entry["text"].lower()
 
     # The brief renders the no-re-run marker above any tool line.
-    brief = json.loads((tmp_path / "pkg" / "resume-brief.json").read_text())
+    brief = json.loads((tmp_path / "pkg" / "resume-brief.json").read_text(encoding="utf-8"))
     assert brief["text"].index("do not re-run") < brief["text"].index("- shell ")
 
     # Hydration inserts rows only — the store grows by memories + brief
@@ -212,7 +213,7 @@ def test_secret_never_appears_in_any_package_artifact(tmp_path):
 
     # In the archive package the redacted turn survives as a placeholder
     # (resume mode bounds that middle turn out with an omission record).
-    session_text = (tmp_path / "archive" / "session.jsonl").read_text()
+    session_text = (tmp_path / "archive" / "session.jsonl").read_text(encoding="utf-8")
     assert "[REDACTED:api_key]" in session_text
     assert "HOTMEM_API_KEY=" in session_text  # the name stays visible
 
