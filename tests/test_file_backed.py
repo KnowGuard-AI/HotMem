@@ -28,6 +28,18 @@ from hotmem.provenance import (
 )
 from hotmem.storage.local import LocalFilesystemAdapter
 
+
+@pytest.mark.parametrize("uri", ["file://remote-host/share/notes.txt", "file:///bad%FF.txt"])
+def test_http_rejects_invalid_local_file_uris(app_client, uri):
+    """Unsupported/malformed URIs are actionable client errors, never HTTP 500."""
+    response = app_client.post(
+        "/v1/add",
+        json={"identifier": "bad-uri", "file_uri": uri, "byte_offset": 0, "byte_length": 1},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"] == "unsupported_scheme"
+
+
 # ── 1. add file-backed -> hydrate returns exact byte range ───────────────────
 
 

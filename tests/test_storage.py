@@ -149,3 +149,9 @@ def test_storage_reads_percent_encoded_local_file_uri(adapter, tmp_path):
 def test_storage_rejects_remote_file_authority(adapter):
     with pytest.raises(ValueError, match="only local file URI authorities"):
         adapter.read("file://remote-host/share/notes.txt")
+
+
+@pytest.mark.parametrize("uri", ["file://remote-host/share/notes.txt", "file:///bad%FF.txt"])
+def test_get_adapter_rejects_invalid_local_file_uri(uri):
+    with pytest.raises(UnsupportedSchemeError, match="invalid local file URI"):
+        get_adapter(uri)
