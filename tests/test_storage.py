@@ -117,6 +117,7 @@ def test_to_path_normalizes_windows_and_posix_file_uris():
 
     assert _to_path("file:///C:/Users/test/data.txt") == Path("C:/Users/test/data.txt")
     assert _to_path("file://C:/Users/test/data.txt") == Path("C:/Users/test/data.txt")
+    assert _to_path(r"file://C:\Users\test\data.txt") == Path(r"C:\Users\test\data.txt")
     assert _to_path("file:///tmp/data.txt") == Path("/tmp/data.txt")
 
 

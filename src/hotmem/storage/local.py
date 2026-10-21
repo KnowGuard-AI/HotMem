@@ -36,6 +36,9 @@ _FORMAT_MAP: dict[str, str] = {
 def _to_path(uri: str) -> Path:
     """Resolve a file:// URI or bare path to a filesystem Path."""
     if uri.lower().startswith("file://"):
+        legacy = uri[len("file://") :]
+        if len(legacy) >= 3 and legacy[0].isalpha() and legacy[1] == ":" and legacy[2] in "/\\":
+            return Path(unquote(legacy, encoding="utf-8", errors="strict"))
         parts = urlsplit(uri)
         authority = parts.netloc
         if authority and authority.lower() != "localhost":
