@@ -16,7 +16,7 @@ Extension:
 from __future__ import annotations
 
 from .base import StorageAdapter, StorageMetadata
-from .local import LocalFilesystemAdapter
+from .local import LocalFilesystemAdapter, _to_path
 
 __all__ = [
     "StorageAdapter",
@@ -54,6 +54,11 @@ def get_adapter(uri: str) -> StorageAdapter:
             f"unsupported URI scheme {scheme!r} for {uri!r}; "
             "only local filesystem storage is supported by the built-in adapter"
         )
+    if scheme == "file":
+        try:
+            _to_path(uri)
+        except ValueError as err:
+            raise UnsupportedSchemeError(f"invalid local file URI: {err}") from err
     return adapter
 
 
