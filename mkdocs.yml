@@ -54,6 +54,7 @@ nav:
   - Home: index.md
   - Brand Guidelines: brand-guidelines.md
   - Vision & Canon: vision-and-canon.md
+  - Daemon & LSD Relay (Direction): daemon-and-lsd-relay.md
   - Agent Memory Portability: agent-memory-portability.md
   - Quickstart: quickstart.md
   - Architecture Overview: architecture.md

@@ -77,6 +77,7 @@ curl -X POST http://127.0.0.1:8711/v1/search \
 ## Documentation map
 
 - [Vision & Canon](vision-and-canon.md)
+- [Daemon, JSONL Cassette & LSD Relay — Product Direction](daemon-and-lsd-relay.md)
 - [Brand Guidelines](brand-guidelines.md)
 - [Agent Memory Portability](agent-memory-portability.md)
 - [Quickstart](quickstart.md)
