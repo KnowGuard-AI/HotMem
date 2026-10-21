@@ -378,6 +378,26 @@ def test_main_writes_output_and_report_files(tmp_path: Path):
 BASELINE_PATH = FIXTURE_DIR / "baseline.json"
 
 
+def _baseline_precision(value):
+    """Ignore sub-picounit float aggregation noise; preserve every other field."""
+    if isinstance(value, float):
+        return round(value, 12)
+    if isinstance(value, dict):
+        return {key: _baseline_precision(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_baseline_precision(item) for item in value]
+    return value
+
+
+def test_baseline_comparison_preserves_meaningful_regressions():
+    baseline = {"mean": 0.5857904800203633, "ids": ["a", "b"], "count": 2}
+    assert _baseline_precision(baseline) == _baseline_precision(
+        {**baseline, "mean": 0.5857904800203632}
+    )
+    for changed in ({"mean": 0.585789}, {"ids": ["b", "a"]}, {"count": 3}):
+        assert _baseline_precision(baseline) != _baseline_precision({**baseline, **changed})
+
+
 def test_baseline_regression_guard(tmp_path: Path):
     """CI guard: unacknowledged changes to ordered ids or metrics fail.
 
@@ -386,13 +406,13 @@ def test_baseline_regression_guard(tmp_path: Path):
     baseline AND category-level before/after evidence in the PR (#77
     regen policy).
     """
-    baseline = json.loads(BASELINE_PATH.read_text())
+    baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
     fresh = retrieval_eval.normalize_for_baseline(
         retrieval_eval.run_eval(
             FIXTURE_DIR / "corpus.jsonl", FIXTURE_DIR / "queries.jsonl", work_dir=tmp_path
         )
     )
-    assert fresh == baseline, (
+    assert _baseline_precision(fresh) == _baseline_precision(baseline), (
         "retrieval behavior changed vs the committed baseline. If intentional, "
         'regenerate with: uv run python -c "<see bench/retrieval/README.md>" '
         "and include category-level before/after metrics in the PR."
@@ -431,7 +451,7 @@ def test_duplicate_slot_denominators_pinned():
     near-duplicate diversity category. #80's entry gate reads the
     category; the aggregate is context (guide vs issue reconciliation).
     """
-    baseline = json.loads(BASELINE_PATH.read_text())
+    baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
     overall = baseline["overall"]["duplicate_slot_rate"]
     diversity = baseline["categories"]["near_duplicate_diversity"]["duplicate_slot_rate"]
     assert overall["n_applicable"] == 48
