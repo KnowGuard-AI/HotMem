@@ -51,7 +51,7 @@ can be captured, verified, transferred, and restored across compatible runtimes.
 JSONL is the canonical interchange language; current shipping capability is
 described separately above.
 
-The 2026-10-21 daemon/LSD direction is tracked by GitHub issue #112. JSONL is
+The v0.2.7 daemon/LSD and showcase direction is tracked by GitHub issue #112. JSONL is
 the owner's memory cassette. A shared daemon with scoped disclosure and a
 detachable management/relay view is planned; it is not a shipped security or
 zero-leakage guarantee. The first proposed proof is two clients collaborating

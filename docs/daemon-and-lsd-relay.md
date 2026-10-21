@@ -16,7 +16,7 @@ a restart. Then show two people and their agents continuing useful work.
 
 !!! info "Implementation status — 2026-10-21"
 
-    This guide defines the shared daemon and LSD relay direction for v0.2.6,
+    This guide defines the shared daemon and LSD relay direction for v0.2.7,
     tracked by [#112](https://github.com/KnowGuard-AI/HotMem/issues/112).
     Local storage, retrieval, snapshots, and verified handoff are existing
     foundations. The shared daemon, runtime authorisation, detachable UI, and
@@ -318,7 +318,7 @@ not evidence from running Flats.
 HotMem is a formal KnowGuard product; KnowB is a shadow brand and no required
 runtime service. The [Vision and Canon](vision-and-canon.md) defines the enduring
 product commitments. [#112](https://github.com/KnowGuard-AI/HotMem/issues/112)
-holds this guide's v0.2.6 daemon/relay direction and implementation evidence.
+holds this guide's v0.2.7 daemon/relay direction and implementation evidence.
 Grok remains excluded from the integration/showcase programme.
 
 Begin with these existing code boundaries, inspected on 2026-10-21 at
@@ -344,16 +344,25 @@ Portable-state acceptance remains in
 [#99](https://github.com/KnowGuard-AI/HotMem/issues/99), and
 [#100](https://github.com/KnowGuard-AI/HotMem/issues/100).
 
-The immediate focus is the secure shared service and a minimal management/
-detachable-relay experience. Broader remote and insight features retain their
-place without becoming automatic blockers for the first local proof. The
+The shared release target is **v0.2.7**: the portable-state foundation, secure
+shared service, minimal management/detachable relay, relationship traversal,
+and the platform showcase/qualification tracks all use that release number.
+The first executable slice remains the local two-client incident workflow;
+the other release deliverables follow in independent slices. The
 [Hermes showcase #70](https://github.com/KnowGuard-AI/HotMem/issues/70),
 [OpenClaw boundary #71](https://github.com/KnowGuard-AI/HotMem/issues/71) and
 [showcase #72](https://github.com/KnowGuard-AI/HotMem/issues/72),
 [walk #105](https://github.com/KnowGuard-AI/HotMem/issues/105),
 [deep map #106](https://github.com/KnowGuard-AI/HotMem/issues/106), and
 [platform roadmap #113 with children #114–#117](https://github.com/KnowGuard-AI/HotMem/issues/113)
-remain linked follow-ons.
+are included in the v0.2.7 release plan. Their tests and acceptance remain
+pending; sharing a release target does not make them prerequisites for the
+first local experiment. Broader remote and overmind features remain product
+direction unless a linked ticket explicitly defines their delivery.
+
+The published v0.2.6 Windows correction remains the current runtime baseline.
+This guide and the v0.2.7 milestone describe upcoming work, not a package
+publication or evidence that those features have shipped.
 
 The remaining choices are specific: the first credential/scope model, supported
 service-manager/platform combination, measured latency/resource budgets,
