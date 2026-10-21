@@ -297,7 +297,6 @@ def _run_cli(*args: str, success: bool = True) -> subprocess.CompletedProcess:
         _installed_cli(*args),
         capture_output=True,
         text=True,
-        encoding="utf-8",
         timeout=20,
         env={**os.environ, "NO_COLOR": "1"},
     )
@@ -306,6 +305,26 @@ def _run_cli(*args: str, success: bool = True) -> subprocess.CompletedProcess:
     else:
         assert result.returncode != 0, result.stdout + result.stderr
     return result
+
+
+def _stop_sidecar(proc: subprocess.Popen) -> None:
+    """Windows console entry points have a Python child: stop the whole tree."""
+    if proc.poll() is None:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+        else:
+            proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+    assert proc.poll() is not None
 
 
 @contextmanager
@@ -352,14 +371,9 @@ def _sidecar(mount: Path):
                     time.sleep(0.05)
                 yield client, proc
         finally:
-            if proc.poll() is None:
-                proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
-            assert proc.poll() is not None
+            _stop_sidecar(proc)
+            with socket.socket() as probe:
+                assert probe.connect_ex(("127.0.0.1", port)) != 0, "sidecar child still listening"
 
 
 def test_installed_cli_http_restart_and_verified_restore(tmp_path: Path):
@@ -368,6 +382,7 @@ def test_installed_cli_http_restart_and_verified_restore(tmp_path: Path):
 
     import httpx
 
+    from hotmem import __version__
     from hotmem.snapshot.reader import verify_manifest
 
     workspace = tmp_path / "workspace caf\u00e9 with spaces"
@@ -375,7 +390,7 @@ def test_installed_cli_http_restart_and_verified_restore(tmp_path: Path):
     mount = workspace / "source"
     snapshot = workspace / "verified snapshot"
     facts = ["Invoice caf\u00e9 approval\nnext line\r\nlast line", "Payment terms are net 30"]
-    assert "0.2.6" in _run_cli("--version").stdout
+    assert __version__ in _run_cli("--version").stdout
     with _sidecar(mount) as (client, proc):
         for fact in facts:
             client.add("windows-test", fact, source="synthetic-fixture", metadata={"run": "118"})
@@ -383,9 +398,8 @@ def test_installed_cli_http_restart_and_verified_restore(tmp_path: Path):
         assert len(before) == 2
         assert all(row["role"] == "system" for row in before)
         assert client.snapshot(str(snapshot))["exported"] == 2
-        # Windows terminate() is an abrupt stop: acknowledged writes must survive.
-        proc.kill()
-        proc.wait(timeout=10)
+        # Windows tree termination is abrupt: acknowledged writes must survive.
+        _stop_sidecar(proc)
     with _sidecar(mount) as (client, _):
         assert client.health()["memory_count"] == 2
         rows = client.list("windows-test")
