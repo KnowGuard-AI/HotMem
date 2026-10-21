@@ -8,16 +8,24 @@ on:
 
 jobs:
   windows-core:
-    name: Windows core (3.12)
-    runs-on: windows-latest
+    name: Windows core (${{ matrix.python-version }})
+    runs-on: windows-2025
     timeout-minutes: 10
+    concurrency:
+      group: windows-core-${{ github.ref }}-${{ matrix.python-version }}
+      cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v4
       - name: Build and install the wheel in a clean environment
         shell: pwsh
@@ -27,18 +35,26 @@ jobs:
           uv venv .venv-windows --python "$env:pythonLocation/python.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $wheel = (Get-ChildItem dist/windows/*.whl).FullName
+          uv pip install --python .venv-windows/Scripts/python.exe $wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .venv-windows/Scripts/python.exe -c "import importlib.util, subprocess, sys; from pathlib import Path; from hotmem.client import HotMemClient; assert importlib.util.find_spec('mcp') is None; r = subprocess.run([str(Path(sys.executable).with_name('hotmem.exe')), 'mcp', '--db', 'missing-extra.sqlite'], capture_output=True, text=True, timeout=10); assert r.returncode != 0 and 'MCP support is not installed' in r.stderr, r; assert not Path('missing-extra.sqlite').exists()"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           uv pip install --python .venv-windows/Scripts/python.exe "$($wheel)[dev,mcp,okf]"
           exit $LASTEXITCODE
       - name: Record the installed package and native environment
         run: |
-          .venv-windows/Scripts/python.exe -c "import hotmem, importlib.metadata as m, json, platform, sys; from pathlib import Path; assert sys.version_info[:2] == (3, 12); assert 'site-packages' in str(Path(hotmem.__file__)); print(json.dumps({'platform': platform.platform(), 'edition': platform.win32_edition(), 'machine': platform.machine(), 'python': sys.version, 'hotmem': m.version('hotmem'), 'module': hotmem.__file__, 'source': '${{ github.sha }}', 'head': '${{ github.event.pull_request.head.sha }}', 'packages': {p: m.version(p) for p in ['mcp', 'httpx', 'fastapi', 'uvicorn']}, 'distribution': m.distribution('hotmem').read_text('direct_url.json')}, indent=2))"
+          .venv-windows/Scripts/python.exe -c "import hotmem, importlib.metadata as m, json, platform, sys; from pathlib import Path; assert sys.version_info[:2] == tuple(map(int, '${{ matrix.python-version }}'.split('.'))); assert 'site-packages' in str(Path(hotmem.__file__)); print(json.dumps({'platform': platform.platform(), 'edition': platform.win32_edition(), 'machine': platform.machine(), 'python': sys.version, 'hotmem': m.version('hotmem'), 'module': hotmem.__file__, 'source': '${{ github.sha }}', 'head': '${{ github.event.pull_request.head.sha }}', 'packages': {p: m.version(p) for p in ['mcp', 'httpx', 'fastapi', 'uvicorn']}, 'distribution': m.distribution('hotmem').read_text('direct_url.json')}, indent=2))"
           .venv-windows/Scripts/hotmem.exe --version
       - name: Run the complete core, MCP, and interchange suite
         run: .venv-windows/Scripts/python.exe -m pytest -q -ra --junitxml=windows-results.xml
+      - name: Verify the locked developer installation
+        if: matrix.python-version == '3.12'
+        shell: pwsh
+        run: uv sync --locked --python "$env:pythonLocation/python.exe" --extra dev --extra mcp --extra okf
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: windows-core-3.12
+          name: windows-core-${{ matrix.python-version }}
           path: windows-results.xml
 
   test:
