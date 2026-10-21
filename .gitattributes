@@ -1,0 +1,4 @@
+# Portable payloads and their checked-in checksums must retain exact LF bytes.
+*.json text eol=lf
+*.jsonl text eol=lf
+*.md text eol=lf

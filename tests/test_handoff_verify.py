@@ -46,7 +46,7 @@ def _rewrite_payload(pkg: Path, name: str, text: str) -> None:
     Structural checks only run after checksums pass, so tampering tests
     must keep the files block honest to reach the check under test.
     """
-    (pkg / name).write_text(text)
+    (pkg / name).write_bytes(text.encode("utf-8"))
     import hashlib
 
     digest = hashlib.sha256(text.encode()).hexdigest()

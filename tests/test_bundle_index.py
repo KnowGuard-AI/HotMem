@@ -94,7 +94,7 @@ def test_discover_max_depth(tmp_path: Path):
     # max_depth=1 should only find the top-level bundle
     entries = discover_bundles(root, max_depth=1)
     assert len(entries) == 1
-    assert entries[0].path.endswith("/a")
+    assert Path(entries[0].path).name == "a"
 
 
 # ── 2. Index entries include metadata ─────────────────────────────────────────

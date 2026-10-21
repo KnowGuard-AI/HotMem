@@ -69,14 +69,15 @@ def test_csv_file_uri_scheme(csv_file):
     assert insp.columns == ["id", "vendor", "amount"]
 
 
-def test_csv_handles_quoted_fields_with_embedded_newlines(tmp_path):
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_csv_handles_quoted_fields_with_embedded_newlines(tmp_path, newline):
     """A quoted CSV field containing a newline is one record, not two."""
     path = tmp_path / "quoted.csv"
-    path.write_text('id,note\n1,"line one\nline two"\n2,simple\n')
+    path.write_bytes('id,note\n1,"line one\nline two"\n2,simple\n'.replace("\n", newline).encode())
     insp = inspect_file(str(path), count_rows=True, sample_size=5)
     assert insp.row_count == 2
     assert insp.sample is not None and len(insp.sample) == 2
-    assert insp.sample[0] == {"id": "1", "note": "line one\nline two"}
+    assert insp.sample[0] == {"id": "1", "note": f"line one{newline}line two"}
     assert insp.sample[1] == {"id": "2", "note": "simple"}
 
 
