@@ -39,9 +39,10 @@ from hotmem.db import MemoryDB
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.rerank import Reranker
 from hotmem.search import search_memories
+from hotmem.snapshot import hydrate as snapshot_hydrate
+from hotmem.snapshot import snapshot as snapshot_export
 from hotmem.swap import compute_content_hash
 from hotmem.swap import hydrate as swap_hydrate
-from hotmem.swap import snapshot as swap_snapshot
 from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("mcp_server")
@@ -175,12 +176,14 @@ def create_server(
             ),
             Tool(
                 name="snapshot",
-                description="Export all memories to a JSONL swap file.",
+                description=(
+                    "Export memories to a verified Snapshot v2 directory or JSONL/JSONL.GZ."
+                ),
                 inputSchema=_TOOL_SCHEMAS["snapshot"],
             ),
             Tool(
                 name="hydrate",
-                description="Load memories from a JSONL swap file into HotMem.",
+                description="Restore a verified snapshot directory or JSONL/JSONL.GZ into HotMem.",
                 inputSchema=_TOOL_SCHEMAS["hydrate"],
             ),
             Tool(
@@ -377,16 +380,16 @@ def _handle_memory_health(state: _ServerState, arguments: dict[str, Any]) -> Cal
 
 
 def _handle_snapshot(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
-    """Export all memories to a JSONL swap file."""
+    """Export through the shared CLI/HTTP snapshot format dispatch."""
     swap = arguments.get("file") or state.swap_path or "swap.jsonl"
-    result = swap_snapshot(state.db, swap)
+    result = snapshot_export(state.db, swap)
     return _ok({"exported": result.exported, "path": result.path})
 
 
 def _handle_hydrate(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
-    """Load memories from a JSONL swap file into the database."""
+    """Restore through the shared verify-before-hydrate format dispatch."""
     swap = arguments.get("file") or state.swap_path or "swap.jsonl"
-    result = swap_hydrate(state.db, swap, embedder=state.embedder)
+    result = snapshot_hydrate(state.db, swap, embedder=state.embedder)
     return _ok(
         {
             "loaded": result.loaded,
