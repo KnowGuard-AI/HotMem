@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-21
+
+### Fixed
+
+- Snapshot v2 writes the exact UTF-8/LF bytes used for manifest hashes and sizes,
+  avoiding Windows CRLF checksum failures during restore (#118, #119).
+- Portable UTF-8/LF snapshot and swap I/O, Windows file URI resolution and path
+  confinement, directory fsync handling, and temporary-file descriptor ordering
+  in interchange operations (#119).
+- Regression coverage for snapshot byte integrity, corruption rejection,
+  Unicode, repeat hydration, and compatible embedding reuse (#119).
+
+
 ## [0.2.5] - 2026-09-17
 
 ### Added — session handoff showcase: Codex → HotMem → Claude (#101)
