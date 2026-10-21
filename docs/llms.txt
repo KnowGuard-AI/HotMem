@@ -15,6 +15,7 @@ provenance, lifecycle events, MCP, and SDK/framework integrations.
 - Vision and Canon: https://docs.knowguardai.com/vision-and-canon/
 - Agent memory portability: https://docs.knowguardai.com/agent-memory-portability/
 - Architecture overview: https://docs.knowguardai.com/architecture/
+- Daemon / JSONL cassette / LSD relay direction (planned): https://docs.knowguardai.com/daemon-and-lsd-relay/
 - Snapshot v2 specification: https://docs.knowguardai.com/snapshot-v2/
 - Session handoff: https://docs.knowguardai.com/handoff/
 - API reference: https://docs.knowguardai.com/api/
@@ -49,6 +50,12 @@ HotMem's product direction is interoperable, durable, agent-managed memory that
 can be captured, verified, transferred, and restored across compatible runtimes.
 JSONL is the canonical interchange language; current shipping capability is
 described separately above.
+
+The 2026-10-21 daemon/LSD direction is tracked by GitHub issue #112. JSONL is
+the owner's memory cassette. A shared daemon with scoped disclosure and a
+detachable management/relay view is planned; it is not a shipped security or
+zero-leakage guarantee. The first proposed proof is two clients collaborating
+on shared operations context while private memory stays inaccessible.
 
 ## Suggested description
 

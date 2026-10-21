@@ -69,6 +69,21 @@ remain theirs, remain understandable, and remain able to travel.
 
 ## Canonical principles
 
+### Owner-controlled recorder and JSONL cassette
+
+HotMem is a formal KnowGuard product. Its JSONL format is the memory cassette;
+HotMem is the recorder/player that makes it usable across compatible harnesses.
+Durable memories and their derived semantic knowledge remain under the owner's
+control. A harness receives only the context approved for its task. Information
+released to an external provider can enter that provider's context or logs;
+local storage alone does not establish zero leakage.
+
+The 2026-10-21 [daemon and detachable LSD relay direction](daemon-and-lsd-relay.md)
+records the shared-service boundary, privacy limits, enterprise collaboration
+workflow, and smallest two-client proof under
+[#112](https://github.com/KnowGuard-AI/HotMem/issues/112). These are product
+requirements, not claims that the daemon, authorisation, or relay UI has shipped.
+
 ### 1. JSONL is the language of portable memory
 
 The HotMem JSONL record stream is the canonical interchange language for memory
