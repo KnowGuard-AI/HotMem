@@ -23,12 +23,11 @@ The current MCP stdio process opens the store directly; it does not route
 through FastAPI. The proposed shared daemon extracts common operations behind
 one identity/policy boundary for MCP, CLI/SDK, and management clients. JSONL
 remains the portable memory cassette; SQLite holds live runtime state.
-See [daemon, JSONL cassette, and detachable LSD relay](daemon-and-lsd-relay.md)
+See the [daemon and detachable LSD relay developer guide](daemon-and-lsd-relay.md)
 for current-code observations, concrete transport/latency options, resilience
 requirements, and the first two-client experiment tracked by
-[#112](https://github.com/KnowGuard-AI/HotMem/issues/112). This is a proposed
-architecture; runtime authorisation and the relay UI are not implemented by
-this documentation change.
+[#112](https://github.com/KnowGuard-AI/HotMem/issues/112). Shared runtime
+authorisation and the relay UI remain proposed capabilities.
 
 ## Memory records
 

@@ -1,96 +1,96 @@
-# Owned memory: daemon, JSONL cassette, and LSD relay
+# HotMem: carry the brain, change the player
 
-Status: owner-approved product direction and next experiment, recorded on
-2026-10-21. This document does not announce implemented daemon, access-control,
-UI, or remote-sharing capabilities. The holder for this discussion and its
-showcase work is [#112](https://github.com/KnowGuard-AI/HotMem/issues/112).
-The [Vision and Canon](vision-and-canon.md) remains the product constitution;
-this note preserves the operational decisions, proposals, and open questions
-from this discussion in one place.
+An incident is contained. The next shift is coming online. One agent has the
+investigation, another has the recovery runbook, and the person taking over
+needs to know why the team chose to roll back. They should be able to continue
+from that decision, with its evidence and permissions intact.
 
-## Decisions and product thesis
+This is the experience HotMem is being built to deliver: a working brain that
+belongs to its owner and can travel between compatible tools. **JSONL is the
+memory cassette. HotMem is the recorder and player. LSD is the detachable
+interface that keeps the recorder in view.**
 
-1. **JSONL is the memory cassette.** HotMem is the recorder/player. SQLite is
-   the live runtime store; indexes and caches help operate it. The portable
-   JSONL representation, with its manifest and any required attachments, must
-   preserve the knowledge that matters when changing machines or harnesses.
-   A JSONL record that references an external file does not itself contain that
-   file. Complete portability must account for those dependencies explicitly.
-2. **The daemon is the product foundation.** It must have dependable lifecycle,
-   durable writes, recovery, concurrent clients, enforced access boundaries,
-   bounded resource use, and measured performance. Feature completeness means
-   satisfying a finite operational contract with observed evidence.
-3. **LSD is the detachable player and relay interface.** It connects to HotMem
-   to show and control authorised activity. Closing it must leave the daemon
-   running. A small management surface and detachable view use the same backend.
-4. **Prove the enterprise collaboration workflow first.** Preserve this
-   discussion in docs and link it from #112; avoid another large roadmap or
-   platform-by-platform implementation programme before the first useful test.
+For a developer, the job is concrete. Keep memory durable. Give each client the
+right view. Make the service survive a disconnected agent, a closed window, and
+a restart. Then show two people and their agents continuing useful work.
 
-HotMem is a formal KnowGuard product. KnowB is a shadow brand, not HotMem's
-product owner or a required runtime service. The KnowB connector was not exposed
-in this session; no external brand material was retrieved. LSD's role here is
-the owner's stated direction, not a verified claim about an existing LSD build.
-The thesis is enterprise and real collaborative work: continuity of decisions,
-operations, ownership, and access across people and agents. Artifact generation
-and developer productivity are not the product thesis. Grok remains excluded
-from the integration/showcase programme.
+!!! info "Implementation status — 2026-10-21"
 
-## Ownership includes derived knowledge
+    This guide defines the shared daemon and LSD relay direction for v0.2.6,
+    tracked by [#112](https://github.com/KnowGuard-AI/HotMem/issues/112).
+    Local storage, retrieval, snapshots, and verified handoff are existing
+    foundations. The shared daemon, runtime authorisation, detachable UI, and
+    remote collaboration below still need implementation and runtime evidence.
+    Examples marked **current runtime** use existing interfaces.
 
-The cassette analogy asks whether every player should retain copies, traces,
-fingerprints, embeddings, or a semantic model of a person's memories. HotMem's
-direction is to keep the durable brain under its owner's control and give each
-harness only the context approved for its task.
+## The cassette: knowledge you can carry
 
-Raw memories, summaries, embeddings, relationship links, inferred structures,
-and access history all need that boundary. Sanitising a summary does not
-automatically make it safe: combinations of permitted facts can reveal more
-than an individual fact. An inferred or meta-memory needs source provenance,
-reviewable status, and access restrictions at least as strong as its sources.
-Relationships stay explicit linked records, not a new graph database.
+A cassette keeps the recording when you change players. HotMem applies that
+idea to the decisions, facts, preferences, provenance, and operational context
+that make an agent useful beyond a single conversation.
 
-Disclosure policy belongs on the HotMem service boundary, before a result,
-export, log, or UI stream leaves the protected store. Agent instructions alone
-cannot enforce it. Raw processing must stay in a trusted local environment
-when it cannot be disclosed; any external embedding or inference step also
-counts as disclosure. The goal includes approved clones, remote copies, and
-sharing with teammates or friends under the owner's control.
+JSONL is the canonical portable record stream. A manifest adds identity,
+compatibility information, and integrity checks. Attachments or declared file
+dependencies carry material that a record only references. A file URI inside
+JSONL is a pointer; a portable package must account for the bytes behind it.
+See [Snapshot v2](snapshot-v2.md) and [memory portability](agent-memory-portability.md)
+for the existing formats and restore behaviour.
 
-The practical limit is explicit: a cloud agent can retain context returned to
-it, and HotMem cannot prevent a provider seeing information typed directly into
-that provider. Revocation stops future access; it cannot erase already released
-copies. The promise is controlled, minimal disclosure, not guaranteed absence
-of traces in another system. The existing redacted handoff path is not a
-universal runtime privacy filter.
+SQLite holds live runtime state. Indexes and caches make that state useful at
+speed. They serve the cassette contract: knowledge should remain inspectable
+and recoverable when a machine, model, or harness changes. Full-fidelity
+round trips still depend on the portable-state work linked at the end of this
+guide; the current database cannot simply be discarded on that assumption.
 
-## What the current code establishes
+Ownership covers what the system learns about the recording, too. Summaries,
+embeddings, relationships, inferred structures, and access history can reveal
+as much as the original text. A derived memory needs provenance, a reviewable
+status, and access restrictions at least as strong as its sources. Combining
+permitted facts can also reveal a sensitive relationship. Relationships remain
+explicit linked records, without requiring a graph database.
 
-These observations describe the checkout reviewed on 2026-10-21; they are code
-inspection, not a fresh runtime test:
+## Start with the current runtime
 
-| Existing path | Observation | Consequence for this work |
-| --- | --- | --- |
-| [`mcp_server.py`](https://github.com/KnowGuard-AI/HotMem/blob/3994821/src/hotmem/mcp_server.py) | MCP uses stdio and opens `MemoryDB` directly. | MCP does not inherently make an HTTP round trip; a host-managed process is not yet the proposed shared daemon. |
-| [`server.py`](https://github.com/KnowGuard-AI/HotMem/blob/3994821/src/hotmem/server.py) | FastAPI opens the store and runs HTTP handlers; server state is module-global. | Reuse existing operations, but make service ownership/lifetime explicit before relying on multiple runtimes or clients. |
-| [`client.py`](https://github.com/KnowGuard-AI/HotMem/blob/3994821/src/hotmem/client.py) | Python clients reuse `httpx.Client` / `AsyncClient`. | Preserve connection reuse; do not claim that every SDK call opens a new connection. |
-| [`cli.py`](https://github.com/KnowGuard-AI/HotMem/blob/3994821/src/hotmem/cli.py) | Several commands operate on a database directly; MCP can use a temporary store without explicit configuration. | Shared-daemon mode needs one explicit endpoint/store and actionable failures, not silent fallback. |
-| [`search.py`](https://github.com/KnowGuard-AI/HotMem/blob/3994821/src/hotmem/search.py) | Hybrid ranking returns memory text using relevance and stored importance. | Scoped disclosure and access-driven scoring are not demonstrated by this path. |
-| Snapshot/handoff | Portable formats, verification, and redacted consented handoff exist. | Preserve their contracts; export privacy and transport security are different guarantees. |
+You can already run the storage and retrieval foundation locally. In a clean
+directory, using an environment with HotMem installed, start the HTTP sidecar:
 
-The full vision is not complete merely because storage and retrieval exist.
-Client identity, runtime authorisation, shared-service lifecycle, the LSD UI,
-and remote collaboration still require implementation and observed tests.
-Full-fidelity portable state also remains tied to #94–#100; do not describe the
-current SQLite store as entirely disposable before those criteria are met.
+```bash
+hotmem serve --mount ./incident-brain
+```
 
-## Unified backend and operation routing
+The mount makes the store selection explicit. In a second terminal, save a
+synthetic operations decision and retrieve it:
 
-The proposed daemon owns one configured brain/store and its operation context.
-Extract shared memory operations from transport handlers, retaining the existing
-storage, search, snapshot, hydration, and handoff implementations underneath.
-Transport code translates requests; it must not maintain independent policy,
-ranking, or persistence rules.
+```bash
+curl --fail -sS http://127.0.0.1:8711/v1/add \
+  -H 'Content-Type: application/json' \
+  -d '{"identifier":"ops/demo","fact":"Incident DEMO-17: roll back the worker release before resuming the queue."}'
+
+curl --fail -sS http://127.0.0.1:8711/v1/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"DEMO-17 worker rollback","top_k":1,"max_chars":500}'
+
+curl --fail -sS http://127.0.0.1:8711/v1/health
+```
+
+The write returns a memory identifier and content hash. Search returns ranked
+memory objects, and health reports the selected store. This gives you a real
+starting point for the incident workflow. Use synthetic data on loopback: this
+example does not establish separate client permissions or a managed daemon.
+The default hash embedder requires no model download; semantic model support
+is a separate configuration choice.
+
+Current MCP takes a different route: the stdio server opens `MemoryDB` directly.
+It does not call FastAPI. Several CLI operations also open the database directly,
+while the Python SDK uses persistent HTTP clients. These paths share useful
+building blocks, but do not yet form the single controlled service below.
+
+## The recorder: one daemon, one operation boundary
+
+In the target architecture, the recorder stays running while clients come and
+go. It owns the configured brain/store and the resources needed to operate it.
+A CLI command, an MCP call, and an action in the management window reach the
+same memory operations under the same rules.
 
 ```text
 agents / MCP relay     CLI / SDK     management UI / detachable LSD
@@ -104,187 +104,238 @@ agents / MCP relay     CLI / SDK     management UI / detachable LSD
               JSONL cassette / verified package
 ```
 
+Extract the shared operations from the transport handlers. Keep existing
+storage, retrieval, snapshot, hydration, and handoff implementations underneath.
+An adapter translates a request; the service decides what the caller may do
+and how that operation changes or exposes memory. This puts persistence,
+provenance, policy, and failure handling in one place.
+
 The first port-driven candidate is the existing loopback HTTP service, with a
-thin stdio MCP relay for clients that require stdio. A native HTTP MCP endpoint
-can use the same service if the tested clients need it. These are proposals,
-not commands or interfaces available today. Keep a single application boundary;
-there is no demonstrated need for additional microservices.
+thin stdio relay for MCP hosts that need it. Native HTTP MCP, if the selected
+clients need it, should reach the same operation layer. These are proposed
+seams, not extra commands available today. Begin with one service; additional
+processes or protocols need an observed reason to exist.
 
-In daemon mode, all authorised memory reads, writes, relationship changes,
-score updates, imports, exports, and hydration go through that boundary.
-Background work uses the same policy and operations. CLI/SDK clients select
-the endpoint and verify the intended store. An explicitly supported offline
-maintenance mode would need exclusive ownership rather than bypassing the live
-daemon. Preserve existing embedded use through a documented compatibility path;
-it must not be described as having daemon policy enforcement automatically.
+In daemon mode, reads, writes, relationship changes, score updates, imports,
+exports, and hydration pass through this boundary. Background work follows the
+same rules. Clients select an endpoint and verify the intended brain. A failure
+must identify the unavailable transport, process, or store; silently opening a
+temporary or different database would break continuity.
 
-Daemon authority does not make the machine a sandbox. A harness able to read
-the SQLite file, backing files, keys, or process memory can bypass an API.
-Protect those resources with OS permissions and, where required, separate
-identities or isolation. Two clients sharing an OS user is a functional test,
-not evidence against a malicious process running with the owner's privileges.
+Existing embedded use needs a documented compatibility path. Offline
+maintenance needs exclusive store ownership while the daemon is stopped or
+otherwise safely excluded. Neither route automatically inherits daemon policy.
 
-## Latency and resilience: concrete options, measured in order
+## Follow a memory from capture to recall
 
-Loopback requests do not incur an internet round trip. They still have protocol,
-serialisation, scheduling, and copying costs; a stdio-to-daemon relay adds a hop
-relative to today's direct MCP path. FastAPI is not, by itself, evidence of the
-dominant cost. Separate transport time from queueing, embedding, retrieval,
-ranking, persistence, and response construction before choosing another stack.
+Return to the incident. The investigation agent has a detailed private note;
+the next shift needs an approved rollback decision. That decision should enter
+HotMem with its source attached, survive a restart, and be retrievable without
+giving the second agent the private investigation.
 
-Start with the smallest comparison: the same small synthetic store, active
-embedder, bounded query, and two clients using current direct operations versus
-the existing loopback HTTP path with reused connections. Record cold startup
-separately from repeated warm calls, sample count, payload size, elapsed time,
-and operation timings where already available. This baseline answers whether
-transport is worth optimising; it does not prove the proposed daemon exists.
+The proposed write path starts by authenticating the client and authorising
+the selected source and operation. Where an adapter extracts memory, it reads
+only that approved source and performs sensitive processing locally. The
+service validates the record and provenance, commits the write, then returns
+an acknowledgement and a scoped activity event. A durable write cannot be
+acknowledged before it is committed.
 
-Priorities for the implementation, justified by that comparison:
+Recall starts at the same boundary. Apply the client's scope to candidate
+selection, retrieve and rank permitted context, and return a bounded result.
+Exports, direct-ID lookups, metadata, file hydration, and activity streams need
+the same protection. Hiding a record from search alone does not protect it.
 
-- Keep the store and active model/index resources warm in the daemon; reuse
-  connections and avoid per-request model loading or database creation.
-- Return bounded, policy-approved context rather than shipping the whole brain
-  to a harness. Resolve file-backed payloads lazily and avoid unnecessary copies.
-- Keep slow extraction, embedding, snapshots, and imports from blocking health
-  checks or unrelated bounded reads; use bounded work/concurrency and explicit
-  cancellation. Do not acknowledge a durable write before it is committed.
-- Add batching only if observed request chatter warrants it. Any result cache
-  must be scoped to identity/policy/store revision and invalidated on changes;
-  it must never serve data after a permission is revoked.
-- If measured loopback overhead matters, compare a Unix-domain socket or Windows
-  named pipe against the same operation contract. Do not introduce a new wire
-  protocol, native rewrite, or mandatory broker based on assumed speed.
-- Remote access should send the approved result over a reused secure connection,
-  with bounded timeouts and visible offline state. Avoid per-call whole-store
-  transfer; remote replicas need the existing identity/replay contracts first.
+External embedding or inference calls also disclose information. Raw memory
+that cannot be shared must remain in a trusted local environment. Routine logs
+should describe operations without retaining private payloads or sensitive
+identifiers. Caches, errors, counts, and combined views must respect that
+boundary too.
 
-Resilience requires explicit start/status/stop/reconnect behaviour, a stable
-endpoint, a store lock/ownership rule, bounded contention, graceful shutdown,
-and recovery after a process failure. Service startup is an explicit owner/
-service-manager operation, not a process spawned by a memory tool call. A lost
-response makes a write's outcome
-ambiguous: do not blindly retry a mutation without identity/deduplication
-semantics. A disconnected agent or closed UI must not stop the service.
-Resource and latency budgets must be recorded from representative runs before
-claiming performance acceptance. No measurements have been collected for this
-proposal. Do not add broad CI, telemetry services, or a benchmark programme to
-block the first two-client proof.
+Once context reaches a cloud agent, it may enter that provider's history or
+logs. Information typed directly into the agent is already there. Revocation
+can stop future reads; it cannot erase released copies. HotMem's defensible
+promise is owner-controlled, minimal disclosure. Existing redacted handoff is
+a useful foundation, not a universal runtime filter.
 
-## Security and the detachable LSD surface
+## The detachable player: keep the recorder in view
 
-The daemon must identify clients and enforce their permitted brain, namespace,
-operations, and disclosure scope. Privileged management requires distinct
-authority from an agent's memory access. Loopback, a private overlay, a browser
-origin check, and a client-supplied actor name are not authentication. Scope
-must apply to search, direct IDs, metadata, file hydration, export, and activity
-streams as well as ordinary reads/writes.
+The operator needs to know which brain is loaded, which agents are connected,
+and whether the handoff is moving. The default management view should answer
+those questions directly: service health, cassette/store identity, client
+permissions, pending privileged actions, and recent authorised activity.
 
-Keep payloads and sensitive identifiers out of routine logs and streams. Shared
-caches, errors, counts, and export diagnostics must respect the same scope.
-Credential storage, permissions, and retention are part of the first supported
-deployment's boundary; checksum integrity does not establish encryption or
-signing. Browser management must address authentication and cross-origin
-requests before privileged actions become available.
+LSD carries that view into a detachable player. Keep it beside the incident
+channel, open the relevant stream, and return to full management when needed.
+Both views use the daemon. Closing either window leaves the recording and
+other clients running.
 
-The default management UI should show daemon health, the selected cassette,
-connected clients, permissions, pending privileged actions, and recent scoped
-activity. The detachable LSD view uses that same backend and can later expose:
+The first useful relay is small: actual connection state and permitted memory
+operations. From that base, contextual chat can follow an individual stream;
+combined discovery can connect authorised streams; alerts can surface denied
+access, failures, or suspicious activity. Source-linked insights can reveal
+the brain's structure without granting access to every underlying note.
 
-- individual agent streams and contextual chat with the permitted stream;
-- combined discovery/insights over explicitly authorised streams;
-- actionable alerts for denied access, failures, or suspicious activity;
-- memory use and any explained effect on relevance scoring.
+This view knows what HotMem observes. A memory connection cannot report every
+action inside a harness. Shared chat must not import another user's private
+stream. Access history can inform relevance, but repeated reads are evidence
+of use rather than truth. How retries count and how access changes a score
+remain explicit choices; they do not block the first relay proof.
 
-Report only activity observed at HotMem. A memory connection does not reveal
-every action inside a harness. Shared views and contextual chat must not merge
-private content into another user's context. Discovery and inferred insights
-must retain sources and policy. Access frequency is evidence of use, not truth;
-the scoring rule and distinction between one retry and a new use remain open.
-That scoring work is not required for the first relay test.
+## Make the fast path dependable
 
-## One enterprise workflow, then stop and assess
+The recorder should be ready when a client asks. Keep the configured store,
+model, and useful index resources warm; reuse connections and avoid opening
+or rebuilding them per operation. Resolve file-backed payloads only when
+needed, and return the smallest useful approved context.
 
-Use a synthetic operations incident. Client A can access a private incident
-note containing a canary value; client B can access only a shared, approved
-runbook/decision. Both connect to the same daemon, with a simple relay view.
+A local HTTP call has no internet round trip, but still pays for serialisation,
+copying, scheduling, and protocol work. A stdio-to-daemon relay adds a hop to
+today's direct MCP path. Measure that cost alongside queueing, embedding,
+retrieval, ranking, persistence, and response construction. FastAPI alone does
+not tell you which part is slow. Current Python clients already reuse
+`httpx.Client` and `AsyncClient`; preserve that behaviour.
 
-| Small test | Expected result / stop condition |
+The next performance experiment is narrow: one small synthetic store, the same
+active embedder and bounded query, and two clients. Compare direct operations
+with warm loopback HTTP using reused connections. Separate cold startup from
+warm calls; record sample count, payload size, elapsed time, and operation
+timings already available. No measurements have been collected for the
+proposed architecture yet.
+
+Let the result choose the next optimisation. If request chatter dominates,
+consider batching. If loopback transport dominates, compare a Unix-domain
+socket or Windows named pipe with the same operation contract. Any result cache
+must be keyed by client/policy/store revision and invalidated on relevant
+changes, including revocation. Remote requests should reuse secure connections
+and transfer approved results. Replicas need the existing identity and replay
+contracts before they can maintain a reliable copy.
+
+Responsiveness also depends on scheduling. Slow extraction, imports, snapshots,
+and embedding must not hold health checks or unrelated bounded reads hostage.
+Use bounded concurrency, queues where justified, and explicit cancellation.
+Keep resource consumption observable without adding a telemetry service or
+broad benchmark programme to block the first test. A new protocol, broker, or
+native rewrite needs evidence that it resolves an actual bottleneck.
+
+Dependability continues through shutdown. Define start, status, stop, reconnect,
+store ownership, bounded contention, and recovery. Startup is an explicit
+operator or service-manager action, not a process spawned by a memory tool.
+A lost response leaves a mutation's outcome uncertain: retries need stable
+identity and deduplication semantics. A client disconnect must not stop the
+service. Set latency and resource budgets from representative evidence before
+declaring performance acceptance.
+
+## Put authority at the right boundary
+
+An agent's permission to retrieve a runbook should not let it approve its own
+access to the investigation. Management authority must be distinct from
+ordinary memory access. The initial deployment needs an explicit credential
+and scope model, protected credential storage, and defined retention.
+Loopback, an overlay network, an actor-name parameter, and a browser origin
+check are not authentication. Browser management needs both authenticated
+authority and protection against cross-origin requests.
+
+The operating system is part of that boundary. A harness that can read the
+database, backing files, keys, or process memory can bypass the API. Protect
+those resources with permissions and, where required, separate identities or
+isolation. Two clients under the owner's OS account can demonstrate functional
+authorisation; they do not demonstrate protection from a malicious process
+with that owner's privileges. Checksums establish integrity, not encryption
+or signing.
+
+## First mission: hand the incident to the next shift
+
+Use a synthetic incident with one private canary note and one approved shared
+runbook. Client A can access the private investigation. Client B can use the
+shared operations context. Both connect to one daemon, with a small relay view.
+
+| Action | Evidence required |
 | --- | --- |
-| A writes an approved shared decision; B retrieves it. | One service/store, visible provenance, no manual copying or harness-owned shadow store. |
-| B tries the private note through search, direct lookup, export, and a forbidden mutation. | The service denies access; protected content is absent from responses and B's logs/UI stream. Check every exposed route in this deployment. |
-| Disconnect/reconnect one client and close/reopen the detachable view. | The other client and daemon continue; the view resumes permitted activity and shows real disconnection state. |
-| Stop/restart the daemon and inspect an acknowledged write. | The write survives; clients reconnect explicitly; safe retry does not create a duplicate. Include one bounded abrupt-stop recovery check. |
-| Export JSONL/verified package and restore into a separate clean store. | The permitted decision and provenance survive; omissions/dependencies are visible and repeat hydration is safe under the supported contract. |
-| Repeat a small bounded workload with both clients. | Record latency/resource observations; distinguish transport from operation costs and report remaining uncertainty. |
+| A records the approved rollback decision; B retrieves it. | Both use the same service/store, with visible provenance and no manual copying. |
+| B attempts private search, direct lookup, export, and mutation. | Each exposed route enforces scope; the canary stays absent from B's responses, logs, and relay stream. |
+| Disconnect/reconnect A; close/reopen the detachable view. | B keeps working. The daemon stays available and the view reports real connection state. |
+| Restart the daemon, including one bounded abrupt-stop check. | Acknowledged writes survive; reconnection is explicit and safe retries do not duplicate logical memory. |
+| Export permitted JSONL/package content and restore a separate clean store. | The decision and provenance survive; dependencies/omissions are visible and repeat hydration follows the supported idempotence contract. |
+| Repeat a small bounded workload with both clients. | Record latency/resource observations, separating transport from operation cost and stating remaining uncertainty. |
 
-This is the next experiment, not proof of universal enterprise hardening. A
-port/storage-only test does not pass authorisation acceptance, and an HTTP
-script does not prove two real harnesses work. Start with two test clients to
-isolate the backend; then use two actual configured harnesses for the claimed
-showcase. If policy, lifecycle, or the relay is absent, report that failure/gap
-and implement the smallest missing slice before claiming success.
+Start with two test clients to isolate the backend. Use two actual configured
+agent harnesses before claiming the two-agent showcase works. A working port
+does not establish authorisation, and a missing UI cannot count as a completed
+relay. Record failures, implement the smallest missing slice, and repeat the
+affected check. Stop when this local workflow answers its question; the next
+experiment should follow a demonstrated gap.
 
-Once this slice passes, assess the next concrete uncertainty. Do not wait for
-every platform, remote provider, insight feature, or full UI before delivering
-the useful local result.
+## Four views of the same working brain
 
-## Making each brain visible
+The incident is one entry point. The same foundation should make increasingly
+collaborative work visible, with ownership and access carried through each view.
 
-| Aspect | Concrete collaborative behaviour | Status in this discussion |
+| View | Experience | Delivery boundary |
 | --- | --- | --- |
-| Digital brain | An owner changes harnesses while keeping the JSONL cassette and approved working context. | Existing portability foundation; daemon/disclosure proof pending. |
-| Company/ops brain | Different agents collaborate on shared decisions while private material stays scoped. | First two-client experiment above. |
-| Remote brain | An authorised remote device/team member reaches a selected brain or deliberate replica. | Follow-on after local identity/policy proof; sync is not assumed. |
-| Overmind | An authorised aggregate view across selected brains and agent streams, with source-linked insights. | Product direction; no automatic global privileges or graph database. |
+| Digital brain | Change harnesses while carrying the cassette and approved context. | Existing portability foundation; shared-daemon disclosure proof pending. |
+| Company/ops brain | Continue shared decisions while private investigation stays scoped. | The first two-client incident workflow. |
+| Remote brain | An authorised device or teammate reaches a selected brain or replica. | Follow local identity/policy proof; remote synchronisation is a separate capability. |
+| Overmind | Follow authorised activity across selected brains and inspect source-linked insights. | Product direction; aggregate views inherit access boundaries. |
 
-Cloning, sharing, and remote synchronization are different operations. A
-selective share should not grant an entire cassette; a clone is an explicit
-copy with independent consequences. Revocation and ownership must be visible.
+A selective share grants selected knowledge to an audience. A clone creates
+an explicit copy with independent consequences. Synchronisation maintains a
+relationship between changing stores. Keep these actions distinct and make
+their ownership and revocation behaviour visible. The same controls allow
+personal sharing with a friend without granting an entire cassette.
 
-## Flats study: relevant patterns, bounded adoption
+## What Flats teaches this design
 
-The supplied LinkedIn post points to
-[`gosuda/flats`](https://github.com/gosuda/flats). Review date: 2026-10-21;
-source revision:
-[`d35a4f49bde41cf701623f91afdd6c8a86b1cfcb`](https://github.com/gosuda/flats/tree/d35a4f49bde41cf701623f91afdd6c8a86b1cfcb).
-This was a documentation/source review, not an installed or tested deployment.
-
-Its [README](https://github.com/gosuda/flats/blob/d35a4f49bde41cf701623f91afdd6c8a86b1cfcb/README.md)
-describes a resident local host with CLI/API/MCP/console access. Approval applies
-to particular lifecycle transitions; not every live collaborative edit waits
-for publication. Its console trust model explicitly distinguishes CSRF checks
+[`gosuda/flats`](https://github.com/gosuda/flats) is a useful comparison for the
+service and sharing experience. Its [README](https://github.com/gosuda/flats/blob/d35a4f49bde41cf701623f91afdd6c8a86b1cfcb/README.md)
+describes a resident local host with CLI, HTTP, MCP, and console surfaces.
+Approval applies to specific lifecycle transitions; live collaboration is not
+uniformly gated by publication. Its console model distinguishes CSRF protection
 from authentication.
 
 The [agent guide](https://github.com/gosuda/flats/blob/d35a4f49bde41cf701623f91afdd6c8a86b1cfcb/docs/agents.md)
-describes a stdio relay to the selected host and read-only compatibility/setup
-discovery. The [networking guide](https://github.com/gosuda/flats/blob/d35a4f49bde41cf701623f91afdd6c8a86b1cfcb/docs/networking.md)
-confirms per-flat NetBird peers, private access policies, and separately enabled
-public exposure. Network reachability and publication are separate controls.
+documents a stdio relay to a selected host and read-only compatibility discovery.
+The [networking guide](https://github.com/gosuda/flats/blob/d35a4f49bde41cf701623f91afdd6c8a86b1cfcb/docs/networking.md)
+describes per-flat NetBird peers, private access policy, and separately enabled
+public exposure. Reachability and publication are separate controls.
 
-Our interpretation for HotMem:
+For HotMem, the useful pattern is an owner-run service with thin clients,
+clear approvals, and deliberately scoped sharing. An approval should identify
+the exact memory version/selection and audience; ordinary permitted reads
+should remain fluid. A future private overlay could connect a team's approved
+devices, while HotMem still enforces application-level access.
 
-- A stable owner-run service, thin clients, and detachable management fit the
-  daemon/relay direction without requiring a Go rewrite or single-binary pledge.
-- Approval should bind to the exact selected memory share/export and audience.
-  Routine permitted memory use should not require clicking through every call.
-- A future private overlay could connect approved team devices to a selected
-  brain. It complements application authorisation; it cannot replace it.
-- A shared incident report or decision brief can be a useful artifact view over
-  authorised memories. HotMem should not become a website/artifact hosting
-  platform to demonstrate that workflow.
+A shared incident brief can make this collaboration tangible by revealing
+authorised decisions and evidence. Enterprise and real collaborative workflows
+are the focus, rather than developer productivity or artifact hosting. This
+design introduces no Flats/NetBird dependency, public tunnel, Go rewrite, or
+single-binary commitment. The comparison is a source/documentation review dated
+2026-10-21 at revision
+[`d35a4f49`](https://github.com/gosuda/flats/tree/d35a4f49bde41cf701623f91afdd6c8a86b1cfcb),
+not evidence from running Flats.
 
-No Flats/NetBird dependency, installation, public tunnel, or private-network
-deployment is required by this note or the first local test.
+## Implementation map
 
-## Issue ownership and remaining choices
+HotMem is a formal KnowGuard product; KnowB is a shadow brand and no required
+runtime service. The [Vision and Canon](vision-and-canon.md) defines the enduring
+product commitments. [#112](https://github.com/KnowGuard-AI/HotMem/issues/112)
+holds this guide's v0.2.6 daemon/relay direction and implementation evidence.
+Grok remains excluded from the integration/showcase programme.
 
-[#112](https://github.com/KnowGuard-AI/HotMem/issues/112) holds today's additional
-daemon/relay/showcase discussion. Link implementation evidence back there and
-keep this doc authoritative for these decisions. Existing
-[#109](https://github.com/KnowGuard-AI/HotMem/issues/109) (host setup),
-[#110](https://github.com/KnowGuard-AI/HotMem/issues/110) (export privacy), and
-[#111](https://github.com/KnowGuard-AI/HotMem/issues/111) (session context)
-retain their acceptance criteria. Portable-state work remains in
+Begin with these existing code boundaries, inspected on 2026-10-21 at
+[main revision `c6ed9ae`](https://github.com/KnowGuard-AI/HotMem/tree/c6ed9ae60bf9ee21320ede63c4357d7cb34c1633):
+
+| Component | Starting point |
+| --- | --- |
+| [`mcp_server.py`](https://github.com/KnowGuard-AI/HotMem/blob/c6ed9ae60bf9ee21320ede63c4357d7cb34c1633/src/hotmem/mcp_server.py) | Direct stdio/database operations to connect to the shared service. |
+| [`server.py`](https://github.com/KnowGuard-AI/HotMem/blob/c6ed9ae60bf9ee21320ede63c4357d7cb34c1633/src/hotmem/server.py) | HTTP handlers and module-global state to separate into explicit runtime ownership. |
+| [`client.py`](https://github.com/KnowGuard-AI/HotMem/blob/c6ed9ae60bf9ee21320ede63c4357d7cb34c1633/src/hotmem/client.py) | Reused HTTP clients to retain behind the common endpoint contract. |
+| [`cli.py`](https://github.com/KnowGuard-AI/HotMem/blob/c6ed9ae60bf9ee21320ede63c4357d7cb34c1633/src/hotmem/cli.py) | Explicit store/endpoint selection and direct-database compatibility paths. |
+| [`search.py`](https://github.com/KnowGuard-AI/HotMem/blob/c6ed9ae60bf9ee21320ede63c4357d7cb34c1633/src/hotmem/search.py) | Hybrid retrieval/stored importance; runtime scoping and access-driven scoring are not established here. |
+
+Host setup is tracked in [#109](https://github.com/KnowGuard-AI/HotMem/issues/109),
+export privacy in [#110](https://github.com/KnowGuard-AI/HotMem/issues/110), and
+session context in [#111](https://github.com/KnowGuard-AI/HotMem/issues/111).
+Portable-state acceptance remains in
 [#94](https://github.com/KnowGuard-AI/HotMem/issues/94),
 [#95](https://github.com/KnowGuard-AI/HotMem/issues/95),
 [#96](https://github.com/KnowGuard-AI/HotMem/issues/96),
@@ -292,22 +343,20 @@ retain their acceptance criteria. Portable-state work remains in
 [#98](https://github.com/KnowGuard-AI/HotMem/issues/98),
 [#99](https://github.com/KnowGuard-AI/HotMem/issues/99), and
 [#100](https://github.com/KnowGuard-AI/HotMem/issues/100).
-This discussion does not mark any implementation work complete.
 
-The owner wants v0.2.6 aligned on the secure daemon and a minimal management/
-detachable-relay experience. This extends #112's earlier host-setup scope;
-the first local slice is the implementation focus. The broader features remain
-recorded product direction rather than automatic release blockers. The
+The immediate focus is the secure shared service and a minimal management/
+detachable-relay experience. Broader remote and insight features retain their
+place without becoming automatic blockers for the first local proof. The
 [Hermes showcase #70](https://github.com/KnowGuard-AI/HotMem/issues/70),
 [OpenClaw boundary #71](https://github.com/KnowGuard-AI/HotMem/issues/71) and
 [showcase #72](https://github.com/KnowGuard-AI/HotMem/issues/72),
 [walk #105](https://github.com/KnowGuard-AI/HotMem/issues/105),
 [deep map #106](https://github.com/KnowGuard-AI/HotMem/issues/106), and
 [platform roadmap #113 with children #114–#117](https://github.com/KnowGuard-AI/HotMem/issues/113)
-remain linked follow-ons rather than prerequisites for that experiment.
+remain linked follow-ons.
 
-Still to settle through implementation/evidence: the initial client credential
-and scope model; the first supported service-manager/platform combination;
-measured latency/resource budgets; the smallest detachable UI packaging; and
-the next remote collaboration boundary. Preserve these uncertainties rather
-than silently substituting authentication, UI, or performance claims.
+The remaining choices are specific: the first credential/scope model, supported
+service-manager/platform combination, measured latency/resource budgets,
+detachable UI packaging, and the next remote collaboration boundary. Resolve
+them through working slices and recorded results. This guide preserves the
+2026-10-21 product decisions; it does not complete those implementation tickets.
