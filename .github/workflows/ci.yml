@@ -7,6 +7,40 @@ on:
     branches: [main]
 
 jobs:
+  windows-core:
+    name: Windows core (3.12)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v4
+      - name: Build and install the wheel in a clean environment
+        shell: pwsh
+        run: |
+          uv build --wheel --out-dir dist/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv venv .venv-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wheel = (Get-ChildItem dist/windows/*.whl).FullName
+          uv pip install --python .venv-windows/Scripts/python.exe "$($wheel)[dev,mcp,okf]"
+          exit $LASTEXITCODE
+      - name: Record the installed package and native environment
+        run: |
+          .venv-windows/Scripts/python.exe -c "import hotmem, importlib.metadata as m, json, platform, sys; from pathlib import Path; assert 'site-packages' in str(Path(hotmem.__file__)); print(json.dumps({'platform': platform.platform(), 'machine': platform.machine(), 'python': sys.version, 'hotmem': m.version('hotmem'), 'module': hotmem.__file__, 'source': '${{ github.sha }}', 'packages': {p: m.version(p) for p in ['mcp', 'httpx', 'fastapi', 'uvicorn']}, 'distribution': m.distribution('hotmem').read_text('direct_url.json')}, indent=2))"
+          .venv-windows/Scripts/hotmem.exe --version
+      - name: Run the complete core, MCP, and interchange suite
+        run: .venv-windows/Scripts/python.exe -m pytest -q -ra --junitxml=windows-results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-core-3.12
+          path: windows-results.xml
+
   test:
     runs-on: ubuntu-latest
     strategy:
