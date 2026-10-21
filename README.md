@@ -73,6 +73,9 @@ pip install hotmem
 uv pip install hotmem
 ```
 
+For native Windows and MCP setup, see the
+[PowerShell walkthrough and qualification boundary](docs/quickstart.md#windows-qualification).
+
 ## Quick Start
 
 ```bash
