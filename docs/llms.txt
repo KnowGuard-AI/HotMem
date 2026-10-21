@@ -15,7 +15,7 @@ provenance, lifecycle events, MCP, and SDK/framework integrations.
 - Vision and Canon: https://docs.knowguardai.com/vision-and-canon/
 - Agent memory portability: https://docs.knowguardai.com/agent-memory-portability/
 - Architecture overview: https://docs.knowguardai.com/architecture/
-- Daemon / JSONL cassette / LSD relay direction (planned): https://docs.knowguardai.com/daemon-and-lsd-relay/
+- Daemon / JSONL cassette / LSD relay developer guide (shared daemon planned): https://docs.knowguardai.com/daemon-and-lsd-relay/
 - Snapshot v2 specification: https://docs.knowguardai.com/snapshot-v2/
 - Session handoff: https://docs.knowguardai.com/handoff/
 - API reference: https://docs.knowguardai.com/api/

@@ -78,9 +78,9 @@ control. A harness receives only the context approved for its task. Information
 released to an external provider can enter that provider's context or logs;
 local storage alone does not establish zero leakage.
 
-The 2026-10-21 [daemon and detachable LSD relay direction](daemon-and-lsd-relay.md)
-records the shared-service boundary, privacy limits, enterprise collaboration
-workflow, and smallest two-client proof under
+The [daemon and detachable LSD relay developer guide](daemon-and-lsd-relay.md)
+connects the shared-service boundary, privacy limits, and enterprise collaboration
+workflow to the smallest two-client proof under
 [#112](https://github.com/KnowGuard-AI/HotMem/issues/112). These are product
 requirements, not claims that the daemon, authorisation, or relay UI has shipped.
 
