@@ -1258,14 +1258,12 @@ def promote(
 @main.command()
 @click.option("--db", "db_path", default=None, type=click.Path(), help="Database path.")
 @click.option("--url", default=None, help="Running daemon URL (e.g. http://127.0.0.1:8711).")
-@click.option("--namespace", default=None, help="Filter by namespace.")
 @click.option("--state", default=None, help="Filter by promotion state.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
 @_daemon_client_options
 def candidates(
     db_path: str | None,
     url: str | None,
-    namespace: str | None,
     state: str | None,
     as_json: bool,
     daemon_token: str | None,
@@ -1275,6 +1273,7 @@ def candidates(
     expected_store_id: str | None,
 ):
     """List memories flagged as promotion candidates."""
+    namespace = daemon_namespace
     if url is not None and db_path is not None:
         raise click.ClickException("pass either --db or --url, not both")
     if url is None and db_path is None:

@@ -753,9 +753,12 @@ class MemoryDB:
         existing: set[tuple[str, str]] = set()
         if not pairs:
             return existing
-        hashes = list({h for _, h in pairs if h})
-        for start in range(0, len(hashes), _SEARCH_BIND_CHUNK):
-            chunk = hashes[start : start + _SEARCH_BIND_CHUNK]
+        candidate_hashes = list({h for _, h in pairs if h})
+        present_hashes = list(self.batch_existing_hashes(candidate_hashes))
+        if not present_hashes:
+            return existing
+        for start in range(0, len(present_hashes), _SEARCH_BIND_CHUNK):
+            chunk = present_hashes[start : start + _SEARCH_BIND_CHUNK]
             placeholders = ", ".join("?" for _ in chunk)
             rows = self._conn.execute(
                 f"SELECT namespace, content_hash FROM memories "
