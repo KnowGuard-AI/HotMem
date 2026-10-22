@@ -83,7 +83,7 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     embedding_blob: bytes | None = row.get("embedding")
     embedding_b64 = base64.b64encode(embedding_blob).decode() if embedding_blob else None
     return {
-        "schema_version": row.get("schema_version") or 2,
+        "schema_version": 2,
         "id": row["id"],
         "identifier": row["identifier"],
         "memory_type": row["memory_type"],
@@ -124,6 +124,8 @@ def write_snapshot_v2(
     base_dir: str | Path | None = None,
     attach_threshold: int = ATTACH_THRESHOLD,
     row_filter: Any | None = None,
+    redact_host_paths: bool = False,
+    export_scope: dict[str, Any] | None = None,
 ) -> SnapshotResult:
     """Write the full v2 snapshot directory.
 
@@ -209,13 +211,16 @@ def write_snapshot_v2(
         meta = MetadataInfo(
             hotmem_version=__version__,
             created_at=_utc_now_iso(),
-            host=socket.gethostname(),
-            db_path=str(db.db_path),
+            host="" if redact_host_paths else socket.gethostname(),
+            db_path="" if redact_host_paths else str(db.db_path),
             counts={"inline": inline_count, "file": file_backed_count, "total": memory_count},
         )
         metadata_path = out_dir / METADATA_NAME
+        meta_dict = meta.to_dict()
+        if export_scope is not None:
+            meta_dict["scope"] = export_scope
         metadata_path.write_text(
-            json.dumps(meta.to_dict(), sort_keys=True, indent=2) + "\n",
+            json.dumps(meta_dict, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
             newline="\n",
         )
@@ -259,6 +264,7 @@ def write_snapshot_v2(
             overall_sha256=overall,
             file_backed_references=file_references,
             attachments=attachment_entries,
+            scope=export_scope,
         )
 
         # Write manifest.json with stable key ordering.

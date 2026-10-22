@@ -102,8 +102,11 @@ def row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "promotion_state": row["promotion_state"],
         "promotion_candidate": row["promotion_candidate"],
     }
-    if row.get("schema_version") and int(row["schema_version"]) > 1:
-        record["schema_version"] = int(row["schema_version"])
+    # The interchange record/format version stays 1 (§1); the row's own
+    # schema version round-trips in a separate field so #99 fidelity does not
+    # leak into the interchange manifest's schema_version.
+    if row.get("schema_version") and int(row["schema_version"]) != 1:
+        record["record_schema_version"] = int(row["schema_version"])
     return {k: v for k, v in record.items() if v is not None}
 
 
@@ -174,6 +177,7 @@ def write_package(
     *,
     gz: bool = False,
     row_filter: Any | None = None,
+    export_scope: dict[str, Any] | None = None,
 ) -> PackageResult:
     """Write a hotmem-interchange-v1 package atomically (#69).
 
@@ -229,6 +233,8 @@ def write_package(
             "created_at": datetime.now(UTC).isoformat(),
             "hotmem_version": _hotmem_version(),
         }
+        if export_scope is not None:
+            manifest["scope"] = export_scope
         manifest_path = staging / MANIFEST_NAME
         with open(manifest_path, "w", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(manifest, sort_keys=True, indent=2) + "\n")

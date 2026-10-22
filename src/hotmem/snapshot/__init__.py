@@ -112,6 +112,8 @@ def snapshot(
     copy_attachments: bool = False,
     base_dir: str | Path | None = None,
     row_filter: object | None = None,
+    redact_host_paths: bool = False,
+    export_scope: dict[str, object] | None = None,
 ) -> SnapshotResult:
     """Export the DB to ``path`` using the format inferred from the path.
 
@@ -124,7 +126,13 @@ def snapshot(
         from hotmem.interchange.package import write_package
 
         _trace.info("dispatch", "interchange package snapshot", detail={"path": str(path)})
-        result = write_package(db, path, gz=gz, row_filter=row_filter)
+        result = write_package(
+            db,
+            path,
+            gz=gz,
+            row_filter=row_filter,
+            export_scope=export_scope,
+        )
         return SnapshotResult(exported=result.exported, path=result.path)
 
     fmt = detect_format(path)
@@ -138,6 +146,8 @@ def snapshot(
         copy_attachments=copy_attachments,
         base_dir=base_dir,
         row_filter=row_filter,
+        redact_host_paths=redact_host_paths,
+        export_scope=export_scope,
     )
 
 

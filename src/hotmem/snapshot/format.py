@@ -150,9 +150,10 @@ class Manifest:
     overall_sha256: str = ""
     file_backed_references: list[FileReference] = field(default_factory=list)
     attachments: list[AttachmentEntry] = field(default_factory=list)
+    scope: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "format": self.format,
             "schema_version": self.schema_version,
             "snapshot_id": self.snapshot_id,
@@ -166,6 +167,9 @@ class Manifest:
             "file_backed_references": [ref.to_dict() for ref in self.file_backed_references],
             "attachments": [asdict(att) for att in self.attachments],
         }
+        if self.scope is not None:
+            data["scope"] = self.scope
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> Manifest:
@@ -219,6 +223,7 @@ class Manifest:
             overall_sha256=str(data.get("overall_sha256") or ""),
             file_backed_references=refs,
             attachments=atts,
+            scope=data.get("scope") if isinstance(data.get("scope"), dict) else None,
         )
 
 

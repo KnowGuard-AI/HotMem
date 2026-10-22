@@ -69,6 +69,7 @@ KNOWN_FIELDS: frozenset[str] = frozenset(
         "promotion_candidate",
         "provenance",
         "provenance_json",
+        "record_schema_version",
     }
 )
 
@@ -202,6 +203,7 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
         "promotion_state": raw.get("promotion_state"),
         "promotion_candidate": raw.get("promotion_candidate"),
         "provenance": provenance,
+        "record_schema_version": _as_int(raw.get("record_schema_version")),
     }
 
 
