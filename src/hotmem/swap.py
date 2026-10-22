@@ -410,8 +410,9 @@ def snapshot(
     *,
     include_embeddings: bool = True,
     on_progress: Callable[[int], None] | None = None,
+    row_filter: Callable[[dict], bool] | None = None,
 ) -> SnapshotResult:
-    """Export all memories from the database to a JSONL or JSONL.GZ swap file.
+    """Export memories from the database to a JSONL or JSONL.GZ swap file.
 
     Streams rows in id order (fetchmany batches) so memory stays O(batch)
     for large stores (interchange #67). on_progress, if given, is invoked
@@ -423,6 +424,8 @@ def snapshot(
         exported = 0
         with _open_swap_write(swap_path) as f:
             for row in db.iter_rows(include_embedding=include_embeddings):
+                if row_filter is not None and not row_filter(row):
+                    continue
                 embedding = row.pop("embedding", None)
                 if embedding is not None:
                     row["embedding_b64"] = base64.b64encode(embedding).decode("ascii")

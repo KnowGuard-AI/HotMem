@@ -92,12 +92,18 @@ def row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "source_format": row["source_format"],
         "provenance": _parse_json(row.get("provenance_json")),
         "created_at": row["created_at"],
+        "updated_at": row.get("updated_at"),
+        "snapshot_id": row.get("snapshot_id"),
+        "parent_memory": row.get("parent_memory") or None,
+        "related_memories": _parse_json(row.get("related_memories")) or [],
         # Promotion state is canonical access state (it changes retrieval
         # behavior — archived memories are excluded by default) and must
         # round-trip through clones and deltas (#73 amendment to §1.2).
         "promotion_state": row["promotion_state"],
         "promotion_candidate": row["promotion_candidate"],
     }
+    if row.get("schema_version") and int(row["schema_version"]) > 1:
+        record["schema_version"] = int(row["schema_version"])
     return {k: v for k, v in record.items() if v is not None}
 
 
@@ -110,7 +116,9 @@ def _parse_json(value: str | None) -> Any:
         return None
 
 
-def _write_payload(db: MemoryDB, sink, hasher) -> tuple[int, list[str], set[tuple[str, int]]]:
+def _write_payload(
+    db: MemoryDB, sink, hasher, *, row_filter: Any | None = None
+) -> tuple[int, list[str], set[tuple[str, int]]]:
     """Stream canonical records to ``sink``, hashing payload bytes.
 
     Returns (record_count, content_hashes, embedding_spaces) where
@@ -126,6 +134,8 @@ def _write_payload(db: MemoryDB, sink, hasher) -> tuple[int, list[str], set[tupl
     embedding_spaces: set[tuple[str, int]] = set()
     count = 0
     for row in db.iter_rows():
+        if row_filter is not None and not row_filter(row):
+            continue
         data = canonical_line(row_to_record(row)).encode()
         hasher.update(data)
         sink.write(data)
@@ -163,6 +173,7 @@ def write_package(
     out_dir: str | Path,
     *,
     gz: bool = False,
+    row_filter: Any | None = None,
 ) -> PackageResult:
     """Write a hotmem-interchange-v1 package atomically (#69).
 
@@ -190,9 +201,13 @@ def write_package(
                 with gzip.GzipFile(
                     filename="", mode="wb", compresslevel=9, fileobj=raw_file, mtime=0
                 ) as gz_file:
-                    record_count, content_hashes, spaces = _write_payload(db, gz_file, hasher)
+                    record_count, content_hashes, spaces = _write_payload(
+                        db, gz_file, hasher, row_filter=row_filter
+                    )
             else:
-                record_count, content_hashes, spaces = _write_payload(db, raw_file, hasher)
+                record_count, content_hashes, spaces = _write_payload(
+                    db, raw_file, hasher, row_filter=row_filter
+                )
             raw_file.flush()
             os.fsync(raw_file.fileno())
 

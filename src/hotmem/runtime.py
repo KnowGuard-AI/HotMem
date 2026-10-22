@@ -674,6 +674,14 @@ class HotMemRuntime:
         db = self._require_db()
         ctx.require_operation("export")
         resolved_target = target or self.swap_path or "swap.jsonl"
+        row_filter = (
+            (
+                lambda row: ctx.can_access_row(row, operation="export")
+                and ctx.can_access_row(row, operation="read")
+            )
+            if (ctx.policy_enforced or ctx.namespace is not None)
+            else None
+        )
         with self._write_lock:
             result = snapshot_write(
                 db,
@@ -682,6 +690,7 @@ class HotMemRuntime:
                 base_dir=self.base_dir,
                 package=package,
                 gz=gz,
+                row_filter=row_filter,
             )
         return {
             "exported": result.exported,
