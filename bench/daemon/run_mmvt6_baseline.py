@@ -132,7 +132,7 @@ def run_baseline(reads_per_client: int = 25, warmup: int = 5) -> dict[str, Any]:
                 wall = (time.perf_counter() - t0) * 1000.0
                 direct_wall_ms.append(wall)
                 direct_trace_ms.append(float(res["trace_ms"]))
-                direct_payload_bytes = len(json.dumps(res).encode("utf-8"))
+                direct_payload_bytes += len(json.dumps(res).encode("utf-8"))
 
         cpu_direct = round(_cpu_seconds() - cpu_start_direct, 4)
         rt.close()
@@ -218,7 +218,7 @@ def run_baseline(reads_per_client: int = 25, warmup: int = 5) -> dict[str, Any]:
                         body = resp.json()
                         http_wall_ms.append(wall)
                         http_trace_ms.append(float(body["trace_ms"]))
-                        http_payload_bytes = len(resp.content)
+                        http_payload_bytes += len(resp.content)
 
                 cpu_http = round(_cpu_seconds() - cpu_start_http, 4)
         finally:
@@ -241,7 +241,9 @@ def run_baseline(reads_per_client: int = 25, warmup: int = 5) -> dict[str, Any]:
         "rss_mb": _rss_mb(),
         "direct": {
             "samples": len(direct_wall_ms),
-            "payload_bytes": direct_payload_bytes,
+            "payload_bytes_avg": round(
+                direct_payload_bytes / max(1, len(direct_wall_ms)), 1
+            ),
             "wall_p50_ms": _percentile(direct_wall_sorted, 50),
             "wall_p95_ms": _percentile(direct_wall_sorted, 95),
             "wall_mean_ms": round(statistics.mean(direct_wall_ms), 3),
@@ -251,7 +253,9 @@ def run_baseline(reads_per_client: int = 25, warmup: int = 5) -> dict[str, Any]:
         },
         "loopback_http_pooled": {
             "samples": len(http_wall_ms),
-            "payload_bytes": http_payload_bytes,
+            "payload_bytes_avg": round(
+                http_payload_bytes / max(1, len(http_wall_ms)), 1
+            ),
             "wall_p50_ms": _percentile(http_wall_sorted, 50),
             "wall_p95_ms": _percentile(http_wall_sorted, 95),
             "wall_mean_ms": round(statistics.mean(http_wall_ms), 3),
