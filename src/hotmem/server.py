@@ -79,6 +79,8 @@ DAEMON_ROUTE_INVENTORY: tuple[tuple[str, str, str], ...] = (
     ("POST", "/v1/vector-index/rebuild", "write"),
     ("GET", "/v1/vector-index/status", "read"),
     ("DELETE", "/v1/vector-index", "write"),
+    ("POST", "/v1/policy/revoke", "manage"),
+    ("POST", "/v1/policy/reload", "manage"),
 )
 
 
@@ -221,6 +223,13 @@ class CandidateRequest(BaseModel):
     reason: str | None = None
 
 
+class PolicyRevokeRequest(BaseModel):
+    """Body for POST /v1/policy/revoke — revoke a caller and/or share approval."""
+
+    caller_id: str | None = None
+    approval_id: str | None = None
+
+
 def _extract_token(request: Request) -> str | None:
     auth = request.headers.get("authorization")
     if auth:
@@ -240,7 +249,7 @@ def _resolve_caller(runtime: HotMemRuntime, request: Request) -> CallerContext:
         requested_store_id=request.headers.get("x-hotmem-store-id"),
         session_id=request.headers.get("x-hotmem-session-id"),
         source=request.headers.get("x-hotmem-source"),
-        namespace=request.headers.get("x-hotmem-namespace"),
+        namespace=request.headers.get("x-hotmem-namespace") or None,
         actor=request.headers.get("x-hotmem-actor"),
         idempotency_key=request.headers.get("x-hotmem-idempotency-key"),
     )
@@ -258,8 +267,13 @@ def create_app(
     policy: PolicyConfig | None = None,
     store_id: str | None = None,
     runtime: HotMemRuntime | None = None,
+    policy_path: str | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application with an instance-owned HotMemRuntime."""
+    if runtime is not None and str(runtime.db_path) != str(db_path):
+        raise ValueError(
+            f"runtime store {runtime.db_path!r} does not match db_path {str(db_path)!r}"
+        )
     owned_runtime = (
         runtime
         if runtime is not None
@@ -274,6 +288,7 @@ def create_app(
             reranker=reranker,
             policy=policy,
             store_id=store_id,
+            policy_path=policy_path,
         )
     )
 
@@ -316,8 +331,10 @@ def create_app(
 
     @app.get("/v1/health")
     async def health(request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
-        return owned_runtime.health(ctx)
+        return await asyncio.to_thread(owned_runtime.health, ctx)
 
     @app.post("/v1/add")
     async def add_memory(req: AddRequest, request: Request):
@@ -414,10 +431,13 @@ def create_app(
         request: Request,
         req: HydrateOneRequest | None = None,
     ):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
         if req is not None:
             try:
-                return owned_runtime.hydrate_one_profiled(
+                return await asyncio.to_thread(
+                    owned_runtime.hydrate_one_profiled,
                     ctx,
                     memory_id,
                     profile=req.profile,
@@ -447,7 +467,9 @@ def create_app(
                 )
 
         try:
-            payload, headers = owned_runtime.hydrate_one_raw(ctx, memory_id)
+            payload, headers = await asyncio.to_thread(
+                owned_runtime.hydrate_one_raw, ctx, memory_id
+            )
         except KeyError:
             return JSONResponse(
                 status_code=404,
@@ -543,9 +565,12 @@ def create_app(
 
     @app.post("/v1/handoff/prepare")
     async def handoff_prepare(req: HandoffPrepareRequest, request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
         try:
-            return owned_runtime.handoff_prepare(
+            return await asyncio.to_thread(
+                owned_runtime.handoff_prepare,
                 ctx,
                 source=req.source,
                 output=req.output,
@@ -558,9 +583,13 @@ def create_app(
 
     @app.post("/v1/handoff/verify")
     async def handoff_verify(req: HandoffPackageRequest, request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
         try:
-            return owned_runtime.handoff_verify(ctx, package=req.package)
+            return await asyncio.to_thread(
+                owned_runtime.handoff_verify, ctx, package=req.package
+            )
         except HandoffError as err:
             return JSONResponse(
                 status_code=409,
@@ -576,14 +605,22 @@ def create_app(
 
     @app.get("/v1/handoff/inspect")
     async def handoff_inspect(package: str, request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
-        return owned_runtime.handoff_inspect(ctx, package=package)
+        return await asyncio.to_thread(
+            owned_runtime.handoff_inspect, ctx, package=package
+        )
 
     @app.post("/v1/handoff/hydrate")
     async def handoff_hydrate(req: HandoffPackageRequest, request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
         try:
-            return owned_runtime.handoff_hydrate(ctx, package=req.package)
+            return await asyncio.to_thread(
+                owned_runtime.handoff_hydrate, ctx, package=req.package
+            )
         except HandoffError as err:
             return JSONResponse(
                 status_code=409,
@@ -601,13 +638,19 @@ def create_app(
 
     @app.get("/v1/files")
     async def list_files(request: Request, identifier: str | None = None):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
-        return owned_runtime.list_files(ctx, identifier=identifier)
+        return await asyncio.to_thread(
+            owned_runtime.list_files, ctx, identifier=identifier
+        )
 
     @app.get("/v1/bundles")
     async def list_bundles(request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
-        return owned_runtime.list_bundles(ctx)
+        return await asyncio.to_thread(owned_runtime.list_bundles, ctx)
 
     @app.post("/v1/discover")
     async def discover(req: DiscoverRequest, request: Request):
@@ -626,8 +669,11 @@ def create_app(
 
     @app.post("/v1/memory/hydrate-batch")
     async def hydrate_batch(req: HydrateBatchRequest, request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
-        return owned_runtime.hydrate_batch(
+        return await asyncio.to_thread(
+            owned_runtime.hydrate_batch,
             ctx,
             req.memory_ids,
             profile=req.profile,
@@ -678,9 +724,12 @@ def create_app(
 
     @app.post("/v1/memory/{memory_id}/promote")
     async def promote_memory(memory_id: str, req: PromoteRequest, request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
         try:
-            return owned_runtime.promote_memory(
+            return await asyncio.to_thread(
+                owned_runtime.promote_memory,
                 ctx,
                 memory_id,
                 to_state=req.to_state,
@@ -697,9 +746,12 @@ def create_app(
 
     @app.post("/v1/memory/{memory_id}/candidate")
     async def set_candidate(memory_id: str, req: CandidateRequest, request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
         try:
-            return owned_runtime.set_candidate(
+            return await asyncio.to_thread(
+                owned_runtime.set_candidate,
                 ctx,
                 memory_id,
                 candidate=req.candidate,
@@ -717,13 +769,19 @@ def create_app(
         namespace: str | None = None,
         state: str | None = None,
     ):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
-        return owned_runtime.promotion_candidates(ctx, namespace=namespace, state=state)
+        return await asyncio.to_thread(
+            owned_runtime.promotion_candidates, ctx, namespace=namespace, state=state
+        )
 
     @app.get("/v1/promotion/states")
     async def promotion_states(request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
-        return owned_runtime.promotion_states(ctx)
+        return await asyncio.to_thread(owned_runtime.promotion_states, ctx)
 
     @app.get("/v1/promotion/by-state")
     async def promotion_by_state(
@@ -731,8 +789,12 @@ def create_app(
         state: str,
         namespace: str | None = None,
     ):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
-        return owned_runtime.promotion_by_state(ctx, state=state, namespace=namespace)
+        return await asyncio.to_thread(
+            owned_runtime.promotion_by_state, ctx, state=state, namespace=namespace
+        )
 
     # ── Vector index endpoints (#49 — optional, derived, disposable) ────
 
@@ -750,12 +812,37 @@ def create_app(
 
     @app.get("/v1/vector-index/status")
     async def vector_index_status(request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
-        return owned_runtime.vector_index_status(ctx)
+        return await asyncio.to_thread(owned_runtime.vector_index_status, ctx)
 
     @app.delete("/v1/vector-index")
     async def clear_index(request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
-        return owned_runtime.vector_index_clear(ctx)
+        return await asyncio.to_thread(owned_runtime.vector_index_clear, ctx)
+
+    # ── Policy management (#110: immediate revocation) ─────────────────
+
+    @app.post("/v1/policy/revoke")
+    async def policy_revoke(req: PolicyRevokeRequest, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(
+            owned_runtime.revoke_policy,
+            ctx,
+            caller_id=req.caller_id,
+            approval_id=req.approval_id,
+        )
+
+    @app.post("/v1/policy/reload")
+    async def policy_reload(request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(owned_runtime.reload_policy, ctx)
 
     return app

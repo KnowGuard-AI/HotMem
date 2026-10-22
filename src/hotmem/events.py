@@ -55,6 +55,7 @@ class EventType:
     """Canonical event type strings. Stored as plain text for SQL introspection."""
 
     MEMORY_CREATED = "memory.created"
+    MEMORY_DEDUPLICATED = "memory.deduplicated"
     MEMORY_PROMOTION = "memory.promotion"
     MEMORY_CANDIDATE = "memory.candidate"
     SNAPSHOT_IMPORTED = "snapshot.imported"
