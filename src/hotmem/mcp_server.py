@@ -38,11 +38,11 @@ from mcp.types import CallToolResult, TextContent, Tool
 from hotmem.db import MemoryDB
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.rerank import Reranker
+from hotmem.runtime import HotMemRuntime
 from hotmem.search import search_memories
 from hotmem.snapshot import hydrate as snapshot_hydrate
 from hotmem.snapshot import snapshot as snapshot_export
 from hotmem.swap import compute_content_hash
-from hotmem.swap import hydrate as swap_hydrate
 from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("mcp_server")
@@ -141,17 +141,24 @@ def create_server(
     *,
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
+    state: _ServerState | None = None,
 ) -> Server:
     """Create and configure the HotMem MCP server.
 
     ``embedder`` is the runtime-owned embedding implementation (issue #78);
     ``None`` means the hash default. ``reranker`` is the optional bounded
     second stage (issue #80); ``None`` preserves the first-stage ranking.
+
+    ``state`` is the explicit state container owned by the caller. Production
+    startup (`run`) passes a runtime-backed instance; the module-level
+    ``_state`` fallback exists only for direct handler tests and is never
+    used by the serving path.
     """
     db_path = str(db_path)
     swap_path = str(swap_path) if swap_path else None
-    _state.embedder = embedder if embedder is not None else DEFAULT_EMBEDDER
-    _state.reranker = reranker
+    active_state = state if state is not None else _state
+    active_state.embedder = embedder if embedder is not None else DEFAULT_EMBEDDER
+    active_state.reranker = reranker
 
     server = Server("hotmem")
 
@@ -224,23 +231,23 @@ def create_server(
 
         try:
             if name == "add_memory":
-                return _handle_add_memory(_state, arguments)
+                return _handle_add_memory(active_state, arguments)
             if name == "search_memories":
-                return _handle_search_memories(_state, arguments)
+                return _handle_search_memories(active_state, arguments)
             if name == "memory_health":
-                return _handle_memory_health(_state, arguments)
+                return _handle_memory_health(active_state, arguments)
             if name == "snapshot":
-                return _handle_snapshot(_state, arguments)
+                return _handle_snapshot(active_state, arguments)
             if name == "hydrate":
-                return _handle_hydrate(_state, arguments)
+                return _handle_hydrate(active_state, arguments)
             if name == "handoff_prepare":
-                return _handle_handoff_prepare(_state, arguments)
+                return _handle_handoff_prepare(active_state, arguments)
             if name == "handoff_inspect":
-                return _handle_handoff_inspect(_state, arguments)
+                return _handle_handoff_inspect(active_state, arguments)
             if name == "handoff_verify":
-                return _handle_handoff_verify(_state, arguments)
+                return _handle_handoff_verify(active_state, arguments)
             if name == "handoff_hydrate":
-                return _handle_handoff_hydrate(_state, arguments)
+                return _handle_handoff_hydrate(active_state, arguments)
         except KeyError as err:
             _trace.error("tool", f"missing required argument: {err}", detail={"tool": name})
             return _error(f"missing required argument: {err}")
@@ -260,23 +267,26 @@ async def run(
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
 ) -> None:
-    """Start the HotMem MCP server on stdio transport."""
+    """Start the HotMem MCP server on stdio transport (embedded compatibility mode)."""
     db_path = str(db_path)
     swap_path = str(swap_path) if swap_path else None
 
-    db = MemoryDB(db_path)
-    _ServerState.db = db
-    _ServerState.db_path = db_path
-    _ServerState.swap_path = swap_path
-    _ServerState.start_time = time.time()
-
-    if swap_path and Path(swap_path).exists():
-        result = swap_hydrate(db, swap_path, embedder=embedder)
-        _trace.info(
-            "startup",
-            f"auto-hydrated {result.loaded} memories",
-            detail={"swap_path": swap_path},
-        )
+    # Embedded mode still owns exactly one runtime: this acquires the
+    # exclusive store lock, runs the same startup hydration, and is the only
+    # writer for the life of the stdio session (#109).
+    runtime = HotMemRuntime(
+        db_path=db_path,
+        swap_path=swap_path,
+        embedder=embedder,
+        reranker=reranker,
+    ).open()
+    state = _ServerState()
+    state.db = runtime.db  # type: ignore[assignment]
+    state.db_path = db_path
+    state.swap_path = swap_path
+    state.start_time = runtime.start_time
+    state.embedder = runtime.embedder
+    state.reranker = runtime.reranker
 
     _trace.info(
         "startup",
@@ -284,7 +294,13 @@ async def run(
         detail={"db_path": db_path, "swap_path": swap_path},
     )
 
-    server = create_server(db_path, swap_path, embedder=embedder, reranker=reranker)
+    server = create_server(
+        db_path,
+        swap_path,
+        embedder=embedder,
+        reranker=reranker,
+        state=state,
+    )
 
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -294,7 +310,7 @@ async def run(
                 server.create_initialization_options(),
             )
     finally:
-        db.close()
+        runtime.close()
         _trace.info("shutdown", "mcp server closed", detail={"db_path": db_path})
 
 
