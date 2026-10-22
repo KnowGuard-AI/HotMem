@@ -101,6 +101,7 @@ class HotMemRuntime:
         reranker: Reranker | None = None,
         policy: PolicyConfig | None = None,
         store_id: str | None = None,
+        write_timeout_s: float = 10.0,
     ) -> None:
         if vector_backend not in VALID_BACKENDS:
             raise ValueError(
@@ -124,6 +125,7 @@ class HotMemRuntime:
             self.policy.store_id = self.store_id
         self.runtime_generation: str = uuid.uuid4().hex[:12]
         self.start_time: float = 0.0
+        self.write_timeout_s: float = write_timeout_s
         self.db: MemoryDB | None = None
         self.vector_index: VectorIndex | None = None
         self._store_lock = StoreLock(
@@ -210,6 +212,55 @@ class HotMemRuntime:
             )
         return self.db
 
+    @contextlib.contextmanager
+    def _read_db(self):
+        """Yield a MemoryDB for read-only operations without blocking behind slow writes."""
+        primary = self._require_db()
+        if self._write_lock.acquire(blocking=False):
+            try:
+                yield primary
+            finally:
+                self._write_lock.release()
+            return
+
+        if self.db_path == ":memory:":
+            if not self._write_lock.acquire(timeout=self.write_timeout_s):
+                raise PolicyError(
+                    503,
+                    "server_busy",
+                    "daemon queue saturated waiting for in-memory store lock",
+                )
+            try:
+                yield primary
+            finally:
+                self._write_lock.release()
+            return
+
+        ro_db = MemoryDB(self.db_path, read_only=True)
+        try:
+            yield ro_db
+        finally:
+            ro_db.close()
+
+    @contextlib.contextmanager
+    def _write_slot(self):
+        """Acquire the bounded write lock and guarantee rollback on error/cancellation."""
+        db = self._require_db()
+        if not self._write_lock.acquire(timeout=self.write_timeout_s):
+            raise PolicyError(
+                503,
+                "server_busy",
+                f"daemon write queue saturated (timeout={self.write_timeout_s}s)",
+            )
+        try:
+            yield db
+        except BaseException:
+            with contextlib.suppress(Exception):
+                db.rollback()
+            raise
+        finally:
+            self._write_lock.release()
+
     def resolve_caller(
         self,
         *,
@@ -236,19 +287,21 @@ class HotMemRuntime:
     # ── Operations ───────────────────────────────────────────────────────
 
     def health(self, ctx: CallerContext) -> dict[str, Any]:
-        db = self._require_db()
         descriptor = self.embedder.descriptor
-        if not ctx.policy_enforced:
-            return {
-                "status": "ok",
-                "memory_count": db.count(),
-                "db_path": self.db_path,
-                "uptime_s": round(time.time() - self.start_time, 1),
-                "embedding": {"model": descriptor.key, "dim": descriptor.dimension},
-            }
+        with self._read_db() as db:
+            if not ctx.policy_enforced:
+                return {
+                    "status": "ok",
+                    "memory_count": db.count(),
+                    "db_path": self.db_path,
+                    "uptime_s": round(time.time() - self.start_time, 1),
+                    "embedding": {"model": descriptor.key, "dim": descriptor.dimension},
+                }
 
-        visible_rows = ctx.filter_rows(db.all_rows(include_embedding=False), operation="read")
-        visible_count = len(visible_rows)
+            visible_rows = ctx.filter_rows(
+                db.all_rows(include_embedding=False), operation="read"
+            )
+            visible_count = len(visible_rows)
         return {
             "status": "ok",
             "memory_count": visible_count,
@@ -277,7 +330,7 @@ class HotMemRuntime:
         metadata: dict[str, Any] | None = None,
         ttl_seconds: int | None = None,
     ) -> dict[str, Any]:
-        db = self._require_db()
+        self._require_db()
         ctx.require_operation("write")
         target_namespace = ctx.effective_write_namespace
         effective_source = ctx.source or source
@@ -338,7 +391,7 @@ class HotMemRuntime:
         )
         request_hash = hashlib.sha256(req_canonical.encode("utf-8")).hexdigest()
 
-        with self._write_lock, Timer() as t:
+        with self._write_slot() as db, Timer() as t:
             if ctx.idempotency_key:
                 ledger_entry = db.get_operation_ledger(
                     ctx.caller_id, target_namespace, ctx.idempotency_key
@@ -455,14 +508,13 @@ class HotMemRuntime:
         top_k: int = 5,
         max_chars: int | None = None,
     ) -> dict[str, Any]:
-        db = self._require_db()
         ctx.require_operation("read")
         row_filter = (
             (lambda row: ctx.can_access_row(row, operation="read"))
             if (ctx.policy_enforced or ctx.namespace is not None)
             else None
         )
-        with Timer() as t:
+        with self._read_db() as db, Timer() as t:
             messages = search_memories(
                 db,
                 query=query,
@@ -487,14 +539,13 @@ class HotMemRuntime:
         order: str = "asc",
         limit: int = 100,
     ) -> dict[str, Any]:
-        db = self._require_db()
         ctx.require_operation("read")
         row_filter = (
             (lambda row: ctx.can_access_row(row, operation="read"))
             if (ctx.policy_enforced or ctx.namespace is not None)
             else None
         )
-        with Timer() as t:
+        with self._read_db() as db, Timer() as t:
             rows = db.list_by_identifier(
                 identifier, order=order, limit=limit, row_filter=row_filter
             )
@@ -505,9 +556,9 @@ class HotMemRuntime:
         }
 
     def get_memory(self, ctx: CallerContext, memory_id: str) -> dict[str, Any] | None:
-        db = self._require_db()
         ctx.require_operation("read")
-        record = get_memory_metadata(db, memory_id)
+        with self._read_db() as db:
+            record = get_memory_metadata(db, memory_id)
         if record is None:
             return None
         if not ctx.can_access_row(record, operation="read"):
@@ -642,10 +693,9 @@ class HotMemRuntime:
     def hydrate_snapshot(
         self, ctx: CallerContext, *, target: str | None = None
     ) -> dict[str, Any]:
-        db = self._require_db()
         ctx.require_operation("hydrate")
         resolved_target = target or self.swap_path or "swap.jsonl"
-        with self._write_lock:
+        with self._write_slot() as db:
             result = snapshot_hydrate(db, resolved_target, embedder=self.embedder)
             emit_import_event(
                 db,
@@ -671,7 +721,6 @@ class HotMemRuntime:
         package: bool = False,
         gz: bool = False,
     ) -> dict[str, Any]:
-        db = self._require_db()
         ctx.require_operation("export")
         resolved_target = target or self.swap_path or "swap.jsonl"
         row_filter = (
@@ -682,7 +731,7 @@ class HotMemRuntime:
             if (ctx.policy_enforced or ctx.namespace is not None)
             else None
         )
-        with self._write_lock:
+        with self._write_slot() as db:
             result = snapshot_write(
                 db,
                 resolved_target,
@@ -747,9 +796,8 @@ class HotMemRuntime:
         return inspect_handoff(package)
 
     def handoff_hydrate(self, ctx: CallerContext, *, package: str) -> dict[str, Any]:
-        db = self._require_db()
         ctx.require_operation("hydrate")
-        with self._write_lock:
+        with self._write_slot() as db:
             result = hydrate_handoff(db, package, embedder=self.embedder)
         return {
             "handoff_id": result.handoff_id,
@@ -813,9 +861,8 @@ class HotMemRuntime:
     def discover(
         self, ctx: CallerContext, *, root: str, max_depth: int = 10
     ) -> dict[str, Any]:
-        db = self._require_db()
         ctx.require_operation("write")
-        with self._write_lock, Timer() as t:
+        with self._write_slot() as db, Timer() as t:
             result = index_bundles(db, root, max_depth=max_depth)
             append_event(
                 db,
@@ -835,16 +882,15 @@ class HotMemRuntime:
         }
 
     def hygiene(self, ctx: CallerContext) -> dict[str, Any]:
-        db = self._require_db()
         ctx.require_operation("read")
-        report = check_hygiene(db, base_dir=self.base_dir)
-        counts = {
-            "warning_count": len(report.warnings),
-            "error_count": sum(1 for w in report.warnings if w.severity == "error"),
-            "warn_count": sum(1 for w in report.warnings if w.severity == "warn"),
-            "info_count": sum(1 for w in report.warnings if w.severity == "info"),
-        }
-        with self._write_lock:
+        with self._write_slot() as db:
+            report = check_hygiene(db, base_dir=self.base_dir)
+            counts = {
+                "warning_count": len(report.warnings),
+                "error_count": sum(1 for w in report.warnings if w.severity == "error"),
+                "warn_count": sum(1 for w in report.warnings if w.severity == "warn"),
+                "info_count": sum(1 for w in report.warnings if w.severity == "info"),
+            }
             append_event(
                 db,
                 event_type=EventType.HYGIENE_CHECKED,
@@ -883,7 +929,6 @@ class HotMemRuntime:
         limit: int = 100,
         order: str = "asc",
     ) -> dict[str, Any]:
-        db = self._require_db()
         ctx.require_operation("read")
         if namespace is not None and not ctx.can_access_namespace(
             namespace, operation="read"
@@ -893,7 +938,7 @@ class HotMemRuntime:
                 "scope_denied",
                 f"caller {ctx.caller_id!r} cannot read events in namespace {namespace!r}",
             )
-        with Timer() as t:
+        with self._read_db() as db, Timer() as t:
             listing = query_events(
                 db,
                 memory_id=memory_id,
@@ -968,7 +1013,7 @@ class HotMemRuntime:
                 "session_impersonation_denied",
                 f"caller {ctx.caller_id!r} cannot impersonate actor {actor!r}",
             )
-        with self._write_lock, Timer() as t:
+        with self._write_slot() as db, Timer() as t:
             result = transition(
                 db,
                 memory_id,
@@ -998,7 +1043,7 @@ class HotMemRuntime:
                 "scope_denied",
                 f"caller {ctx.caller_id!r} cannot modify candidate state for {memory_id!r}",
             )
-        with self._write_lock, Timer() as t:
+        with self._write_slot() as db, Timer() as t:
             result = mark_candidate(db, memory_id, candidate, reason=reason)
         result["trace_ms"] = round(t.ms, 2)
         return result
@@ -1070,7 +1115,7 @@ class HotMemRuntime:
         }
 
     def vector_index_rebuild(self, ctx: CallerContext) -> tuple[int, dict[str, Any]]:
-        db = self._require_db()
+        self._require_db()
         ctx.require_operation("write")
         vector_index = self.vector_index
         if vector_index is None or isinstance(vector_index, NullVectorIndex):
@@ -1096,7 +1141,7 @@ class HotMemRuntime:
                     "uv pip install 'hotmem[vector]'"
                 ),
             }
-        with self._write_lock:
+        with self._write_slot() as db:
             result = rebuild_vector_index(
                 db,
                 vector_index,
@@ -1116,19 +1161,17 @@ class HotMemRuntime:
         return 200, result
 
     def vector_index_status(self, ctx: CallerContext) -> dict[str, Any]:
-        db = self._require_db()
         ctx.require_operation("read")
         assert self.vector_index is not None
-        with Timer() as t:
+        with self._read_db() as db, Timer() as t:
             status = self.vector_index.status(db)
         status["trace_ms"] = round(t.ms, 2)
         return status
 
     def vector_index_clear(self, ctx: CallerContext) -> dict[str, Any]:
-        db = self._require_db()
         ctx.require_operation("write")
         assert self.vector_index is not None
-        with self._write_lock, Timer() as t:
+        with self._write_slot() as db, Timer() as t:
             self.vector_index.clear()
             cleared_count = db.count()
         return {

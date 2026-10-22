@@ -321,9 +321,12 @@ def create_app(
 
     @app.post("/v1/add")
     async def add_memory(req: AddRequest, request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
         try:
-            return owned_runtime.add(
+            return await asyncio.to_thread(
+                owned_runtime.add,
                 ctx,
                 identifier=req.identifier,
                 fact=req.fact,
@@ -471,10 +474,14 @@ def create_app(
 
     @app.post("/v1/hydrate")
     async def hydrate(req: HydrateRequest, request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
         target = req.path or req.__dict__.get("file")
         try:
-            return owned_runtime.hydrate_snapshot(ctx, target=target)
+            return await asyncio.to_thread(
+                owned_runtime.hydrate_snapshot, ctx, target=target
+            )
         except SnapshotChecksumError as err:
             return JSONResponse(
                 status_code=409,
@@ -504,10 +511,13 @@ def create_app(
 
     @app.post("/v1/snapshot")
     async def snapshot(req: SnapshotRequest, request: Request):
+        import asyncio
+
         ctx = _resolve_caller(owned_runtime, request)
         target = req.path or req.__dict__.get("file")
         try:
-            return owned_runtime.snapshot(
+            return await asyncio.to_thread(
+                owned_runtime.snapshot,
                 ctx,
                 target=target,
                 copy_attachments=req.copy_attachments,

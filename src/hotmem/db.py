@@ -299,14 +299,18 @@ def _fts_query(query: str) -> str:
 class MemoryDB:
     """SQLite-backed memory store with cosine similarity UDF."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, read_only: bool = False) -> None:
         self.db_path = str(db_path)
+        self._read_only = read_only
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.create_function("cosine_sim", 2, _cosine_similarity)
+        if read_only:
+            self._conn.execute("PRAGMA query_only=ON")
+            return
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA recursive_triggers=ON")
-        self._conn.create_function("cosine_sim", 2, _cosine_similarity)
         self._conn.executescript(_SCHEMA)
         self._migrate()
         self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
