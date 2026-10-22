@@ -89,7 +89,7 @@ manifests remain the source of truth. Losing or deleting the index never
 loses memory: search transparently falls back to the deterministic SQLite
 cosine scan, and the index can be fully rebuilt from canonical storage.
 
-Enable it at server start (`hotmem serve --vector-index chroma`, requires the
+Enable it at server start (`hotmem serve --db ./my.sqlite --vector-index chroma`, requires the
 optional `hotmem[vector]` extra). The index only supplies candidate ids; final
 ranking is always recomputed with the canonical hybrid scorer, so the
 `/v1/search` response shape and ranking are identical with or without

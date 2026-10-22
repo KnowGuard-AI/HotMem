@@ -6,7 +6,7 @@ client against a running sidecar.
 ## Setup
 
 ```sh
-hotmem serve                      # start the sidecar on http://127.0.0.1:8711
+hotmem serve --db ./hotmem.sqlite  # start the sidecar on http://127.0.0.1:8711
 npm install hotmem                # or: npm install -e ../ts  (local build)
 npm install -D tsx                # to run .ts directly
 ```

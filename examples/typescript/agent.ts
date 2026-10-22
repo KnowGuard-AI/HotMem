@@ -1,7 +1,7 @@
 /**
  * HotMem TypeScript client example: add facts, search, print health.
  *
- * Run: hotmem serve  then  npx tsx agent.ts
+ * Run: hotmem serve --db ./hotmem.sqlite  then  npx tsx agent.ts
  */
 
 import { HotMemClient } from "hotmem";
