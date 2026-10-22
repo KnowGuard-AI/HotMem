@@ -970,9 +970,10 @@ class HotMemRuntime:
                 }
                 if not ctx.can_access_row(row_probe, operation="read"):
                     continue
-                # Strip raw embedding blobs and full fact_text from relay stream unless management
+                # Strip raw embedding blobs and full fact_text from daemon activity stream
                 sanitized_payload = dict(payload)
                 sanitized_payload.pop("embedding_b64", None)
+                sanitized_payload.pop("fact_text", None)
                 filtered_events.append(
                     {
                         **ev,
@@ -984,6 +985,9 @@ class HotMemRuntime:
             "events": filtered_events,
             "count": len(filtered_events),
             "next_seq": next_seq,
+            "store_id": self.store_id,
+            "runtime_generation": self.runtime_generation,
+            "policy_revision": self.policy.revision,
             "trace_ms": round(t.ms, 2),
         }
 
