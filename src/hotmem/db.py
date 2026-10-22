@@ -399,17 +399,39 @@ class MemoryDB:
             _trace.info("migrate", "handoff ledger available; user_version=5")
 
         try:
+            idx_row = self._conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' "
+                "AND name='idx_memories_content_hash_unique'"
+            ).fetchone()
+            if idx_row and idx_row[0] and "namespace" not in idx_row[0]:
+                self._conn.execute("DROP INDEX IF EXISTS idx_memories_content_hash_unique")
             self._conn.execute(
                 """CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash_unique
-                   ON memories(content_hash)
+                   ON memories(namespace, content_hash)
                    WHERE content_hash != ''"""
             )
             self._conn.commit()
         except sqlite3.IntegrityError:
             _trace.warn(
                 "migrate",
-                "skipped unique content_hash index because duplicate hashes exist",
+                "skipped unique (namespace, content_hash) index because duplicates exist",
             )
+
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS operation_ledger (
+                caller_id      TEXT NOT NULL,
+                namespace      TEXT NOT NULL,
+                operation_key  TEXT NOT NULL,
+                operation_name TEXT NOT NULL,
+                request_hash   TEXT NOT NULL,
+                memory_id      TEXT NOT NULL,
+                content_hash   TEXT NOT NULL,
+                response_json  TEXT NOT NULL,
+                created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                PRIMARY KEY (caller_id, namespace, operation_key)
+            )"""
+        )
+        self._conn.commit()
 
     def insert(
         self,
@@ -702,6 +724,89 @@ class MemoryDB:
     def rollback(self) -> None:
         """Rollback the current transaction."""
         self._conn.rollback()
+
+    def find_by_namespace_and_hash(
+        self, namespace: str, content_hash: str
+    ) -> dict[str, Any] | None:
+        """Return an existing memory row in `namespace` matching `content_hash`, if any."""
+        if not content_hash:
+            return None
+        row = self._conn.execute(
+            """SELECT id, identifier, namespace, content_hash, memory_type,
+                      fact_text, fact_summary, source, importance, metadata_json,
+                      provenance_json, created_at
+               FROM memories
+               WHERE namespace = ? AND content_hash = ?
+               LIMIT 1""",
+            (namespace, content_hash),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def batch_existing_namespace_hashes(
+        self, pairs: list[tuple[str, str]]
+    ) -> set[tuple[str, str]]:
+        """Return the subset of `(namespace, content_hash)` pairs already in `memories`."""
+        existing: set[tuple[str, str]] = set()
+        if not pairs:
+            return existing
+        hashes = list({h for _, h in pairs if h})
+        for start in range(0, len(hashes), _SEARCH_BIND_CHUNK):
+            chunk = hashes[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT namespace, content_hash FROM memories "
+                f"WHERE content_hash IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for r in rows:
+                existing.add((str(r[0] or ""), str(r[1] or "")))
+        return existing & {(str(ns or ""), str(h or "")) for ns, h in pairs}
+
+    def get_operation_ledger(
+        self, caller_id: str, namespace: str, operation_key: str
+    ) -> dict[str, Any] | None:
+        """Look up an idempotent operation ledger record."""
+        row = self._conn.execute(
+            """SELECT caller_id, namespace, operation_key, operation_name,
+                      request_hash, memory_id, content_hash, response_json, created_at
+               FROM operation_ledger
+               WHERE caller_id = ? AND namespace = ? AND operation_key = ?""",
+            (caller_id, namespace, operation_key),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def put_operation_ledger(
+        self,
+        *,
+        caller_id: str,
+        namespace: str,
+        operation_key: str,
+        operation_name: str,
+        request_hash: str,
+        memory_id: str,
+        content_hash: str,
+        response_json: str,
+        _commit: bool = True,
+    ) -> None:
+        """Record an idempotent operation outcome in the current transaction."""
+        self._conn.execute(
+            """INSERT OR REPLACE INTO operation_ledger
+                   (caller_id, namespace, operation_key, operation_name,
+                    request_hash, memory_id, content_hash, response_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                caller_id,
+                namespace,
+                operation_key,
+                operation_name,
+                request_hash,
+                memory_id,
+                content_hash,
+                response_json,
+            ),
+        )
+        if _commit:
+            self._conn.commit()
 
     # ── Event log (#41) ────────────────────────────────────────────────
 

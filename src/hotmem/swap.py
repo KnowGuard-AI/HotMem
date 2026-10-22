@@ -193,13 +193,22 @@ def _flush_batch(
     Annotation-only changes on content-hash duplicates merge in-batch (#79):
     disjoint items combine, conflicts are retained — never last-write-wins.
     """
-    existing = db.batch_existing_hashes([r["content_hash"] for r in pending])
-    todo = [r for r in pending if r["content_hash"] not in existing]
+    pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in pending]
+    existing = db.batch_existing_namespace_hashes(pairs)
+    todo = [
+        r
+        for r in pending
+        if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
+    ]
     counters["skipped"] += len(pending) - len(todo)
 
     merge_duplicate_annotations(
         db,
-        [r for r in pending if r["content_hash"] in existing],
+        [
+            r
+            for r in pending
+            if (str(r.get("namespace") or ""), r["content_hash"]) in existing
+        ],
         counters,
         # Per-batch autocommit path: no later commit exists to carry an
         # all-duplicate batch's merge (durability, #79 review).
@@ -264,7 +273,7 @@ def hydrate(
             "annotation_conflicts": 0,
         }
         pending: list[dict] = []
-        batch_seen: set[str] = set()
+        batch_seen: set[tuple[str, str]] = set()
 
         def flush() -> None:
             if pending:
@@ -304,11 +313,11 @@ def hydrate(
                         counters["invalid"] += 1
                         continue
 
-                    content_hash = rec["content_hash"]
-                    if content_hash in batch_seen:
+                    dedup_key = (str(rec.get("namespace") or ""), rec["content_hash"])
+                    if dedup_key in batch_seen:
                         counters["skipped"] += 1
                         continue
-                    batch_seen.add(content_hash)
+                    batch_seen.add(dedup_key)
                     pending.append(rec)
                     if len(pending) >= HYDRATE_BATCH:
                         flush()

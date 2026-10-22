@@ -36,6 +36,7 @@ from hotmem.lifecycle import (
     transition,
 )
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
+from hotmem.mount import StoreLock
 from hotmem.policy import CallerContext, PolicyConfig, PolicyError
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
@@ -125,6 +126,12 @@ class HotMemRuntime:
         self.start_time: float = 0.0
         self.db: MemoryDB | None = None
         self.vector_index: VectorIndex | None = None
+        self._store_lock = StoreLock(
+            self.db_path,
+            store_id=self.store_id,
+            port=self.port,
+            runtime_generation=self.runtime_generation,
+        )
         self._write_lock = threading.RLock()
         self._closed = False
 
@@ -132,32 +139,41 @@ class HotMemRuntime:
         """Open SQLite store, optional vector index, and auto-hydrate if configured."""
         if self.db is not None and not self._closed:
             return self
-        self.db = MemoryDB(self.db_path)
-        self.start_time = time.time()
-        self._closed = False
+        self._store_lock.acquire()
+        try:
+            self.db = MemoryDB(self.db_path)
+            self.start_time = time.time()
+            self._closed = False
 
-        if self._vector_index_injected is None:
-            self.vector_index = get_vector_index(
-                VectorIndexConfig(backend=self.vector_backend),
-                base_dir=self.base_dir,
-            )
-        else:
-            self.vector_index = self._vector_index_injected
+            if self._vector_index_injected is None:
+                self.vector_index = get_vector_index(
+                    VectorIndexConfig(backend=self.vector_backend),
+                    base_dir=self.base_dir,
+                )
+            else:
+                self.vector_index = self._vector_index_injected
 
-        if self.swap_path and Path(self.swap_path).exists():
-            result = snapshot_hydrate(self.db, self.swap_path, embedder=self.embedder)
-            emit_import_event(
-                self.db,
-                path=str(self.swap_path),
-                loaded=result.loaded,
-                skipped_dupes=result.skipped_dupes,
-                invalid=result.invalid,
-            )
-            _trace.info(
-                "startup",
-                f"auto-hydrated {result.loaded} memories",
-                detail={"swap_path": str(self.swap_path)},
-            )
+            if self.swap_path and Path(self.swap_path).exists():
+                result = snapshot_hydrate(self.db, self.swap_path, embedder=self.embedder)
+                emit_import_event(
+                    self.db,
+                    path=str(self.swap_path),
+                    loaded=result.loaded,
+                    skipped_dupes=result.skipped_dupes,
+                    invalid=result.invalid,
+                )
+                _trace.info(
+                    "startup",
+                    f"auto-hydrated {result.loaded} memories",
+                    detail={"swap_path": str(self.swap_path)},
+                )
+        except Exception:
+            if self.db is not None:
+                with contextlib.suppress(Exception):
+                    self.db.close()
+                self.db = None
+            self._store_lock.release()
+            raise
 
         _trace.info(
             "startup",
@@ -171,16 +187,19 @@ class HotMemRuntime:
         return self
 
     def close(self) -> None:
-        """Gracefully close vector index and SQLite database."""
+        """Gracefully close vector index, SQLite database, and store ownership lock."""
         if self._closed:
             return
         self._closed = True
-        if self.vector_index is not None:
-            with contextlib.suppress(Exception):
-                self.vector_index.close()
-        if self.db is not None:
-            with contextlib.suppress(Exception):
-                self.db.close()
+        try:
+            if self.vector_index is not None:
+                with contextlib.suppress(Exception):
+                    self.vector_index.close()
+            if self.db is not None:
+                with contextlib.suppress(Exception):
+                    self.db.close()
+        finally:
+            self._store_lock.release()
 
     def _require_db(self) -> MemoryDB:
         if self.db is None or self._closed:
@@ -298,7 +317,46 @@ class HotMemRuntime:
 
         from hotmem.events import _build_memory_created_payload
 
+        req_canonical = json.dumps(
+            {
+                "identifier": identifier,
+                "fact": fact,
+                "file_uri": file_uri,
+                "byte_offset": byte_offset,
+                "byte_length": byte_length,
+                "source_format": source_format,
+                "source_checksum": source_checksum,
+                "summary": summary,
+                "source": effective_source,
+                "importance": importance,
+                "metadata": meta_dict,
+                "ttl_seconds": ttl_seconds,
+                "namespace": target_namespace,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        request_hash = hashlib.sha256(req_canonical.encode("utf-8")).hexdigest()
+
         with self._write_lock, Timer() as t:
+            if ctx.idempotency_key:
+                ledger_entry = db.get_operation_ledger(
+                    ctx.caller_id, target_namespace, ctx.idempotency_key
+                )
+                if ledger_entry is not None:
+                    if ledger_entry["request_hash"] != request_hash:
+                        msg = (
+                            f"idempotency key {ctx.idempotency_key!r} was already "
+                            "used with a different request payload"
+                        )
+                        raise PolicyError(409, "idempotency_key_conflict", msg)
+                    saved = json.loads(ledger_entry["response_json"])
+                    return {
+                        "memory_id": saved["memory_id"],
+                        "content_hash": saved["content_hash"],
+                        "trace_ms": round(t.ms, 2),
+                    }
+
             if file_uri is not None:
                 ref = FileRef(
                     source_uri=file_uri,
@@ -328,38 +386,58 @@ class HotMemRuntime:
                     memory_id=memory_id,
                     namespace=target_namespace,
                     payload=_build_memory_created_payload(record),
-                    _commit=True,
+                    _commit=not bool(ctx.idempotency_key),
                 )
             else:
                 active = self.embedder
-                memory_id = uuid.uuid4().hex
                 content_hash = compute_content_hash(identifier, fact or "")
-                vec = active.embed(fact or "")
-                blob = pack_embedding(vec)
+                existing_row = db.find_by_namespace_and_hash(target_namespace, content_hash)
+                if existing_row is not None:
+                    memory_id = str(existing_row["id"])
+                else:
+                    memory_id = uuid.uuid4().hex
+                    vec = active.embed(fact or "")
+                    blob = pack_embedding(vec)
 
-                db.insert(
-                    id=memory_id,
-                    identifier=identifier,
-                    fact_text=fact or "",
-                    embedding=blob,
-                    embedding_dim=active.descriptor.dimension,
-                    embedding_model=active.descriptor.key,
-                    source=effective_source,
-                    importance=importance,
-                    metadata_json=json.dumps(meta_dict),
-                    content_hash=content_hash,
-                    ttl_seconds=ttl_seconds,
+                    db.insert(
+                        id=memory_id,
+                        identifier=identifier,
+                        fact_text=fact or "",
+                        embedding=blob,
+                        embedding_dim=active.descriptor.dimension,
+                        embedding_model=active.descriptor.key,
+                        source=effective_source,
+                        importance=importance,
+                        metadata_json=json.dumps(meta_dict),
+                        content_hash=content_hash,
+                        ttl_seconds=ttl_seconds,
+                        namespace=target_namespace,
+                        provenance_json=provenance_json,
+                        _commit=False,
+                    )
+                    record = db.get_memory(memory_id) or {}
+                    append_event(
+                        db,
+                        event_type=EventType.MEMORY_CREATED,
+                        memory_id=memory_id,
+                        namespace=target_namespace,
+                        payload=_build_memory_created_payload(record),
+                        _commit=not bool(ctx.idempotency_key),
+                    )
+
+            if ctx.idempotency_key:
+                db.put_operation_ledger(
+                    caller_id=ctx.caller_id,
                     namespace=target_namespace,
-                    provenance_json=provenance_json,
-                    _commit=False,
-                )
-                record = db.get_memory(memory_id) or {}
-                append_event(
-                    db,
-                    event_type=EventType.MEMORY_CREATED,
+                    operation_key=ctx.idempotency_key,
+                    operation_name="add",
+                    request_hash=request_hash,
                     memory_id=memory_id,
-                    namespace=target_namespace,
-                    payload=_build_memory_created_payload(record),
+                    content_hash=content_hash,
+                    response_json=json.dumps(
+                        {"memory_id": memory_id, "content_hash": content_hash},
+                        sort_keys=True,
+                    ),
                     _commit=True,
                 )
 

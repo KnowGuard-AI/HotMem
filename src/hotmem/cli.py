@@ -267,7 +267,7 @@ def serve(
     """Start the HotMem daemon/sidecar server."""
     import uvicorn
 
-    from hotmem.mount import bootstrap_mount
+    from hotmem.mount import StoreOwnershipError, bootstrap_mount, ensure_store_available
     from hotmem.policy import PolicyConfig
     from hotmem.server import create_app
 
@@ -292,6 +292,12 @@ def serve(
         if policy_path is None and (config.mount_path / "policy.json").exists():
             policy_path = str(config.mount_path / "policy.json")
 
+    assert db_path is not None
+    try:
+        ensure_store_available(db_path)
+    except StoreOwnershipError as err:
+        raise click.ClickException(str(err)) from err
+
     if policy_path is not None:
         policy = PolicyConfig.load(policy_path)
 
@@ -311,7 +317,10 @@ def serve(
         f"starting server on {host}:{port}",
         detail={"db": db_path, "mount": mount, "store_id": app.state.runtime.store_id},
     )
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    except StoreOwnershipError as err:
+        raise click.ClickException(str(err)) from err
 
 
 @main.command()
@@ -393,7 +402,7 @@ def mcp(
         )
         return
 
-    from hotmem.mount import bootstrap_mount
+    from hotmem.mount import StoreOwnershipError, bootstrap_mount, ensure_store_available
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     reranker = _resolve_reranker_or_fail(reranker_spec, reranker_lambda, reranker_pool)
@@ -405,14 +414,25 @@ def mcp(
         db_path = str(config.db_path)
         swap_path = str(config.swap_path)
 
+    assert db_path is not None
+    try:
+        ensure_store_available(db_path)
+    except StoreOwnershipError as err:
+        raise click.ClickException(str(err)) from err
+
     _trace.info(
         "mcp",
         "starting mcp server on stdio",
         detail={"db": db_path, "mount": mount},
     )
-    asyncio.run(
-        run_mcp_server(db_path=db_path, swap_path=swap_path, embedder=embedder, reranker=reranker)
-    )
+    try:
+        asyncio.run(
+            run_mcp_server(
+                db_path=db_path, swap_path=swap_path, embedder=embedder, reranker=reranker
+            )
+        )
+    except StoreOwnershipError as err:
+        raise click.ClickException(str(err)) from err
 
 
 @main.command()
@@ -479,8 +499,13 @@ def hydrate(
 
     assert db_path is not None
     from hotmem.db import MemoryDB
+    from hotmem.mount import StoreOwnershipError, ensure_store_available
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    try:
+        ensure_store_available(db_path)
+    except StoreOwnershipError as err:
+        raise click.ClickException(str(err)) from err
 
     # Route v2 directories through the snapshot dispatch (no progress bar);
     # legacy .jsonl/.jsonl.gz goes through swap.hydrate with the UI progress bar.
@@ -1204,6 +1229,12 @@ def promote(
     assert db_path is not None
     from hotmem.db import MemoryDB
     from hotmem.lifecycle import InvalidTransitionError, transition
+    from hotmem.mount import StoreOwnershipError, ensure_store_available
+
+    try:
+        ensure_store_available(db_path)
+    except StoreOwnershipError as err:
+        raise click.ClickException(str(err)) from err
 
     db = MemoryDB(db_path)
     try:
@@ -1372,8 +1403,13 @@ def delta_apply(
     from hotmem.interchange.delta import DeltaConflictError
     from hotmem.interchange.delta import apply_delta as do_apply
     from hotmem.interchange.hydrate import PackageError
+    from hotmem.mount import StoreOwnershipError, ensure_store_available
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    try:
+        ensure_store_available(db_path)
+    except StoreOwnershipError as err:
+        raise click.ClickException(str(err)) from err
     db = MemoryDB(db_path)
     try:
         result = do_apply(db, delta_dir, embedder=embedder)
@@ -1606,8 +1642,13 @@ def handoff_hydrate(
     from hotmem.db import MemoryDB
     from hotmem.handoff.hydrate import hydrate_handoff as do_hydrate
     from hotmem.handoff.verify import HandoffError
+    from hotmem.mount import StoreOwnershipError, ensure_store_available
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    try:
+        ensure_store_available(db_path)
+    except StoreOwnershipError as err:
+        raise click.ClickException(str(err)) from err
     db = MemoryDB(db_path)
     try:
         result = do_hydrate(db, package, embedder=embedder)
