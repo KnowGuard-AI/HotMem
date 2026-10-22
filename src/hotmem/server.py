@@ -546,18 +546,6 @@ def create_app(
                 package=req.package,
                 gz=req.gz,
             )
-        except SnapshotChecksumError as err:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "error": "snapshot_checksum_mismatch",
-                    "reason": err.reason,
-                    "file": err.file,
-                    "expected": err.expected,
-                    "actual": err.actual,
-                    "message": str(err),
-                },
-            )
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
 
