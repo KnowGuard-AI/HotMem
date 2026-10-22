@@ -264,6 +264,7 @@ def test_mmvt7_dynamic_revocation_unavailable_store_and_route_audit(tmp_path: Pa
         "Authorization": "Bearer tok-a",
         "X-HotMem-Store-Id": "store-revoke",
         "X-HotMem-Namespace": "ops/shared",
+        "X-HotMem-Session-Id": "sess-a-revoke",
     }
     hdr_b = {
         "Authorization": "Bearer tok-b",
@@ -301,7 +302,7 @@ def test_mmvt7_dynamic_revocation_unavailable_store_and_route_audit(tmp_path: Pa
         assert revoked_count == 1
         assert policy.revision == 2
 
-        assert client.get(f"/v1/memory/{mid}", headers=hdr_b).status_code == 403
+        assert client.get(f"/v1/memory/{mid}", headers=hdr_b).status_code == 404
         assert (
             client.post(
                 "/v1/search", headers=hdr_b, json={"query": "DEMO-17", "top_k": 5}

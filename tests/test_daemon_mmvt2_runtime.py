@@ -63,11 +63,13 @@ def test_mmvt2_two_app_instances_do_not_share_module_global_state(tmp_path: Path
         "Authorization": "Bearer tok-alpha",
         "X-HotMem-Store-Id": "store-alpha",
         "X-HotMem-Namespace": "ns-a",
+        "X-HotMem-Session-Id": "sess-alpha",
     }
     hdr_b = {
         "Authorization": "Bearer tok-beta",
         "X-HotMem-Store-Id": "store-beta",
         "X-HotMem-Namespace": "ns-b",
+        "X-HotMem-Session-Id": "sess-beta",
     }
 
     with TestClient(app_a) as client_a, TestClient(app_b) as client_b:
@@ -85,11 +87,11 @@ def test_mmvt2_two_app_instances_do_not_share_module_global_state(tmp_path: Path
         health_a = client_a.get("/v1/health", headers=hdr_a).json()
         health_b = client_b.get("/v1/health", headers=hdr_b).json()
         assert health_a["store_id"] == "store-alpha"
-        assert health_a["db_path"] == str(db_a)
+        assert health_a["db_path"] is None  # absolute paths are not disclosed
         assert health_a["memory_count"] == 1
 
         assert health_b["store_id"] == "store-beta"
-        assert health_b["db_path"] == str(db_b)
+        assert health_b["db_path"] is None
         assert health_b["memory_count"] == 1
 
         # Cross-store credential or store_id is rejected

@@ -399,7 +399,7 @@ def test_mmvt1_incident_with_two_pooled_http_clients_on_loopback(
 
             with pytest.raises(httpx.HTTPStatusError) as exc_info:
                 client_b.get_memory(res_priv["memory_id"])
-            assert exc_info.value.response.status_code == 403
+            assert exc_info.value.response.status_code == 404
             assert canary_secret not in exc_info.value.response.text
     finally:
         server.should_exit = True

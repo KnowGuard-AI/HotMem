@@ -48,6 +48,7 @@ def test_mmvt6_health_and_basic_reads_remain_responsive_during_slow_operation(
         "Authorization": "Bearer tok-a",
         "X-HotMem-Store-Id": "store-mmvt6",
         "X-HotMem-Namespace": "ops/shared",
+        "X-HotMem-Session-Id": "sess-responsive",
     }
 
     with TestClient(app) as client:
