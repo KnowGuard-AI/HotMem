@@ -39,6 +39,10 @@ class StoreOwnershipError(RuntimeError):
         self.owner = owner or {}
 
 
+class StoreIdentityError(RuntimeError):
+    """Raised when the configured store id contradicts the store's persistent identity."""
+
+
 class StoreLock:
     """OS-backed exclusive store ownership lock with stale-owner recovery (#109)."""
 
@@ -103,12 +107,31 @@ class StoreLock:
             "runtime_generation": self.runtime_generation,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        raw = (json.dumps(owner_payload, sort_keys=True) + "\n").encode("utf-8")
+        self._write_owner_payload(fd, owner_payload)
+        self._fd = fd
+
+    def _write_owner_payload(self, fd: int, payload: dict[str, Any]) -> None:
+        raw = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
         os.write(fd, raw)
         os.fsync(fd)
-        self._fd = fd
+
+    def write_owner(self) -> None:
+        """Refresh the owner metadata (e.g. after adopting the store's persistent id)."""
+        if self._fd is None:
+            return
+        self._write_owner_payload(
+            self._fd,
+            {
+                "pid": os.getpid(),
+                "db_path": self.db_path,
+                "store_id": self.store_id,
+                "port": self.port,
+                "runtime_generation": self.runtime_generation,
+                "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+        )
 
     def release(self) -> None:
         if self._fd is None:
@@ -128,11 +151,21 @@ class StoreLock:
                 with contextlib.suppress(OSError):
                     fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
+            # The lock file is intentionally NOT unlinked: unlinking after
+            # unlocking races with a competing owner (a waiter can hold a
+            # lock on an unlinked inode while a third process creates and
+            # locks a fresh path). Stale metadata is overwritten by the next
+            # successful acquire, and the OS releases the advisory lock on
+            # process death.
             with contextlib.suppress(OSError):
                 os.close(fd)
-            if self.lock_path is not None:
-                with contextlib.suppress(OSError):
-                    self.lock_path.unlink()
+
+    def __enter__(self) -> StoreLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.release()
 
     def read_owner(self) -> dict[str, Any] | None:
         if self.lock_path is None or not self.lock_path.exists():
@@ -148,6 +181,33 @@ def ensure_store_available(db_path: str | Path) -> None:
     lock = StoreLock(db_path)
     lock.acquire()
     lock.release()
+
+
+@contextlib.contextmanager
+def store_ownership(
+    db_path: str | Path,
+    *,
+    store_id: str = "",
+    port: int = 8711,
+    runtime_generation: str = "",
+):
+    """Hold exclusive store ownership for the duration of an offline mutation.
+
+    Offline CLI writers must keep this lock from the ownership check through
+    the write/commit and close — a check-then-release window lets a daemon
+    start in between and become a second writer.
+    """
+    lock = StoreLock(
+        db_path,
+        store_id=store_id,
+        port=port,
+        runtime_generation=runtime_generation,
+    )
+    lock.acquire()
+    try:
+        yield lock
+    finally:
+        lock.release()
 
 
 @dataclass
