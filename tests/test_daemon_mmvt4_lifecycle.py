@@ -339,3 +339,50 @@ def test_mmvt4_existing_db_content_hash_index_migrates_to_namespace_scoped(
         assert db.get_memory("m-ns2") is not None
     finally:
         db.close()
+
+def test_mmvt4_graceful_restart_preserves_acknowledged_writes(tmp_path: Path):
+    """Graceful stop/restart keeps acknowledged writes and recovers ownership cleanly."""
+    mount = tmp_path / "graceful_mount"
+    mount.mkdir()
+    policy = PolicyConfig(
+        store_id="store-mmvt4",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-a",
+                caller_id="caller-a",
+                store_id="store-mmvt4",
+                namespaces=("ops/shared",),
+                operations=("read", "write"),
+                allowed_sessions=("sess-graceful",),
+            )
+        ],
+    )
+    policy.save(mount / "policy.json")
+
+    with _daemon_process(mount) as (url1, _proc1), HotMemClient(
+        url1,
+        token="tok-a",
+        session_id="sess-graceful",
+        namespace="ops/shared",
+        expected_store_id="store-mmvt4",
+    ) as client:
+        memory_id = client.add(
+            "ops/graceful", "acknowledged before a graceful restart"
+        )["memory_id"]
+        assert client.health()["memory_count"] == 1
+        # Leaving the context terminates the daemon gracefully (SIGTERM).
+
+    with _daemon_process(mount) as (url2, _proc2), HotMemClient(
+        url2,
+        token="tok-a",
+        session_id="sess-graceful",
+        namespace="ops/shared",
+        expected_store_id="store-mmvt4",
+    ) as client:
+        health = client.health()
+        assert health["status"] == "ok"
+        assert health["memory_count"] == 1
+        assert client.get_memory(memory_id)["fact_text"] == (
+            "acknowledged before a graceful restart"
+        )

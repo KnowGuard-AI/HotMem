@@ -14,12 +14,13 @@ Question/test:
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from hotmem.policy import CallerCredential, PolicyConfig, PolicyError
+from hotmem.policy import CallerCredential, PolicyConfig
 from hotmem.runtime import HotMemRuntime
 from hotmem.server import create_app
 
@@ -77,16 +78,20 @@ def test_mmvt6_health_and_basic_reads_remain_responsive_during_slow_operation(
 
         try:
             # 1. While _write_slot is held, /v1/health, /v1/search, and /v1/memory/{id}
-            #    must complete immediately via WAL read connection!
+            #    must complete promptly via a WAL read-only connection.
+            t_health = time.perf_counter()
             h_resp = client.get("/v1/health", headers=hdr)
+            assert time.perf_counter() - t_health < 2.0
             assert h_resp.status_code == 200
             assert h_resp.json()["memory_count"] == 1
 
+            t_search = time.perf_counter()
             s_resp = client.post(
                 "/v1/search",
                 headers=hdr,
                 json={"query": "DEMO-17 roll back", "top_k": 5},
             )
+            assert time.perf_counter() - t_search < 2.0
             assert s_resp.status_code == 200
             assert s_resp.json()["count"] == 1
 
@@ -126,7 +131,6 @@ def test_mmvt6_health_and_basic_reads_remain_responsive_during_slow_operation(
             json={"identifier": "ops/after-cancel", "fact": "clean write after rollback"},
         )
         assert ok_resp.status_code == 200
-        assert isinstance(PolicyError(503, "server_busy", "busy"), Exception)
 
 
 def test_mmvt6_two_client_direct_vs_loopback_http_baseline():
@@ -146,8 +150,8 @@ def test_mmvt6_two_client_direct_vs_loopback_http_baseline():
     assert report["reads_per_client"] == 20
     assert report["direct"]["samples"] == 40
     assert report["loopback_http_pooled"]["samples"] == 40
-    assert report["direct"]["payload_bytes"] > 0
-    assert report["loopback_http_pooled"]["payload_bytes"] > 0
+    assert report["direct"]["payload_bytes_avg"] > 0
+    assert report["loopback_http_pooled"]["payload_bytes_avg"] > 0
     assert report["direct"]["wall_p50_ms"] >= 0.0
     assert report["loopback_http_pooled"]["wall_p50_ms"] >= 0.0
     assert report["loopback_http_pooled"]["trace_p50_ms"] >= 0.0
