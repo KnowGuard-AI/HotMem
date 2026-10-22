@@ -150,6 +150,14 @@ Closing or restarting the MCP host closes only the `stdio` relay; the daemon and
   `store_state` as `verified_empty`, `ready`, or `empty_scope`, and omits
   `db_path` for scoped callers. Store-wide `/v1/bundles` and `/v1/discover`
   require management authority.
+- **Offline-only commands.** `delta produce/apply`, `verify`, `inspect`, and
+  `import` operate on local files and are intentionally offline (they cannot be
+  routed through the HTTP boundary). `handoff prepare/verify/inspect/hydrate`
+  all support `--url` (and require the path to be inside the daemon base dir
+  when a policy is active).
+- **`X-HotMem-Store-Id` is a typo-safety assertion**, not a credential: it lets
+  a client fail fast when it points at the wrong daemon. Authorization always
+  comes from the bearer token and the credential's `store_id` binding.
 - **Revocation is immediate.** Management callers can revoke at runtime:
   `hotmem policy revoke --url ... --caller caller-b` or `--approval <id>`, and
   `hotmem policy reload --url ...` to re-read the policy file.
@@ -208,7 +216,7 @@ uv run python bench/daemon/run_mmvt6_baseline.py
 
 Measured on macOS (`darwin`), `hotmem-hash-v1` embedder, 2 callers (`caller-a`, `caller-b`), 25 reads/client after warmup (50 samples per mode), process max RSS `69.09 MB`:
 
-| Mode | Samples | Payload Bytes | Client Wall p50 (ms) | Client Wall p95 (ms) | Server `trace_ms` p50 | Server `trace_ms` p95 | Approx Transport Delta p50 (ms) | CPU Time (s) |
+| Mode | Samples | Avg Payload Bytes | Client Wall p50 (ms) | Client Wall p95 (ms) | Server `trace_ms` p50 | Server `trace_ms` p95 | Approx Transport Delta p50 (ms) | CPU Time (s) |
 | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Direct (`HotMemRuntime`) | 50 | 2,168 | 0.390 | 0.918 | 0.380 | 0.900 | — | 0.0238 |
 | Pooled Loopback HTTP (`HotMemClient`) | 50 | 2,038 | 1.894 | 2.768 | 0.520 | 0.850 | 1.325 | 0.0925 |
