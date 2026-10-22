@@ -46,7 +46,7 @@ export class HotMemClient {
       if (optionsOrTimeout.source) {
         this.contextHeaders["x-hotmem-source"] = optionsOrTimeout.source;
       }
-      if (optionsOrTimeout.namespace !== undefined) {
+      if (optionsOrTimeout.namespace !== undefined && optionsOrTimeout.namespace !== "") {
         this.contextHeaders["x-hotmem-namespace"] = optionsOrTimeout.namespace;
       }
     }

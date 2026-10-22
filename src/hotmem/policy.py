@@ -257,6 +257,13 @@ class CallerContext:
             if self.namespace is not None
             else (self.credential.namespaces[0] if self.credential.namespaces else "")
         )
+        if target == "*":
+            raise PolicyError(
+                400,
+                "namespace_required",
+                "a concrete namespace is required for writes; "
+                "'*' is a read wildcard and cannot be used as a write target",
+            )
         if not self.can_access_namespace(target, operation="write"):
             raise PolicyError(
                 403,
@@ -431,6 +438,31 @@ class PolicyConfig:
                 out.update(c.allowed_sources)
         return out
 
+    def validate_write_source(self, ctx: CallerContext, source: str | None) -> None:
+        """Reject source attribution the credential is not entitled to claim (#111)."""
+        if not source or not ctx.policy_enforced or ctx.credential is None:
+            return
+        if ctx.source and source != ctx.source:
+            raise PolicyError(
+                403,
+                "session_impersonation_denied",
+                f"request payload source {source!r} conflicts with "
+                f"session header source {ctx.source!r}",
+            )
+        cred = ctx.credential
+        if cred.allowed_sources and source not in cred.allowed_sources:
+            raise PolicyError(
+                403,
+                "session_impersonation_denied",
+                f"source {source!r} is not permitted for caller {ctx.caller_id!r}",
+            )
+        if source in self._claimed_sources_of_others(ctx.caller_id):
+            raise PolicyError(
+                403,
+                "session_impersonation_denied",
+                f"source {source!r} belongs to another caller",
+            )
+
     def resolve_request(
         self,
         *,
@@ -445,25 +477,26 @@ class PolicyConfig:
     ) -> CallerContext:
         """Authenticate and authorize request metadata, returning a CallerContext."""
         active_store_id = self.store_id or runtime_store_id
-
-        # 1. Verify store selection first if caller specified an expected store
-        if requested_store_id and active_store_id and requested_store_id != active_store_id:
-            msg = (
-                f"requested store {requested_store_id!r} does not match "
-                f"active store {active_store_id!r}"
-            )
-            raise PolicyError(
-                409,
-                "store_mismatch",
-                msg,
-                detail={
-                    "expected_store_id": requested_store_id,
-                    "actual_store_id": active_store_id,
-                },
-            )
+        namespace = namespace or None
 
         enforced = self.require_auth or bool(self.credentials) or (token is not None)
         if not enforced:
+            # No credential boundary (embedded/local operator): the store
+            # selection is still checked, and there is nothing to authenticate.
+            if requested_store_id and active_store_id and requested_store_id != active_store_id:
+                msg = (
+                    f"requested store {requested_store_id!r} does not match "
+                    f"active store {active_store_id!r}"
+                )
+                raise PolicyError(
+                    409,
+                    "store_mismatch",
+                    msg,
+                    detail={
+                        "expected_store_id": requested_store_id,
+                        "actual_store_id": active_store_id,
+                    },
+                )
             return CallerContext(
                 authenticated=False,
                 policy_enforced=False,
@@ -501,6 +534,23 @@ class PolicyConfig:
                 403,
                 "revoked_credential",
                 f"credential for caller {matched.caller_id!r} has been revoked",
+            )
+
+        # Store identity is disclosed only after the caller is authenticated
+        # (an unauthenticated store-id oracle is itself a leak).
+        if requested_store_id and active_store_id and requested_store_id != active_store_id:
+            msg = (
+                f"requested store {requested_store_id!r} does not match "
+                f"active store {active_store_id!r}"
+            )
+            raise PolicyError(
+                409,
+                "store_mismatch",
+                msg,
+                detail={
+                    "expected_store_id": requested_store_id,
+                    "actual_store_id": active_store_id,
+                },
             )
 
         if matched.store_id and active_store_id and matched.store_id != active_store_id:

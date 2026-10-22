@@ -32,7 +32,7 @@ def _build_context_headers(
         headers["X-HotMem-Session-Id"] = session_id
     if source:
         headers["X-HotMem-Source"] = source
-    if namespace is not None:
+    if namespace:
         headers["X-HotMem-Namespace"] = namespace
     if idempotency_key:
         headers["X-HotMem-Idempotency-Key"] = idempotency_key
@@ -303,6 +303,28 @@ class HotMemClient:
         if after_seq is not None:
             params["after_seq"] = after_seq
         resp = self._client.get("/v1/events", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def revoke_policy(
+        self,
+        *,
+        caller_id: str | None = None,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Revoke a caller credential and/or share approval (management only)."""
+        payload: dict[str, Any] = {}
+        if caller_id is not None:
+            payload["caller_id"] = caller_id
+        if approval_id is not None:
+            payload["approval_id"] = approval_id
+        resp = self._client.post("/v1/policy/revoke", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def reload_policy(self) -> dict[str, Any]:
+        """Reload the daemon policy file (management only)."""
+        resp = self._client.post("/v1/policy/reload", json={})
         resp.raise_for_status()
         return resp.json()
 
@@ -581,6 +603,28 @@ class AsyncHotMemClient:
         if after_seq is not None:
             params["after_seq"] = after_seq
         resp = await self._client.get("/v1/events", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def revoke_policy(
+        self,
+        *,
+        caller_id: str | None = None,
+        approval_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Revoke a caller credential and/or share approval (management only)."""
+        payload: dict[str, Any] = {}
+        if caller_id is not None:
+            payload["caller_id"] = caller_id
+        if approval_id is not None:
+            payload["approval_id"] = approval_id
+        resp = await self._client.post("/v1/policy/revoke", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def reload_policy(self) -> dict[str, Any]:
+        """Reload the daemon policy file (management only)."""
+        resp = await self._client.post("/v1/policy/reload", json={})
         resp.raise_for_status()
         return resp.json()
 
