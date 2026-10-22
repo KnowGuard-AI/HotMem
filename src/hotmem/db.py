@@ -402,40 +402,68 @@ class MemoryDB:
             self._conn.commit()
             _trace.info("migrate", "handoff ledger available; user_version=5")
 
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS store_meta (
+               key   TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+           )"""
+        )
+        self._conn.commit()
+
+        # Namespace-scoped logical identity (#100) and the idempotent
+        # operation ledger are part of schema v6. The migration is
+        # transactional: if the namespace-scoped unique index cannot be
+        # created, the whole migration rolls back instead of silently
+        # dropping the uniqueness guarantee.
+        self._conn.execute("SAVEPOINT migration_v6")
         try:
             idx_row = self._conn.execute(
                 "SELECT sql FROM sqlite_master WHERE type='index' "
                 "AND name='idx_memories_content_hash_unique'"
             ).fetchone()
-            if idx_row and idx_row[0] and "namespace" not in idx_row[0]:
-                self._conn.execute("DROP INDEX IF EXISTS idx_memories_content_hash_unique")
+            create_index = True
+            if idx_row and idx_row[0]:
+                if "namespace" in idx_row[0]:
+                    create_index = False
+                else:
+                    self._conn.execute("DROP INDEX idx_memories_content_hash_unique")
+            if create_index:
+                self._conn.execute(
+                    """CREATE UNIQUE INDEX idx_memories_content_hash_unique
+                       ON memories(namespace, content_hash)
+                       WHERE content_hash != ''"""
+                )
             self._conn.execute(
-                """CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_content_hash_unique
-                   ON memories(namespace, content_hash)
-                   WHERE content_hash != ''"""
+                """CREATE TABLE IF NOT EXISTS operation_ledger (
+                    caller_id      TEXT NOT NULL,
+                    namespace      TEXT NOT NULL,
+                    operation_key  TEXT NOT NULL,
+                    operation_name TEXT NOT NULL,
+                    request_hash   TEXT NOT NULL,
+                    memory_id      TEXT NOT NULL,
+                    content_hash   TEXT NOT NULL,
+                    response_json  TEXT NOT NULL,
+                    created_at     TEXT NOT NULL
+                        DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                    PRIMARY KEY (caller_id, namespace, operation_key)
+                )"""
             )
+            self._conn.execute("RELEASE SAVEPOINT migration_v6")
             self._conn.commit()
-        except sqlite3.IntegrityError:
-            _trace.warn(
-                "migrate",
-                "skipped unique (namespace, content_hash) index because duplicates exist",
-            )
+        except sqlite3.IntegrityError as err:
+            self._conn.execute("ROLLBACK TO SAVEPOINT migration_v6")
+            self._conn.execute("RELEASE SAVEPOINT migration_v6")
+            self._conn.commit()
+            raise sqlite3.IntegrityError(
+                "cannot migrate to namespace-scoped content identity: duplicate "
+                "(namespace, content_hash) rows exist; resolve duplicates before "
+                "starting HotMem"
+            ) from err
 
-        self._conn.execute(
-            """CREATE TABLE IF NOT EXISTS operation_ledger (
-                caller_id      TEXT NOT NULL,
-                namespace      TEXT NOT NULL,
-                operation_key  TEXT NOT NULL,
-                operation_name TEXT NOT NULL,
-                request_hash   TEXT NOT NULL,
-                memory_id      TEXT NOT NULL,
-                content_hash   TEXT NOT NULL,
-                response_json  TEXT NOT NULL,
-                created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                PRIMARY KEY (caller_id, namespace, operation_key)
-            )"""
-        )
-        self._conn.commit()
+        if current_version < 6:
+            self._conn.execute("PRAGMA user_version = 6")
+            self._conn.commit()
+            _trace.info("migrate", "namespace identity + operation ledger; user_version=6")
 
     def insert(
         self,
@@ -728,6 +756,21 @@ class MemoryDB:
     def rollback(self) -> None:
         """Rollback the current transaction."""
         self._conn.rollback()
+
+    def get_meta(self, key: str) -> str | None:
+        """Return a store-level metadata value (e.g. persistent store_id)."""
+        row = self._conn.execute(
+            "SELECT value FROM store_meta WHERE key = ?", (key,)
+        ).fetchone()
+        return str(row["value"]) if row is not None else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Persist a store-level metadata value."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO store_meta (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        self._conn.commit()
 
     def find_by_namespace_and_hash(
         self, namespace: str, content_hash: str
@@ -1050,6 +1093,9 @@ class MemoryDB:
         ONE chunked query — used by the annotation merge path to compare
         incoming envelopes against stored records without re-reading rows.
         Returns ``{content_hash: {"id": ..., "metadata": dict}}``.
+
+        Content hashes are only unique together with a namespace (#100); use
+        :meth:`fetch_metadata_by_namespace_hashes` when scoping matters.
         """
         out: dict[str, dict[str, Any]] = {}
         for start in range(0, len(content_hashes), _SEARCH_BIND_CHUNK):
@@ -1067,6 +1113,39 @@ class MemoryDB:
                 except json.JSONDecodeError:
                     metadata = {}
                 out[str(row["content_hash"])] = {"id": row["id"], "metadata": metadata}
+        return out
+
+    def fetch_metadata_by_namespace_hashes(
+        self, pairs: list[tuple[str, str]]
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        """Fetch id + metadata keyed by ``(namespace, content_hash)`` (#100).
+
+        Prevents annotation merges from targeting a same-content row that
+        lives in a different namespace.
+        """
+        out: dict[tuple[str, str], dict[str, Any]] = {}
+        if not pairs:
+            return out
+        wanted = {(str(ns or ""), str(h or "")) for ns, h in pairs if h}
+        hashes = list({h for _, h in wanted})
+        for start in range(0, len(hashes), _SEARCH_BIND_CHUNK):
+            chunk = hashes[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"""SELECT namespace, content_hash, id, metadata_json
+                    FROM memories
+                    WHERE content_hash IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                key = (str(row["namespace"] or ""), str(row["content_hash"]))
+                if key not in wanted:
+                    continue
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                except json.JSONDecodeError:
+                    metadata = {}
+                out[key] = {"id": row["id"], "metadata": metadata}
         return out
 
     def update_metadata_json(

@@ -170,7 +170,7 @@ def record_to_memory_record(
         parent_memory=rec["parent_memory"],
         related_memories=json.dumps(rec["related_memories"]),
         tags=json.dumps(rec["tags"]),
-        schema_version=rec["schema_version"],
+        schema_version=rec.get("record_schema_version") or rec["schema_version"],
         fact_summary=rec["fact_summary"],
         provenance_json=json.dumps(rec["provenance"]) if rec["provenance"] else None,
     )
