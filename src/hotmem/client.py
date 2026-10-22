@@ -1,25 +1,10 @@
-"""HotMem client - Python SDK for the memory sidecar.
+"""HotMem client - Python SDK for the memory daemon/sidecar (#109, #110, #111).
 
 Purpose:
-    Provide a simple, typed client for the HotMem HTTP API.
-    Designed for direct use in agent applications and SPA backends.
-
-Interface:
-    HotMemClient(base_url)
-        .add(identifier, fact, ...) -> dict                  # inline (unchanged)
-        .add_file_ref(identifier, file_ref, ...) -> dict      # file-backed
-        .search(query, top_k, max_chars?) -> list[MessageObject]
-        .get_memory(memory_id) -> dict                        # metadata only
-        .hydrate_memory(memory_id) -> bytes                    # lazy payload
-        .list(identifier, ...) -> list[dict]
-        .health() -> dict
-        .hydrate(file?) -> dict
-        .snapshot(file?) -> dict
-    AsyncHotMemClient(base_url)
-        Async equivalent of HotMemClient.
-
-Deps: httpx
-Extension: add retry logic or connection pooling here.
+    Provide a simple, typed client for the HotMem HTTP API with persistent
+    connection pooling (`httpx.Client` / `httpx.AsyncClient`), credential-bound
+    authentication, explicit store verification, session/source attribution,
+    and idempotent write keys.
 """
 
 from __future__ import annotations
@@ -29,12 +14,59 @@ from typing import Any
 import httpx
 
 
-class HotMemClient:
-    """Synchronous client for the HotMem sidecar API."""
+def _build_context_headers(
+    *,
+    token: str | None = None,
+    session_id: str | None = None,
+    source: str | None = None,
+    namespace: str | None = None,
+    expected_store_id: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if expected_store_id:
+        headers["X-HotMem-Store-Id"] = expected_store_id
+    if session_id:
+        headers["X-HotMem-Session-Id"] = session_id
+    if source:
+        headers["X-HotMem-Source"] = source
+    if namespace is not None:
+        headers["X-HotMem-Namespace"] = namespace
+    if idempotency_key:
+        headers["X-HotMem-Idempotency-Key"] = idempotency_key
+    return headers
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8711") -> None:
+
+class HotMemClient:
+    """Synchronous client for the HotMem daemon/sidecar API."""
+
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8711",
+        *,
+        timeout: float = 30.0,
+        token: str | None = None,
+        session_id: str | None = None,
+        source: str | None = None,
+        namespace: str | None = None,
+        expected_store_id: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.Client(base_url=self.base_url, timeout=30.0)
+        self.token = token
+        self.session_id = session_id
+        self.source = source
+        self.namespace = namespace
+        self.expected_store_id = expected_store_id
+        headers = _build_context_headers(
+            token=token,
+            session_id=session_id,
+            source=source,
+            namespace=namespace,
+            expected_store_id=expected_store_id,
+        )
+        self._client = httpx.Client(base_url=self.base_url, timeout=timeout, headers=headers)
 
     def health(self) -> dict[str, Any]:
         """Check server health."""
@@ -51,9 +83,10 @@ class HotMemClient:
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
         ttl_seconds: int | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add an inline fact to memory."""
-        payload = {
+        payload: dict[str, Any] = {
             "identifier": identifier,
             "fact": fact,
             "source": source,
@@ -62,7 +95,14 @@ class HotMemClient:
         }
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
-        resp = self._client.post("/v1/add", json=payload)
+        if idempotency_key is not None:
+            resp = self._client.post(
+                "/v1/add",
+                json=payload,
+                headers={"X-HotMem-Idempotency-Key": idempotency_key},
+            )
+        else:
+            resp = self._client.post("/v1/add", json=payload)
         resp.raise_for_status()
         return resp.json()
 
@@ -79,12 +119,9 @@ class HotMemClient:
         source: str = "",
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Add a file-backed memory by reference (zero bytes copied).
-
-        The memory stores a URI + byte range reference; the backing file is
-        not read at add time. Hydrate on demand via ``hydrate_memory()``.
-        """
+        """Add a file-backed memory by reference (zero bytes copied)."""
         payload: dict[str, Any] = {
             "identifier": identifier,
             "file_uri": file_uri,
@@ -99,7 +136,14 @@ class HotMemClient:
             payload["source_checksum"] = source_checksum
         if summary is not None:
             payload["summary"] = summary
-        resp = self._client.post("/v1/add", json=payload)
+        if idempotency_key is not None:
+            resp = self._client.post(
+                "/v1/add",
+                json=payload,
+                headers={"X-HotMem-Idempotency-Key": idempotency_key},
+            )
+        else:
+            resp = self._client.post("/v1/add", json=payload)
         resp.raise_for_status()
         return resp.json()
 
@@ -145,7 +189,7 @@ class HotMemClient:
         return resp.json()["memories"]
 
     def hydrate(self, file: str | None = None) -> dict[str, Any]:
-        """Trigger swap file hydration."""
+        """Trigger swap file or v2 directory hydration."""
         payload: dict[str, Any] = {}
         if file:
             payload["file"] = file
@@ -153,12 +197,112 @@ class HotMemClient:
         resp.raise_for_status()
         return resp.json()
 
-    def snapshot(self, file: str | None = None) -> dict[str, Any]:
-        """Trigger database snapshot to swap file."""
+    def snapshot(
+        self,
+        file: str | None = None,
+        *,
+        copy_attachments: bool | None = None,
+        package: bool | None = None,
+        gz: bool | None = None,
+    ) -> dict[str, Any]:
+        """Trigger database snapshot to swap file, v2 directory, or package."""
         payload: dict[str, Any] = {}
         if file:
             payload["file"] = file
+        if copy_attachments is not None:
+            payload["copy_attachments"] = copy_attachments
+        if package is not None:
+            payload["package"] = package
+        if gz is not None:
+            payload["gz"] = gz
         resp = self._client.post("/v1/snapshot", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def handoff_prepare(
+        self,
+        source: str,
+        output: str,
+        *,
+        consent: str,
+        mode: str = "resume",
+        session: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "source": source,
+            "output": output,
+            "mode": mode,
+            "consent": consent,
+        }
+        if session is not None:
+            payload["session"] = session
+        resp = self._client.post("/v1/handoff/prepare", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def handoff_verify(self, package: str) -> dict[str, Any]:
+        resp = self._client.post("/v1/handoff/verify", json={"package": package})
+        resp.raise_for_status()
+        return resp.json()
+
+    def handoff_inspect(self, package: str) -> dict[str, Any]:
+        resp = self._client.get("/v1/handoff/inspect", params={"package": package})
+        resp.raise_for_status()
+        return resp.json()
+
+    def handoff_hydrate(self, package: str) -> dict[str, Any]:
+        resp = self._client.post("/v1/handoff/hydrate", json={"package": package})
+        resp.raise_for_status()
+        return resp.json()
+
+    def promote(
+        self,
+        memory_id: str,
+        to_state: str,
+        *,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"to_state": to_state}
+        if reason is not None:
+            payload["reason"] = reason
+        if actor is not None:
+            payload["actor"] = actor
+        resp = self._client.post(f"/v1/memory/{memory_id}/promote", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    def candidates(
+        self, *, namespace: str | None = None, state: str | None = None
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if namespace is not None:
+            params["namespace"] = namespace
+        if state is not None:
+            params["state"] = state
+        resp = self._client.get("/v1/promotion/candidates", params=params)
+        resp.raise_for_status()
+        return resp.json()["candidates"]
+
+    def events(
+        self,
+        *,
+        memory_id: str | None = None,
+        namespace: str | None = None,
+        event_type: str | None = None,
+        after_seq: int | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": limit}
+        if memory_id is not None:
+            params["memory_id"] = memory_id
+        if namespace is not None:
+            params["namespace"] = namespace
+        if event_type is not None:
+            params["event_type"] = event_type
+        if after_seq is not None:
+            params["after_seq"] = after_seq
+        resp = self._client.get("/v1/events", params=params)
         resp.raise_for_status()
         return resp.json()
 
@@ -174,11 +318,33 @@ class HotMemClient:
 
 
 class AsyncHotMemClient:
-    """Asynchronous client for the HotMem sidecar API."""
+    """Asynchronous client for the HotMem daemon/sidecar API."""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:8711") -> None:
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:8711",
+        *,
+        timeout: float = 30.0,
+        token: str | None = None,
+        session_id: str | None = None,
+        source: str | None = None,
+        namespace: str | None = None,
+        expected_store_id: str | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=30.0)
+        self.token = token
+        self.session_id = session_id
+        self.source = source
+        self.namespace = namespace
+        self.expected_store_id = expected_store_id
+        headers = _build_context_headers(
+            token=token,
+            session_id=session_id,
+            source=source,
+            namespace=namespace,
+            expected_store_id=expected_store_id,
+        )
+        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout, headers=headers)
 
     async def health(self) -> dict[str, Any]:
         """Check server health."""
@@ -195,9 +361,10 @@ class AsyncHotMemClient:
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
         ttl_seconds: int | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add a fact to memory."""
-        payload = {
+        payload: dict[str, Any] = {
             "identifier": identifier,
             "fact": fact,
             "source": source,
@@ -206,7 +373,14 @@ class AsyncHotMemClient:
         }
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
-        resp = await self._client.post("/v1/add", json=payload)
+        if idempotency_key is not None:
+            resp = await self._client.post(
+                "/v1/add",
+                json=payload,
+                headers={"X-HotMem-Idempotency-Key": idempotency_key},
+            )
+        else:
+            resp = await self._client.post("/v1/add", json=payload)
         resp.raise_for_status()
         return resp.json()
 
@@ -223,6 +397,7 @@ class AsyncHotMemClient:
         source: str = "",
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add a file-backed memory by reference (zero bytes copied)."""
         payload: dict[str, Any] = {
@@ -239,7 +414,14 @@ class AsyncHotMemClient:
             payload["source_checksum"] = source_checksum
         if summary is not None:
             payload["summary"] = summary
-        resp = await self._client.post("/v1/add", json=payload)
+        if idempotency_key is not None:
+            resp = await self._client.post(
+                "/v1/add",
+                json=payload,
+                headers={"X-HotMem-Idempotency-Key": idempotency_key},
+            )
+        else:
+            resp = await self._client.post("/v1/add", json=payload)
         resp.raise_for_status()
         return resp.json()
 
@@ -285,7 +467,7 @@ class AsyncHotMemClient:
         return resp.json()["memories"]
 
     async def hydrate(self, file: str | None = None) -> dict[str, Any]:
-        """Trigger swap file hydration."""
+        """Trigger swap file or v2 directory hydration."""
         payload: dict[str, Any] = {}
         if file:
             payload["file"] = file
@@ -293,12 +475,112 @@ class AsyncHotMemClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def snapshot(self, file: str | None = None) -> dict[str, Any]:
-        """Trigger database snapshot to swap file."""
+    async def snapshot(
+        self,
+        file: str | None = None,
+        *,
+        copy_attachments: bool | None = None,
+        package: bool | None = None,
+        gz: bool | None = None,
+    ) -> dict[str, Any]:
+        """Trigger database snapshot to swap file, v2 directory, or package."""
         payload: dict[str, Any] = {}
         if file:
             payload["file"] = file
+        if copy_attachments is not None:
+            payload["copy_attachments"] = copy_attachments
+        if package is not None:
+            payload["package"] = package
+        if gz is not None:
+            payload["gz"] = gz
         resp = await self._client.post("/v1/snapshot", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def handoff_prepare(
+        self,
+        source: str,
+        output: str,
+        *,
+        consent: str,
+        mode: str = "resume",
+        session: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "source": source,
+            "output": output,
+            "mode": mode,
+            "consent": consent,
+        }
+        if session is not None:
+            payload["session"] = session
+        resp = await self._client.post("/v1/handoff/prepare", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def handoff_verify(self, package: str) -> dict[str, Any]:
+        resp = await self._client.post("/v1/handoff/verify", json={"package": package})
+        resp.raise_for_status()
+        return resp.json()
+
+    async def handoff_inspect(self, package: str) -> dict[str, Any]:
+        resp = await self._client.get("/v1/handoff/inspect", params={"package": package})
+        resp.raise_for_status()
+        return resp.json()
+
+    async def handoff_hydrate(self, package: str) -> dict[str, Any]:
+        resp = await self._client.post("/v1/handoff/hydrate", json={"package": package})
+        resp.raise_for_status()
+        return resp.json()
+
+    async def promote(
+        self,
+        memory_id: str,
+        to_state: str,
+        *,
+        reason: str | None = None,
+        actor: str | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"to_state": to_state}
+        if reason is not None:
+            payload["reason"] = reason
+        if actor is not None:
+            payload["actor"] = actor
+        resp = await self._client.post(f"/v1/memory/{memory_id}/promote", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def candidates(
+        self, *, namespace: str | None = None, state: str | None = None
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if namespace is not None:
+            params["namespace"] = namespace
+        if state is not None:
+            params["state"] = state
+        resp = await self._client.get("/v1/promotion/candidates", params=params)
+        resp.raise_for_status()
+        return resp.json()["candidates"]
+
+    async def events(
+        self,
+        *,
+        memory_id: str | None = None,
+        namespace: str | None = None,
+        event_type: str | None = None,
+        after_seq: int | None = None,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"limit": limit}
+        if memory_id is not None:
+            params["memory_id"] = memory_id
+        if namespace is not None:
+            params["namespace"] = namespace
+        if event_type is not None:
+            params["event_type"] = event_type
+        if after_seq is not None:
+            params["after_seq"] = after_seq
+        resp = await self._client.get("/v1/events", params=params)
         resp.raise_for_status()
         return resp.json()
 

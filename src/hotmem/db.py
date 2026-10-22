@@ -509,7 +509,9 @@ class MemoryDB:
         importance: float = 0.5,
         metadata_json: str = "{}",
         content_hash: str = "",
+        namespace: str = "",
         provenance_json: str | None = None,
+        _commit: bool = True,
     ) -> None:
         """Insert a file-backed memory row (zero bytes copied).
 
@@ -527,6 +529,7 @@ class MemoryDB:
             importance=importance,
             metadata_json=metadata_json,
             content_hash=content_hash,
+            namespace=namespace,
             memory_type="file",
             source_uri=source_uri,
             source_format=source_format,
@@ -535,6 +538,7 @@ class MemoryDB:
             byte_length=byte_length,
             fact_summary=fact_summary,
             provenance_json=provenance_json,
+            _commit=_commit,
         )
         _trace.debug(
             "insert_file",
@@ -868,7 +872,7 @@ class MemoryDB:
         cosine_expr, cosine_params = _cosine_guard(embedding_model)
         rows = self._conn.execute(
             f"""SELECT id, identifier, fact_text, fact_summary, importance,
-                       metadata_json, source, created_at,
+                       metadata_json, source, created_at, namespace, provenance_json,
                        {cosine_expr} AS cosine_score
                 FROM memories
                 WHERE {_ttl_live()}{archived_clause}
@@ -891,7 +895,8 @@ class MemoryDB:
         archived_clause = "" if include_archived else " AND m.promotion_state != 'ARCHIVED'"
         rows = self._conn.execute(
             f"""SELECT m.id, m.identifier, m.fact_text, m.importance, m.metadata_json,
-                       m.source, m.created_at, bm25(memories_fts) AS bm25_score
+                       m.source, m.created_at, m.namespace, m.provenance_json,
+                       bm25(memories_fts) AS bm25_score
                 FROM memories_fts
                 JOIN memories AS m ON m.rowid = memories_fts.rowid
                 WHERE memories_fts MATCH ?
@@ -1069,7 +1074,7 @@ class MemoryDB:
             placeholders = ", ".join("?" for _ in chunk)
             rows = self._conn.execute(
                 f"""SELECT id, identifier, fact_text, fact_summary, importance,
-                           metadata_json, source, created_at,
+                           metadata_json, source, created_at, namespace, provenance_json,
                            {cosine_expr} AS cosine_score
                     FROM memories
                     WHERE id IN ({placeholders})
@@ -1238,23 +1243,44 @@ class MemoryDB:
         *,
         order: str = "asc",
         limit: int = 100,
+        row_filter: Any | None = None,
     ) -> list[dict[str, Any]]:
         """Return memories for an identifier in created_at order (chronological).
 
         Excludes TTL-expired memories, consistent with search.
         """
         direction = "ASC" if order.lower() == "asc" else "DESC"
+        if row_filter is None:
+            rows = self._conn.execute(
+                f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
+                           created_at
+                    FROM memories
+                    WHERE identifier = ?
+                      AND {_ttl_live()}
+                    ORDER BY created_at {direction}
+                    LIMIT ?""",
+                (identifier, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
         rows = self._conn.execute(
             f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
-                       created_at
+                       created_at, namespace
                 FROM memories
                 WHERE identifier = ?
                   AND {_ttl_live()}
-                ORDER BY created_at {direction}
-                LIMIT ?""",
-            (identifier, limit),
+                ORDER BY created_at {direction}""",
+            (identifier,),
         ).fetchall()
-        return [dict(r) for r in rows]
+        filtered: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            if row_filter(d):
+                d.pop("namespace", None)
+                filtered.append(d)
+                if len(filtered) >= limit:
+                    break
+        return filtered
 
     def import_sqlite(self, src_path: str | Path) -> tuple[int, int]:
         """Merge memories from another HotMem SQLite database (fast-path).
