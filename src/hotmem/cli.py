@@ -267,7 +267,12 @@ def serve(
     """Start the HotMem daemon/sidecar server."""
     import uvicorn
 
-    from hotmem.mount import StoreOwnershipError, bootstrap_mount, ensure_store_available
+    from hotmem.mount import (
+        StoreIdentityError,
+        StoreOwnershipError,
+        bootstrap_mount,
+        ensure_store_available,
+    )
     from hotmem.policy import PolicyConfig
     from hotmem.server import create_app
 
@@ -301,16 +306,20 @@ def serve(
     if policy_path is not None:
         policy = PolicyConfig.load(policy_path)
 
-    app = create_app(
-        db_path=db_path,
-        swap_path=swap_path,
-        port=port,
-        vector_backend=vector_backend,
-        embedder=embedder,
-        reranker=reranker,
-        policy=policy,
-        store_id=store_id,
-    )
+    try:
+        app = create_app(
+            db_path=db_path,
+            swap_path=swap_path,
+            port=port,
+            vector_backend=vector_backend,
+            embedder=embedder,
+            reranker=reranker,
+            policy=policy,
+            store_id=store_id,
+            policy_path=policy_path,
+        )
+    except (StoreOwnershipError, StoreIdentityError) as err:
+        raise click.ClickException(str(err)) from err
 
     _trace.info(
         "serve",
@@ -319,7 +328,7 @@ def serve(
     )
     try:
         uvicorn.run(app, host=host, port=port, log_level="warning")
-    except StoreOwnershipError as err:
+    except (StoreOwnershipError, StoreIdentityError) as err:
         raise click.ClickException(str(err)) from err
 
 
@@ -402,7 +411,7 @@ def mcp(
         )
         return
 
-    from hotmem.mount import StoreOwnershipError, bootstrap_mount, ensure_store_available
+    from hotmem.mount import StoreIdentityError, StoreOwnershipError, bootstrap_mount
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     reranker = _resolve_reranker_or_fail(reranker_spec, reranker_lambda, reranker_pool)
@@ -415,10 +424,6 @@ def mcp(
         swap_path = str(config.swap_path)
 
     assert db_path is not None
-    try:
-        ensure_store_available(db_path)
-    except StoreOwnershipError as err:
-        raise click.ClickException(str(err)) from err
 
     _trace.info(
         "mcp",
@@ -431,7 +436,7 @@ def mcp(
                 db_path=db_path, swap_path=swap_path, embedder=embedder, reranker=reranker
             )
         )
-    except StoreOwnershipError as err:
+    except (StoreOwnershipError, StoreIdentityError) as err:
         raise click.ClickException(str(err)) from err
 
 
@@ -498,14 +503,19 @@ def hydrate(
         return
 
     assert db_path is not None
-    from hotmem.db import MemoryDB
-    from hotmem.mount import StoreOwnershipError, ensure_store_available
+    from hotmem.mount import StoreOwnershipError, store_ownership
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     try:
-        ensure_store_available(db_path)
+        with store_ownership(db_path):
+            _hydrate_offline(db_path, swap_file, embedder)
     except StoreOwnershipError as err:
         raise click.ClickException(str(err)) from err
+
+
+def _hydrate_offline(db_path: str, swap_file: str, embedder) -> None:
+    """Hydrate an offline store while the caller holds store ownership."""
+    from hotmem.db import MemoryDB
 
     # Route v2 directories through the snapshot dispatch (no progress bar);
     # legacy .jsonl/.jsonl.gz goes through swap.hydrate with the UI progress bar.
@@ -730,8 +740,8 @@ def status(
             raise SystemExit(1)
         data = resp.json()
         ui.status(data)
-    except httpx.ConnectError as err:
-        click.echo(f"No HotMem server found at {health_url}", err=True)
+    except httpx.RequestError as err:
+        click.echo(f"No HotMem server found at {health_url}: {err}", err=True)
         raise SystemExit(1) from err
 
 
@@ -800,10 +810,14 @@ def add(
         return
 
     assert db_path is not None
+    from hotmem.mount import StoreIdentityError, StoreOwnershipError
     from hotmem.runtime import HotMemRuntime
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
-    rt = HotMemRuntime(db_path=db_path, embedder=embedder).open()
+    try:
+        rt = HotMemRuntime(db_path=db_path, embedder=embedder).open()
+    except (StoreOwnershipError, StoreIdentityError) as err:
+        raise click.ClickException(str(err)) from err
     try:
         ctx = rt.resolve_caller(
             session_id=daemon_session_id,
@@ -1229,27 +1243,26 @@ def promote(
     assert db_path is not None
     from hotmem.db import MemoryDB
     from hotmem.lifecycle import InvalidTransitionError, transition
-    from hotmem.mount import StoreOwnershipError, ensure_store_available
+    from hotmem.mount import StoreOwnershipError, store_ownership
 
     try:
-        ensure_store_available(db_path)
+        with store_ownership(db_path):
+            db = MemoryDB(db_path)
+            try:
+                result = transition(db, memory_id, to_state, reason=reason, actor=actor)
+            except KeyError:
+                click.echo(f"Memory not found: {memory_id}", err=True)
+                raise SystemExit(1) from None
+            except InvalidTransitionError as err:
+                click.echo(str(err), err=True)
+                raise SystemExit(1) from err
+            except ValueError as err:
+                click.echo(str(err), err=True)
+                raise SystemExit(1) from err
+            finally:
+                db.close()
     except StoreOwnershipError as err:
         raise click.ClickException(str(err)) from err
-
-    db = MemoryDB(db_path)
-    try:
-        result = transition(db, memory_id, to_state, reason=reason, actor=actor)
-    except KeyError:
-        click.echo(f"Memory not found: {memory_id}", err=True)
-        raise SystemExit(1) from None
-    except InvalidTransitionError as err:
-        click.echo(str(err), err=True)
-        raise SystemExit(1) from err
-    except ValueError as err:
-        click.echo(str(err), err=True)
-        raise SystemExit(1) from err
-    finally:
-        db.close()
     click.echo(
         f"{result['memory_id']}: {result['promotion_state']} (updated {result['updated_at']})"
     )
@@ -1315,6 +1328,73 @@ def candidates(
     else:
         for r in rows:
             click.echo(f"{r['id']}\t{r['identifier']}\t{r.get('promotion_state', 'HOT')}")
+
+
+@main.group()
+def policy():
+    """Manage daemon policy at runtime (#110: immediate revocation)."""
+
+
+@policy.command("revoke")
+@click.option("--url", required=True, help="Running daemon URL.")
+@click.option("--token", "daemon_token", default=None, envvar="HOTMEM_TOKEN")
+@click.option("--store-id", "expected_store_id", default=None, envvar="HOTMEM_STORE_ID")
+@click.option("--caller", "caller_id", default=None, help="Caller id whose credentials to revoke.")
+@click.option(
+    "--approval",
+    "approval_id",
+    default=None,
+    help="Share approval id to revoke.",
+)
+def policy_revoke(
+    url: str,
+    daemon_token: str | None,
+    expected_store_id: str | None,
+    caller_id: str | None,
+    approval_id: str | None,
+):
+    """Revoke a caller credential and/or a share approval on a running daemon."""
+    if not caller_id and not approval_id:
+        raise click.ClickException("pass --caller and/or --approval")
+    try:
+        with _make_daemon_client(
+            url, token=daemon_token, expected_store_id=expected_store_id
+        ) as client:
+            res = client.revoke_policy(caller_id=caller_id, approval_id=approval_id)
+    except Exception as err:
+        _raise_cli_http_error(err)
+    get_renderer().summary(
+        "policy-revoke",
+        revoked=res["revoked"],
+        caller_id=res.get("caller_id") or "-",
+        approval_id=res.get("approval_id") or "-",
+        policy_revision=res["policy_revision"],
+    )
+
+
+@policy.command("reload")
+@click.option("--url", required=True, help="Running daemon URL.")
+@click.option("--token", "daemon_token", default=None, envvar="HOTMEM_TOKEN")
+@click.option("--store-id", "expected_store_id", default=None, envvar="HOTMEM_STORE_ID")
+def policy_reload(
+    url: str,
+    daemon_token: str | None,
+    expected_store_id: str | None,
+):
+    """Reload the daemon's policy file without restarting it."""
+    try:
+        with _make_daemon_client(
+            url, token=daemon_token, expected_store_id=expected_store_id
+        ) as client:
+            res = client.reload_policy()
+    except Exception as err:
+        _raise_cli_http_error(err)
+    get_renderer().summary(
+        "policy-reload",
+        reloaded=res["reloaded"],
+        policy_revision=res["policy_revision"],
+        credential_count=res["credential_count"],
+    )
 
 
 @main.group()
@@ -1402,30 +1482,34 @@ def delta_apply(
     from hotmem.interchange.delta import DeltaConflictError
     from hotmem.interchange.delta import apply_delta as do_apply
     from hotmem.interchange.hydrate import PackageError
-    from hotmem.mount import StoreOwnershipError, ensure_store_available
+    from hotmem.mount import StoreOwnershipError, store_ownership
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     try:
-        ensure_store_available(db_path)
+        with store_ownership(db_path):
+            db = MemoryDB(db_path)
+            try:
+                result = do_apply(db, delta_dir, embedder=embedder)
+            except DeltaConflictError as err:
+                db.close()
+                for conflict in err.conflicts:
+                    click.echo(
+                        f"conflict {conflict.reason}: record={conflict.record_id} "
+                        f"op={conflict.op_id} expected={conflict.expected} "
+                        f"actual={conflict.actual} recovery={conflict.recovery}",
+                        err=True,
+                    )
+                raise click.ClickException(
+                    f"Delta not applied — {len(err.conflicts)} conflict(s)"
+                ) from err
+            except PackageError as err:
+                db.close()
+                raise click.ClickException(
+                    f"Delta verification failed ({err.reason}): {err}"
+                ) from err
+            db.close()
     except StoreOwnershipError as err:
         raise click.ClickException(str(err)) from err
-    db = MemoryDB(db_path)
-    try:
-        result = do_apply(db, delta_dir, embedder=embedder)
-    except DeltaConflictError as err:
-        db.close()
-        for conflict in err.conflicts:
-            click.echo(
-                f"conflict {conflict.reason}: record={conflict.record_id} "
-                f"op={conflict.op_id} expected={conflict.expected} actual={conflict.actual} "
-                f"recovery={conflict.recovery}",
-                err=True,
-            )
-        raise click.ClickException(f"Delta not applied — {len(err.conflicts)} conflict(s)") from err
-    except PackageError as err:
-        db.close()
-        raise click.ClickException(f"Delta verification failed ({err.reason}): {err}") from err
-    db.close()
     ui = get_renderer()
     ui.summary(
         "delta-apply",
@@ -1484,8 +1568,46 @@ def handoff():
     default=None,
     help="Require this session id in the export envelope (fail if it differs).",
 )
-def handoff_prepare(source: str, out_dir: str, mode: str, consent: str, session_id: str | None):
+@click.option("--url", default=None, help="Running daemon URL (route through the daemon).")
+@click.option("--token", "daemon_token", default=None, envvar="HOTMEM_TOKEN")
+@click.option("--store-id", "expected_store_id", default=None, envvar="HOTMEM_STORE_ID")
+def handoff_prepare(
+    source: str,
+    out_dir: str,
+    mode: str,
+    consent: str,
+    session_id: str | None,
+    url: str | None,
+    daemon_token: str | None,
+    expected_store_id: str | None,
+):
     """Prepare a verified handoff package from a source export."""
+    if url is not None:
+        try:
+            with _make_daemon_client(
+                url, token=daemon_token, expected_store_id=expected_store_id
+            ) as client:
+                res = client.handoff_prepare(
+                    source, out_dir, consent=consent, mode=mode, session=session_id
+                )
+        except Exception as err:
+            _raise_cli_http_error(err)
+        coverage = res.get("coverage") or {}
+        timings = res.get("timings_ms") or {}
+        get_renderer().summary(
+            "handoff-prepare",
+            handoff_id=res["handoff_id"],
+            package_id=res["package_id"][:12],
+            mode=res["mode"],
+            entries=res["entries"],
+            memories=res["memories"],
+            omissions=coverage.get("omitted_count", 0),
+            redactions=coverage.get("redacted_count", 0),
+            path=res["path"],
+            total_ms=timings.get("total_ms", 0.0),
+        )
+        return
+
     from hotmem.handoff.codex_source import SourceError
     from hotmem.handoff.package import prepare_handoff as do_prepare
 
@@ -1511,8 +1633,34 @@ def handoff_prepare(source: str, out_dir: str, mode: str, consent: str, session_
 
 @handoff.command("verify")
 @click.argument("package", type=click.Path(exists=True))
-def handoff_verify(package: str):
+@click.option("--url", default=None, help="Running daemon URL (route through the daemon).")
+@click.option("--token", "daemon_token", default=None, envvar="HOTMEM_TOKEN")
+@click.option("--store-id", "expected_store_id", default=None, envvar="HOTMEM_STORE_ID")
+def handoff_verify(
+    package: str,
+    url: str | None,
+    daemon_token: str | None,
+    expected_store_id: str | None,
+):
     """Fail-closed verification: exit non-zero on any integrity problem."""
+    if url is not None:
+        try:
+            with _make_daemon_client(
+                url, token=daemon_token, expected_store_id=expected_store_id
+            ) as client:
+                res = client.handoff_verify(package)
+        except Exception as err:
+            _raise_cli_http_error(err)
+        get_renderer().summary(
+            "handoff-verify",
+            package_id=res["package_id"][:12],
+            mode=res["mode"],
+            entries=res["entries"],
+            memories=res["memories"],
+            valid=True,
+        )
+        return
+
     from hotmem.handoff.verify import HandoffError, verify_handoff
 
     try:
@@ -1544,11 +1692,29 @@ def handoff_verify(package: str):
     default=False,
     help="Emit the full report as JSON.",
 )
-def handoff_inspect(package: str, as_json: bool):
+@click.option("--url", default=None, help="Running daemon URL (route through the daemon).")
+@click.option("--token", "daemon_token", default=None, envvar="HOTMEM_TOKEN")
+@click.option("--store-id", "expected_store_id", default=None, envvar="HOTMEM_STORE_ID")
+def handoff_inspect(
+    package: str,
+    as_json: bool,
+    url: str | None,
+    daemon_token: str | None,
+    expected_store_id: str | None,
+):
     """Read-only inspection: identity, coverage, omissions, failure reason."""
-    from hotmem.handoff.verify import inspect_handoff
+    if url is not None:
+        try:
+            with _make_daemon_client(
+                url, token=daemon_token, expected_store_id=expected_store_id
+            ) as client:
+                report = client.handoff_inspect(package)
+        except Exception as err:
+            _raise_cli_http_error(err)
+    else:
+        from hotmem.handoff.verify import inspect_handoff
 
-    report = inspect_handoff(package)
+        report = inspect_handoff(package)
     if as_json:
         click.echo(json.dumps(report, indent=2, sort_keys=True, default=str))
         return
@@ -1641,22 +1807,22 @@ def handoff_hydrate(
     from hotmem.db import MemoryDB
     from hotmem.handoff.hydrate import hydrate_handoff as do_hydrate
     from hotmem.handoff.verify import HandoffError
-    from hotmem.mount import StoreOwnershipError, ensure_store_available
+    from hotmem.mount import StoreOwnershipError, store_ownership
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     try:
-        ensure_store_available(db_path)
+        with store_ownership(db_path):
+            db = MemoryDB(db_path)
+            try:
+                result = do_hydrate(db, package, embedder=embedder)
+            except HandoffError as err:
+                db.close()
+                raise click.ClickException(
+                    f"hydration not applied — verification failed ({err.reason}): {err}"
+                ) from err
+            db.close()
     except StoreOwnershipError as err:
         raise click.ClickException(str(err)) from err
-    db = MemoryDB(db_path)
-    try:
-        result = do_hydrate(db, package, embedder=embedder)
-    except HandoffError as err:
-        db.close()
-        raise click.ClickException(
-            f"hydration not applied — verification failed ({err.reason}): {err}"
-        ) from err
-    db.close()
 
     ui = get_renderer()
     ui.summary(
