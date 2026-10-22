@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path as _Path
 
 import click
@@ -120,11 +119,127 @@ def _resolve_reranker_or_fail(
         raise click.ClickException(str(err)) from err
 
 
+def _daemon_client_options(cmd):
+    """Shared daemon client context options (#109, #110, #111)."""
+    cmd = click.option(
+        "--store-id",
+        "expected_store_id",
+        default=None,
+        envvar="HOTMEM_STORE_ID",
+        help="Expected daemon store_id (fails closed on mismatch).",
+    )(cmd)
+    cmd = click.option(
+        "--namespace",
+        "daemon_namespace",
+        default=None,
+        envvar="HOTMEM_NAMESPACE",
+        help="Target namespace scope for daemon operation.",
+    )(cmd)
+    cmd = click.option(
+        "--source",
+        "daemon_source",
+        default=None,
+        envvar="HOTMEM_SOURCE",
+        help="Explicit source attribution for daemon operation.",
+    )(cmd)
+    cmd = click.option(
+        "--session",
+        "daemon_session_id",
+        default=None,
+        envvar="HOTMEM_SESSION_ID",
+        help="Explicit session ID for daemon operation.",
+    )(cmd)
+    return click.option(
+        "--token",
+        "daemon_token",
+        default=None,
+        envvar="HOTMEM_TOKEN",
+        help="Bearer token for authenticated daemon access.",
+    )(cmd)
+
+
+def _make_daemon_client(
+    url: str,
+    *,
+    token: str | None = None,
+    session_id: str | None = None,
+    source: str | None = None,
+    namespace: str | None = None,
+    expected_store_id: str | None = None,
+):
+    """Construct HotMemClient, passing optional context args only when set."""
+    from hotmem.client import HotMemClient
+
+    kwargs: dict[str, str] = {}
+    if token is not None:
+        kwargs["token"] = token
+    if session_id is not None:
+        kwargs["session_id"] = session_id
+    if source is not None:
+        kwargs["source"] = source
+    if namespace is not None:
+        kwargs["namespace"] = namespace
+    if expected_store_id is not None:
+        kwargs["expected_store_id"] = expected_store_id
+    if not kwargs:
+        return HotMemClient(url)
+    return HotMemClient(url, **kwargs)
+
+
+def _raise_cli_http_error(err: Exception) -> None:
+    import httpx
+
+    if isinstance(err, httpx.HTTPStatusError):
+        resp = err.response
+        try:
+            body = resp.json()
+            if isinstance(body, dict):
+                code = body.get("error") or f"http_{resp.status_code}"
+                msg = body.get("message") or body.get("detail") or resp.text
+                raise click.ClickException(f"{code}: {msg}") from err
+        except click.ClickException:
+            raise
+        except Exception:
+            pass
+        raise click.ClickException(f"HTTP {resp.status_code}: {resp.text}") from err
+    if isinstance(err, httpx.RequestError):
+        raise click.ClickException(f"daemon_unreachable: {err}") from err
+    raise click.ClickException(str(err)) from err
+
+
 @main.command()
 @click.option("--port", default=8711, type=int, help="Port to listen on.")
-@click.option("--mount", default=None, type=click.Path(), help="Mount directory path.")
-@click.option("--db", "db_path", default=None, type=click.Path(), help="Explicit database path.")
+@click.option(
+    "--mount",
+    default=None,
+    envvar="HOTMEM_MOUNT",
+    type=click.Path(),
+    help="Mount directory path.",
+)
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    envvar="HOTMEM_DB",
+    type=click.Path(),
+    help="Explicit database path.",
+)
 @click.option("--host", default="127.0.0.1", help="Host to bind to.")
+@click.option(
+    "--policy",
+    "policy_path",
+    default=None,
+    envvar="HOTMEM_POLICY",
+    type=click.Path(exists=True),
+    help="Path to daemon policy JSON file (#109/#110).",
+)
+@click.option(
+    "--store-id",
+    "store_id",
+    default=None,
+    envvar="HOTMEM_STORE_ID",
+    help="Explicit store identifier.",
+)
 @click.option(
     "--vector-index",
     "vector_backend",
@@ -140,6 +255,8 @@ def serve(
     mount: str | None,
     db_path: str | None,
     host: str,
+    policy_path: str | None,
+    store_id: str | None,
     vector_backend: str,
     embedder_spec: str | None,
     embedder_model_path: str | None,
@@ -147,28 +264,36 @@ def serve(
     reranker_lambda: float,
     reranker_pool: int,
 ):
-    """Start the HotMem sidecar server."""
+    """Start the HotMem daemon/sidecar server."""
     import uvicorn
 
     from hotmem.mount import bootstrap_mount
+    from hotmem.policy import PolicyConfig
     from hotmem.server import create_app
+
+    if mount and db_path:
+        raise click.ClickException("pass either --mount or --db, not both")
+    if not mount and not db_path:
+        raise click.ClickException(
+            "serve requires an explicit store: pass --mount DIR or --db PATH "
+            "(silent temporary database fallback is disabled in daemon mode)"
+        )
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     reranker = _resolve_reranker_or_fail(reranker_spec, reranker_lambda, reranker_pool)
 
     swap_path = None
+    policy: PolicyConfig | None = None
 
     if mount:
         config = bootstrap_mount(mount)
         db_path = str(config.db_path)
         swap_path = str(config.swap_path)
-    elif not db_path:
-        db_path = tempfile.mktemp(suffix=".sqlite", prefix="hotmem_")
-        _trace.warn(
-            "serve",
-            "no mount or db path specified, using temp db",
-            detail={"path": db_path},
-        )
+        if policy_path is None and (config.mount_path / "policy.json").exists():
+            policy_path = str(config.mount_path / "policy.json")
+
+    if policy_path is not None:
+        policy = PolicyConfig.load(policy_path)
 
     app = create_app(
         db_path=db_path,
@@ -177,39 +302,96 @@ def serve(
         vector_backend=vector_backend,
         embedder=embedder,
         reranker=reranker,
+        policy=policy,
+        store_id=store_id,
     )
 
     _trace.info(
         "serve",
         f"starting server on {host}:{port}",
-        detail={"db": db_path, "mount": mount},
+        detail={"db": db_path, "mount": mount, "store_id": app.state.runtime.store_id},
     )
     uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 @main.command()
-@click.option("--mount", default=None, type=click.Path(), help="Mount directory path.")
-@click.option("--db", "db_path", default=None, type=click.Path(), help="Explicit database path.")
+@click.option(
+    "--url",
+    default=None,
+    envvar="HOTMEM_URL",
+    help="Running daemon URL for thin stdio-to-daemon relay mode (#109).",
+)
+@click.option(
+    "--mount",
+    default=None,
+    envvar="HOTMEM_MOUNT",
+    type=click.Path(),
+    help="Mount directory path (embedded mode).",
+)
+@click.option(
+    "--db",
+    "db_path",
+    default=None,
+    envvar="HOTMEM_DB",
+    type=click.Path(),
+    help="Explicit database path (embedded mode).",
+)
+@_daemon_client_options
 @_embedder_options
 @_reranker_options
 def mcp(
+    url: str | None,
     mount: str | None,
     db_path: str | None,
+    daemon_token: str | None,
+    daemon_session_id: str | None,
+    daemon_source: str | None,
+    daemon_namespace: str | None,
+    expected_store_id: str | None,
     embedder_spec: str | None,
     embedder_model_path: str | None,
     reranker_spec: str | None,
     reranker_lambda: float,
     reranker_pool: int,
 ):
-    """Start the HotMem MCP server on stdio transport."""
+    """Start the HotMem MCP server on stdio (--url for daemon relay, --mount/--db for embedded)."""
     import asyncio
 
     try:
         from hotmem.mcp_server import run as run_mcp_server
+        from hotmem.mcp_server import run_relay as run_mcp_relay
     except ImportError as err:
         raise click.ClickException(
             "MCP support is not installed. Install it with: uv pip install 'hotmem[mcp]'"
         ) from err
+
+    if url and (mount or db_path):
+        raise click.ClickException(
+            "pass either --url (daemon relay mode) or --mount/--db (embedded mode), not both"
+        )
+    if not url and not mount and not db_path:
+        raise click.ClickException(
+            "mcp requires an explicit target: pass --url URL for daemon relay mode "
+            "or --mount DIR / --db PATH for embedded mode"
+        )
+
+    if url:
+        _trace.info(
+            "mcp",
+            "starting mcp stdio-to-daemon relay",
+            detail={"url": url, "expected_store_id": expected_store_id},
+        )
+        asyncio.run(
+            run_mcp_relay(
+                base_url=url,
+                token=daemon_token,
+                session_id=daemon_session_id,
+                source=daemon_source,
+                namespace=daemon_namespace,
+                expected_store_id=expected_store_id,
+            )
+        )
+        return
 
     from hotmem.mount import bootstrap_mount
 
@@ -222,13 +404,6 @@ def mcp(
         config = bootstrap_mount(mount)
         db_path = str(config.db_path)
         swap_path = str(config.swap_path)
-    elif not db_path:
-        db_path = tempfile.mktemp(suffix=".sqlite", prefix="hotmem_")
-        _trace.warn(
-            "mcp",
-            "no mount or db path specified, using temp db",
-            detail={"path": db_path},
-        )
 
     _trace.info(
         "mcp",
@@ -248,20 +423,61 @@ def mcp(
     type=click.Path(),
     help="Snapshot path: a directory (v2) or .jsonl/.jsonl.gz file (legacy).",
 )
-@click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
+@click.option("--db", "db_path", default=None, type=click.Path(), help="Database path.")
+@click.option("--url", default=None, help="Running daemon URL (e.g. http://127.0.0.1:8711).")
+@_daemon_client_options
 @_embedder_options
 def hydrate(
     swap_file: str,
-    db_path: str,
+    db_path: str | None,
+    url: str | None,
+    daemon_token: str | None,
+    daemon_session_id: str | None,
+    daemon_source: str | None,
+    daemon_namespace: str | None,
+    expected_store_id: str | None,
     embedder_spec: str | None,
     embedder_model_path: str | None,
 ):
-    """Load a snapshot into the database (v2 directory or legacy JSONL).
+    """Load a snapshot into the database or running daemon (v2 directory or legacy JSONL).
 
     Embeddings are rebuilt under the configured embedder (issues #78/#79):
     match the runtime the store is served with so imported rows are
     cosinely searchable — compatible stored vectors are reused either way.
     """
+    if url is not None and db_path is not None:
+        raise click.ClickException("pass either --db or --url, not both")
+    if url is None and db_path is None:
+        raise click.ClickException("hydrate requires --db PATH or --url URL")
+
+    if url is not None:
+        try:
+            with _make_daemon_client(
+                url,
+                token=daemon_token,
+                session_id=daemon_session_id,
+                source=daemon_source,
+                namespace=daemon_namespace,
+                expected_store_id=expected_store_id,
+            ) as client:
+                res = client.hydrate(swap_file)
+        except Exception as err:
+            _raise_cli_http_error(err)
+        get_renderer().summary(
+            "hydrate",
+            loaded=res["loaded"],
+            skipped_dupes=res["skipped_dupes"],
+            invalid=res.get("invalid", 0),
+            embedding_reused=res.get("embedding_reused", 0),
+            embedding_rebuilt=res.get("embedding_rebuilt", 0),
+            embedding_missing=res.get("embedding_missing", 0),
+            embedding_failed=res.get("embedding_failed", 0),
+            annotations_merged=res.get("annotations_merged", 0),
+            annotation_conflicts=res.get("annotation_conflicts", 0),
+        )
+        return
+
+    assert db_path is not None
     from hotmem.db import MemoryDB
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
@@ -319,7 +535,9 @@ def hydrate(
     type=click.Path(),
     help="Snapshot path: a directory (v2/package) or .jsonl/.jsonl.gz file (legacy).",
 )
-@click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
+@click.option("--db", "db_path", default=None, type=click.Path(), help="Database path.")
+@click.option("--url", default=None, help="Running daemon URL (e.g. http://127.0.0.1:8711).")
+@_daemon_client_options
 @click.option(
     "--attach",
     "copy_attachments",
@@ -341,18 +559,49 @@ def hydrate(
     default=False,
     help="Gzip the package payload (with --package): memories.jsonl.gz, byte-stable (mtime=0).",
 )
-def snapshot(swap_file: str, db_path: str, copy_attachments: bool, package: bool, gz: bool):
-    """Export database memories to a snapshot (v2 directory or legacy JSONL).
-
-    A path ending in .jsonl/.jsonl.gz writes a legacy single-file snapshot;
-    any other path writes a v2 directory (manifest + memories.jsonl + optional
-    attachments). Pass --attach to copy small file-backed byte ranges (<8 KB)
-    into attachments/; large ranges stay referenced. Pass --package (optionally
-    --gz) to write a hotmem-interchange-v1 clone package: versioned manifest,
-    canonical record stream, atomic publish (#69).
-    """
+def snapshot(
+    swap_file: str,
+    db_path: str | None,
+    url: str | None,
+    daemon_token: str | None,
+    daemon_session_id: str | None,
+    daemon_source: str | None,
+    daemon_namespace: str | None,
+    expected_store_id: str | None,
+    copy_attachments: bool,
+    package: bool,
+    gz: bool,
+):
+    """Export database memories to a snapshot (v2 directory or legacy JSONL)."""
     from pathlib import Path
 
+    if url is not None and db_path is not None:
+        raise click.ClickException("pass either --db or --url, not both")
+    if url is None and db_path is None:
+        raise click.ClickException("snapshot requires --db PATH or --url URL")
+
+    if url is not None:
+        try:
+            with _make_daemon_client(
+                url,
+                token=daemon_token,
+                session_id=daemon_session_id,
+                source=daemon_source,
+                namespace=daemon_namespace,
+                expected_store_id=expected_store_id,
+            ) as client:
+                res = client.snapshot(
+                    swap_file,
+                    copy_attachments=copy_attachments if copy_attachments else None,
+                    package=package if package else None,
+                    gz=gz if gz else None,
+                )
+        except Exception as err:
+            _raise_cli_http_error(err)
+        get_renderer().summary("snapshot", exported=res["exported"], path=res["path"])
+        return
+
+    assert db_path is not None
     from hotmem.db import MemoryDB
 
     # Route v2/package directories through the snapshot dispatch;
@@ -412,19 +661,149 @@ def verify(path: str):
 @main.command()
 @click.option("--port", default=8711, type=int, help="Port to check.")
 @click.option("--host", default="127.0.0.1", help="Host to check.")
-def status(port: int, host: str):
+@click.option("--url", default=None, help="Explicit daemon URL (overrides --host/--port).")
+@_daemon_client_options
+def status(
+    port: int,
+    host: str,
+    url: str | None,
+    daemon_token: str | None,
+    daemon_session_id: str | None,
+    daemon_source: str | None,
+    daemon_namespace: str | None,
+    expected_store_id: str | None,
+):
     """Check if a HotMem server is running."""
     import httpx
 
+    from hotmem.client import _build_context_headers
+
     ui = get_renderer()
-    url = f"http://{host}:{port}/v1/health"
+    base = url.rstrip("/") if url else f"http://{host}:{port}"
+    health_url = f"{base}/v1/health"
+    headers = _build_context_headers(
+        token=daemon_token,
+        session_id=daemon_session_id,
+        source=daemon_source,
+        namespace=daemon_namespace,
+        expected_store_id=expected_store_id,
+    )
     try:
-        resp = httpx.get(url, timeout=3.0)
+        if headers:
+            resp = httpx.get(health_url, headers=headers, timeout=3.0)
+        else:
+            resp = httpx.get(health_url, timeout=3.0)
+        status_code = getattr(resp, "status_code", 200)
+        if isinstance(status_code, int) and status_code >= 400:
+            try:
+                err_body = resp.json()
+                code = err_body.get("error", f"http_{status_code}")
+                msg = err_body.get("message") or err_body.get("detail") or ""
+                click.echo(f"HotMem status failed ({code}): {msg}", err=True)
+            except Exception:
+                click.echo(f"HotMem status failed (HTTP {status_code})", err=True)
+            raise SystemExit(1)
         data = resp.json()
         ui.status(data)
     except httpx.ConnectError as err:
-        click.echo(f"No HotMem server found at {url}", err=True)
+        click.echo(f"No HotMem server found at {health_url}", err=True)
         raise SystemExit(1) from err
+
+
+@main.command()
+@click.argument("identifier")
+@click.argument("fact")
+@click.option("--db", "db_path", default=None, type=click.Path(), help="Database file path.")
+@click.option("--url", default=None, help="Running daemon URL (e.g. http://127.0.0.1:8711).")
+@click.option("--importance", default=0.5, type=float, help="Importance score (0.0..1.0).")
+@click.option("--ttl", "ttl_seconds", default=None, type=int, help="Optional TTL in seconds.")
+@click.option("--idempotency-key", "idempotency_key", default=None, help="Operation retry key.")
+@click.option("--json", "as_json", is_flag=True, help="Emit raw JSON.")
+@_daemon_client_options
+@_embedder_options
+def add(
+    identifier: str,
+    fact: str,
+    db_path: str | None,
+    url: str | None,
+    importance: float,
+    ttl_seconds: int | None,
+    idempotency_key: str | None,
+    as_json: bool,
+    daemon_token: str | None,
+    daemon_session_id: str | None,
+    daemon_source: str | None,
+    daemon_namespace: str | None,
+    expected_store_id: str | None,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+):
+    """Add an inline fact to a running daemon (--url) or offline database (--db)."""
+    if url is not None and db_path is not None:
+        raise click.ClickException("pass either --db or --url, not both")
+    if url is None and db_path is None:
+        raise click.ClickException("add requires --db PATH or --url URL")
+
+    if url is not None:
+        try:
+            with _make_daemon_client(
+                url,
+                token=daemon_token,
+                session_id=daemon_session_id,
+                source=daemon_source,
+                namespace=daemon_namespace,
+                expected_store_id=expected_store_id,
+            ) as client:
+                res = client.add(
+                    identifier,
+                    fact,
+                    source=daemon_source or "",
+                    importance=importance,
+                    ttl_seconds=ttl_seconds,
+                    idempotency_key=idempotency_key,
+                )
+        except Exception as err:
+            _raise_cli_http_error(err)
+        if as_json:
+            click.echo(json.dumps(res, indent=2, default=str))
+        else:
+            get_renderer().summary(
+                "add",
+                memory_id=res["memory_id"],
+                content_hash=res["content_hash"][:12],
+            )
+        return
+
+    assert db_path is not None
+    from hotmem.runtime import HotMemRuntime
+
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    rt = HotMemRuntime(db_path=db_path, embedder=embedder).open()
+    try:
+        ctx = rt.resolve_caller(
+            session_id=daemon_session_id,
+            source=daemon_source,
+            namespace=daemon_namespace,
+            idempotency_key=idempotency_key,
+        )
+        res = rt.add(
+            ctx,
+            identifier=identifier,
+            fact=fact,
+            source=daemon_source or "",
+            importance=importance,
+            ttl_seconds=ttl_seconds,
+        )
+    finally:
+        rt.close()
+    if as_json:
+        click.echo(json.dumps(res, indent=2, default=str))
+    else:
+        get_renderer().summary(
+            "add",
+            memory_id=res["memory_id"],
+            content_hash=res["content_hash"][:12],
+        )
 
 
 @main.command()
@@ -438,9 +817,31 @@ def status(port: int, host: str):
     is_flag=True,
     help="Emit raw JSON (bypasses the renderer, for scripting).",
 )
-def search(query: str, db_path: str | None, url: str | None, top_k: int, as_json: bool):
+@_daemon_client_options
+def search(
+    query: str,
+    db_path: str | None,
+    url: str | None,
+    top_k: int,
+    as_json: bool,
+    daemon_token: str | None,
+    daemon_session_id: str | None,
+    daemon_source: str | None,
+    daemon_namespace: str | None,
+    expected_store_id: str | None,
+):
     """Search memories and print formatted results with scores."""
-    rows = _run_search(query, db_path=db_path, url=url, top_k=top_k)
+    rows = _run_search(
+        query,
+        db_path=db_path,
+        url=url,
+        top_k=top_k,
+        token=daemon_token,
+        session_id=daemon_session_id,
+        source=daemon_source,
+        namespace=daemon_namespace,
+        expected_store_id=expected_store_id,
+    )
 
     if as_json:
         click.echo(json.dumps(rows, indent=2, default=str))
@@ -455,15 +856,29 @@ def _run_search(
     db_path: str | None,
     url: str | None,
     top_k: int,
+    token: str | None = None,
+    session_id: str | None = None,
+    source: str | None = None,
+    namespace: str | None = None,
+    expected_store_id: str | None = None,
 ) -> list[dict]:
     """Resolve backend (HTTP server or local DB) and return search rows."""
     if url is not None and db_path is not None:
         raise click.ClickException("pass either --db or --url, not both")
 
     if url is not None:
-        from hotmem.client import HotMemClient
-
-        return HotMemClient(url).search(query, top_k=top_k)
+        try:
+            client = _make_daemon_client(
+                url,
+                token=token,
+                session_id=session_id,
+                source=source,
+                namespace=namespace,
+                expected_store_id=expected_store_id,
+            )
+            return client.search(query, top_k=top_k)
+        except Exception as err:
+            _raise_cli_http_error(err)
 
     from hotmem.db import MemoryDB
     from hotmem.search import search_memories
@@ -742,13 +1157,51 @@ def import_cmd(
 
 
 @main.command()
-@click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
+@click.option("--db", "db_path", default=None, type=click.Path(), help="Database path.")
+@click.option("--url", default=None, help="Running daemon URL (e.g. http://127.0.0.1:8711).")
 @click.option("--memory-id", "memory_id", required=True, help="Memory ID to promote.")
 @click.option("--to", "to_state", required=True, help="Target state: HOT|READY|PROMOTED|ARCHIVED.")
 @click.option("--reason", default=None, help="Optional reason for the transition.")
 @click.option("--actor", default=None, help="Optional actor performing the transition.")
-def promote(db_path: str, memory_id: str, to_state: str, reason: str | None, actor: str | None):
+@_daemon_client_options
+def promote(
+    db_path: str | None,
+    url: str | None,
+    memory_id: str,
+    to_state: str,
+    reason: str | None,
+    actor: str | None,
+    daemon_token: str | None,
+    daemon_session_id: str | None,
+    daemon_source: str | None,
+    daemon_namespace: str | None,
+    expected_store_id: str | None,
+):
     """Apply one promotion lifecycle transition (HOT→READY→PROMOTED→ARCHIVED)."""
+    if url is not None and db_path is not None:
+        raise click.ClickException("pass either --db or --url, not both")
+    if url is None and db_path is None:
+        raise click.ClickException("promote requires --db PATH or --url URL")
+
+    if url is not None:
+        try:
+            with _make_daemon_client(
+                url,
+                token=daemon_token,
+                session_id=daemon_session_id,
+                source=daemon_source,
+                namespace=daemon_namespace,
+                expected_store_id=expected_store_id,
+            ) as client:
+                result = client.promote(memory_id, to_state, reason=reason, actor=actor)
+        except Exception as err:
+            _raise_cli_http_error(err)
+        click.echo(
+            f"{result['memory_id']}: {result['promotion_state']} (updated {result['updated_at']})"
+        )
+        return
+
+    assert db_path is not None
     from hotmem.db import MemoryDB
     from hotmem.lifecycle import InvalidTransitionError, transition
 
@@ -772,12 +1225,52 @@ def promote(db_path: str, memory_id: str, to_state: str, reason: str | None, act
 
 
 @main.command()
-@click.option("--db", "db_path", required=True, type=click.Path(), help="Database path.")
+@click.option("--db", "db_path", default=None, type=click.Path(), help="Database path.")
+@click.option("--url", default=None, help="Running daemon URL (e.g. http://127.0.0.1:8711).")
 @click.option("--namespace", default=None, help="Filter by namespace.")
 @click.option("--state", default=None, help="Filter by promotion state.")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON.")
-def candidates(db_path: str, namespace: str | None, state: str | None, as_json: bool):
+@_daemon_client_options
+def candidates(
+    db_path: str | None,
+    url: str | None,
+    namespace: str | None,
+    state: str | None,
+    as_json: bool,
+    daemon_token: str | None,
+    daemon_session_id: str | None,
+    daemon_source: str | None,
+    daemon_namespace: str | None,
+    expected_store_id: str | None,
+):
     """List memories flagged as promotion candidates."""
+    if url is not None and db_path is not None:
+        raise click.ClickException("pass either --db or --url, not both")
+    if url is None and db_path is None:
+        raise click.ClickException("candidates requires --db PATH or --url URL")
+
+    if url is not None:
+        try:
+            with _make_daemon_client(
+                url,
+                token=daemon_token,
+                session_id=daemon_session_id,
+                source=daemon_source,
+                namespace=daemon_namespace,
+                expected_store_id=expected_store_id,
+            ) as client:
+                rows = client.candidates(namespace=namespace, state=state)
+        except Exception as err:
+            _raise_cli_http_error(err)
+        if as_json:
+            click.echo(json.dumps(rows, default=str, indent=2))
+        else:
+            for r in rows:
+                mid = r.get("memory_id") or r.get("id")
+                click.echo(f"{mid}\t{r['identifier']}\t{r.get('promotion_state', 'HOT')}")
+        return
+
+    assert db_path is not None
     from hotmem.db import MemoryDB
     from hotmem.lifecycle import list_candidates
 
@@ -1055,15 +1548,61 @@ def handoff_inspect(package: str, as_json: bool):
 
 @handoff.command("hydrate")
 @click.argument("package", type=click.Path(exists=True))
-@click.option("--db", "db_path", required=True, type=click.Path(), help="Target database path.")
+@click.option("--db", "db_path", default=None, type=click.Path(), help="Target database path.")
+@click.option("--url", default=None, help="Running daemon URL (e.g. http://127.0.0.1:8711).")
+@_daemon_client_options
 @_embedder_options
 def handoff_hydrate(
     package: str,
-    db_path: str,
+    db_path: str | None,
+    url: str | None,
+    daemon_token: str | None,
+    daemon_session_id: str | None,
+    daemon_source: str | None,
+    daemon_namespace: str | None,
+    expected_store_id: str | None,
     embedder_spec: str | None,
     embedder_model_path: str | None,
 ):
-    """Hydrate a verified package into a target database (atomic, idempotent)."""
+    """Hydrate a verified package into a target database or running daemon (atomic, idempotent)."""
+    if url is not None and db_path is not None:
+        raise click.ClickException("pass either --db or --url, not both")
+    if url is None and db_path is None:
+        raise click.ClickException("handoff hydrate requires --db PATH or --url URL")
+
+    if url is not None:
+        try:
+            with _make_daemon_client(
+                url,
+                token=daemon_token,
+                session_id=daemon_session_id,
+                source=daemon_source,
+                namespace=daemon_namespace,
+                expected_store_id=expected_store_id,
+            ) as client:
+                res = client.handoff_hydrate(package)
+        except Exception as err:
+            _raise_cli_http_error(err)
+        ui = get_renderer()
+        ui.summary(
+            "handoff-hydrate",
+            handoff_id=res["handoff_id"],
+            package_id=res["package_id"][:12],
+            loaded=res["loaded"],
+            skipped=res["skipped"],
+            invalid=res.get("invalid", 0),
+            already_applied=res.get("already_applied", False),
+            brief=res.get("brief"),
+            embedding_reused=res.get("embedding_reused", 0),
+            embedding_rebuilt=res.get("embedding_rebuilt", 0),
+            embedding_missing=res.get("embedding_missing", 0),
+            embedding_failed=res.get("embedding_failed", 0),
+            annotations_merged=res.get("annotations_merged", 0),
+            annotation_conflicts=res.get("annotation_conflicts", 0),
+        )
+        return
+
+    assert db_path is not None
     from hotmem.db import MemoryDB
     from hotmem.handoff.hydrate import hydrate_handoff as do_hydrate
     from hotmem.handoff.verify import HandoffError
