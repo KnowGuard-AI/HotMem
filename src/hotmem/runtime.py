@@ -487,7 +487,6 @@ class HotMemRuntime:
                     "db_path": self.db_path,
                     "uptime_s": round(time.time() - self.start_time, 1),
                     "embedding": {"model": descriptor.key, "dim": descriptor.dimension},
-                    "policy_enforced": False,
                 }
 
             visible_rows = ctx.filter_rows(db.all_rows(include_embedding=False), operation="read")
