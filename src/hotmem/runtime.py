@@ -38,7 +38,14 @@ from hotmem.lifecycle import (
 )
 from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
 from hotmem.mount import StoreIdentityError, StoreLock
-from hotmem.policy import CallerContext, PolicyConfig, PolicyError
+from hotmem.policy import (
+    CallerContext,
+    DisclosureReport,
+    PolicyConfig,
+    PolicyError,
+    redact_structure,
+    scan_and_redact_text,
+)
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
 from hotmem.rerank import Reranker
@@ -286,7 +293,13 @@ class HotMemRuntime:
             )
         return resolved
 
-    def _guard_hydrate_scope(self, ctx: CallerContext, target: str) -> None:
+    def _guard_hydrate_scope(
+        self,
+        ctx: CallerContext,
+        target: str,
+        *,
+        default_namespace: str = "",
+    ) -> None:
         """Fail closed before importing records into namespaces the caller cannot write."""
         if not ctx.policy_enforced:
             return
@@ -306,17 +319,34 @@ class HotMemRuntime:
                 for p in path.iterdir()
                 if p.is_file() and (p.name == "memories.jsonl" or p.name == "memories.jsonl.gz")
             )
+            if not artifacts and not ctx.can_access_namespace(default_namespace, operation="write"):
+                raise PolicyError(
+                    403,
+                    "scope_denied",
+                    f"caller {ctx.caller_id!r} cannot hydrate bundle into "
+                    f"namespace {default_namespace!r}",
+                )
         else:
             return
         for artifact in artifacts:
+            seen_any = False
             for namespace in _iter_artifact_namespaces(artifact):
-                if not ctx.can_access_namespace(namespace, operation="write"):
+                seen_any = True
+                effective_ns = namespace if namespace else default_namespace
+                if not ctx.can_access_namespace(effective_ns, operation="write"):
                     raise PolicyError(
                         403,
                         "scope_denied",
                         f"caller {ctx.caller_id!r} cannot hydrate records into "
-                        f"namespace {namespace!r}",
+                        f"namespace {effective_ns!r}",
                     )
+            if not seen_any and not ctx.can_access_namespace(default_namespace, operation="write"):
+                raise PolicyError(
+                    403,
+                    "scope_denied",
+                    f"caller {ctx.caller_id!r} cannot hydrate records into "
+                    f"namespace {default_namespace!r}",
+                )
 
     @contextlib.contextmanager
     def _read_db(self):
@@ -460,6 +490,15 @@ class HotMemRuntime:
                 }
 
             visible_rows = ctx.filter_rows(db.all_rows(include_embedding=False), operation="read")
+            if ctx.policy_enforced:
+                disclosed_visible = []
+                for r in visible_rows:
+                    try:
+                        if ctx.apply_disclosure_to_row(r, operation="read") is not None:
+                            disclosed_visible.append(r)
+                    except PolicyError:
+                        continue
+                visible_rows = disclosed_visible
             visible_count = len(visible_rows)
         if total_count == 0:
             store_state = "verified_empty"
@@ -481,6 +520,8 @@ class HotMemRuntime:
                 total_count if ctx.credential is not None and ctx.credential.is_management else 0
             ),
             "runtime_generation": self.runtime_generation,
+            "policy_enforced": True,
+            "policy_revision": self.policy.revision,
         }
 
     def add(
@@ -567,6 +608,8 @@ class HotMemRuntime:
                     }
 
             if file_uri is not None:
+                if ctx.policy_enforced:
+                    self._confine_path(ctx, file_uri, kind="backing file")
                 ref = FileRef(
                     source_uri=file_uri,
                     byte_offset=byte_offset or 0,
@@ -695,22 +738,145 @@ class HotMemRuntime:
             if (ctx.policy_enforced or ctx.namespace is not None)
             else None
         )
-        with self._read_db() as db, Timer() as t:
-            messages = search_memories(
-                db,
-                query=query,
-                top_k=top_k,
-                max_chars=max_chars,
-                vector_index=self.vector_index,
-                embedder=self.embedder,
-                reranker=self.reranker,
-                row_filter=row_filter,
+
+        def _run_search(vector_index):
+            run_report = DisclosureReport() if ctx.policy_enforced else None
+            run_transform = (
+                (lambda row: ctx.apply_disclosure_to_row(row, report=run_report, operation="read"))
+                if ctx.policy_enforced
+                else None
             )
-        return {
+            with self._read_db() as db, Timer() as run_timer:
+                run_messages = search_memories(
+                    db,
+                    query=query,
+                    top_k=top_k,
+                    max_chars=max_chars,
+                    vector_index=vector_index,
+                    embedder=self.embedder,
+                    reranker=self.reranker,
+                    row_filter=row_filter,
+                    row_transform=run_transform,
+                )
+            return run_messages, run_report, run_timer
+
+        messages, report, t = _run_search(self.vector_index)
+        if (
+            ctx.policy_enforced
+            and len(messages) < top_k
+            and self.vector_index is not None
+            and not isinstance(self.vector_index, NullVectorIndex)
+        ):
+            # Disclosure omissions can consume the whole ANN oversample
+            # window. Re-run the exact scoped scan so eligible rows outside
+            # that window are never starved.
+            messages, report, t = _run_search(None)
+        result: dict[str, Any] = {
             "memories": messages,
             "count": len(messages),
             "trace_ms": round(t.ms, 2),
         }
+        if ctx.policy_enforced and report is not None:
+            result["disclosure"] = report.to_dict()
+            result["policy_revision"] = self.policy.revision
+        return result
+
+    def _apply_hydrated_dict_disclosure(
+        self,
+        ctx: CallerContext,
+        record: dict[str, Any],
+        hydrated: dict[str, Any],
+        report: DisclosureReport,
+    ) -> dict[str, Any] | None:
+        """Apply disclosure policy and host-path sanitization to a profiled hydration dict."""
+        import base64
+
+        out = dict(hydrated)
+        raw_uri = str(record.get("source_uri") or "")
+        if "source_uri" in out:
+            sanitized_uri = ctx.sanitize_source_uri(out.get("source_uri"), base_dir=self.base_dir)
+            out["source_uri"] = sanitized_uri
+            if raw_uri and raw_uri != sanitized_uri and isinstance(out.get("warnings"), list):
+                out["warnings"] = [
+                    str(w).replace(raw_uri, sanitized_uri or "<redacted>") for w in out["warnings"]
+                ]
+        if not ctx.policy_enforced or ctx.credential is None:
+            return out
+
+        secret_action, _ = ctx.effective_disclosure_actions(record, operation="read")
+        if secret_action == "allow":
+            return out
+
+        row_id = str(record.get("id") or "")
+        identifier = str(record.get("identifier") or "")
+        field_hits: list[tuple[str, str, int]] = []
+        for field_name in ("fact_text", "fact_summary", "summary"):
+            val = out.get(field_name)
+            if isinstance(val, str) and val:
+                redacted_val, hits = scan_and_redact_text(val)
+                if hits:
+                    out[field_name] = redacted_val
+                    for pat_name, cnt in hits:
+                        field_hits.append((field_name, pat_name, cnt))
+
+        content_val = out.get("content")
+        if isinstance(content_val, str) and content_val:
+            if out.get("content_encoding") == "base64":
+                raw_bytes = base64.b64decode(content_val)
+                try:
+                    text_val = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError as err:
+                    raise PolicyError(
+                        403,
+                        "policy_disclosure_blocked",
+                        f"policy cannot redact non-text payload for memory {row_id!r}",
+                        detail={"reason": "non_text_payload", "memory_id": row_id},
+                    ) from err
+                redacted_text, hits = scan_and_redact_text(text_val)
+                if hits:
+                    out["content"] = base64.b64encode(redacted_text.encode("utf-8")).decode("ascii")
+                    for pat_name, cnt in hits:
+                        field_hits.append(("content", pat_name, cnt))
+            else:
+                redacted_val, hits = scan_and_redact_text(content_val)
+                if hits:
+                    out["content"] = redacted_val
+                    for pat_name, cnt in hits:
+                        field_hits.append(("content", pat_name, cnt))
+
+        if not field_hits:
+            return out
+
+        matched_patterns = sorted({pat for _, pat, _ in field_hits})
+        if secret_action == "fail_closed":
+            raise PolicyError(
+                403,
+                "policy_disclosure_blocked",
+                f"policy blocked disclosure of secret/PII pattern(s) in memory {row_id!r}",
+                detail={
+                    "reason": "secret_detected",
+                    "patterns": matched_patterns,
+                    "memory_id": row_id,
+                },
+            )
+        if secret_action == "omit":
+            report.record_omission(
+                memory_id=row_id,
+                identifier=identifier,
+                reason="policy_secret_omitted",
+                patterns=matched_patterns,
+            )
+            return None
+
+        report.redacted_records += 1
+        for field_name, pat_name, cnt in field_hits:
+            report.record_redaction(
+                memory_id=row_id,
+                field_name=field_name,
+                pattern=pat_name,
+                count=cnt,
+            )
+        return out
 
     def list_memories(
         self,
@@ -726,15 +892,29 @@ class HotMemRuntime:
             if (ctx.policy_enforced or ctx.namespace is not None)
             else None
         )
+        report = DisclosureReport() if ctx.policy_enforced else None
+        row_transform = (
+            (lambda row: ctx.apply_disclosure_to_row(row, report=report, operation="read"))
+            if ctx.policy_enforced
+            else None
+        )
         with self._read_db() as db, Timer() as t:
             rows = db.list_by_identifier(
-                identifier, order=order, limit=limit, row_filter=row_filter
+                identifier,
+                order=order,
+                limit=limit,
+                row_filter=row_filter,
+                row_transform=row_transform,
             )
-        return {
+        result: dict[str, Any] = {
             "memories": rows,
             "count": len(rows),
             "trace_ms": round(t.ms, 2),
         }
+        if ctx.policy_enforced and report is not None:
+            result["disclosure"] = report.to_dict()
+            result["policy_revision"] = self.policy.revision
+        return result
 
     def get_memory(self, ctx: CallerContext, memory_id: str) -> dict[str, Any] | None:
         ctx.require_operation("read")
@@ -745,7 +925,14 @@ class HotMemRuntime:
         if not ctx.can_access_row(record, operation="read"):
             # Out-of-scope rows are reported as missing (no existence oracle).
             return None
-        return {
+        report: DisclosureReport | None = None
+        if ctx.policy_enforced:
+            report = DisclosureReport()
+            disclosed = ctx.apply_disclosure_to_row(record, report=report, operation="read")
+            if disclosed is None:
+                return None
+            record = disclosed
+        out = {
             "id": record["id"],
             "identifier": record["identifier"],
             "memory_type": record["memory_type"],
@@ -757,7 +944,7 @@ class HotMemRuntime:
             "importance": record["importance"],
             "metadata": _safe_json(record["metadata_json"], {}),
             "content_hash": record["content_hash"],
-            "source_uri": record["source_uri"],
+            "source_uri": ctx.sanitize_source_uri(record.get("source_uri"), base_dir=self.base_dir),
             "byte_offset": record["byte_offset"],
             "byte_length": record["byte_length"],
             "source_checksum": record["source_checksum"],
@@ -765,6 +952,10 @@ class HotMemRuntime:
             "provenance": _safe_json(record.get("provenance_json"), None),
             "created_at": record["created_at"],
         }
+        if report is not None:
+            out["disclosure"] = report.to_dict()
+            out["policy_revision"] = self.policy.revision
+        return out
 
     def hydrate_one_profiled(
         self,
@@ -775,11 +966,19 @@ class HotMemRuntime:
         verify: bool = True,
     ) -> dict[str, Any]:
         ctx.require_operation("read")
+        report = DisclosureReport()
         with self._read_db() as db:
             record = get_memory_metadata(db, memory_id)
             if record is None or not ctx.can_access_row(record, operation="read"):
                 # Out-of-scope ids are indistinguishable from missing ids.
                 raise KeyError(memory_id)
+            if ctx.policy_enforced:
+                if record.get("source_uri"):
+                    self._confine_path(ctx, str(record["source_uri"]), kind="backing file")
+                # Check classification & metadata before reading backing file
+                meta_probe = {**record, "fact_text": "", "fact_summary": ""}
+                if ctx.apply_disclosure_to_row(meta_probe, report=report, operation="read") is None:
+                    raise KeyError(memory_id)
             with Timer() as t:
                 ph = hydrate_with_profile(
                     db,
@@ -789,8 +988,13 @@ class HotMemRuntime:
                     verify=verify,
                 )
         d = ph.to_dict()
-        d["trace_ms"] = round(t.ms, 2)
-        return d
+        disclosed_d = self._apply_hydrated_dict_disclosure(ctx, record, d, report)
+        if disclosed_d is None:
+            raise KeyError(memory_id)
+        disclosed_d["trace_ms"] = round(t.ms, 2)
+        if ctx.policy_enforced:
+            disclosed_d["disclosure"] = report.to_dict()
+        return disclosed_d
 
     def hydrate_one_raw(self, ctx: CallerContext, memory_id: str) -> tuple[bytes, dict[str, str]]:
         ctx.require_operation("read")
@@ -798,10 +1002,46 @@ class HotMemRuntime:
             record = get_memory_metadata(db, memory_id)
             if record is None or not ctx.can_access_row(record, operation="read"):
                 raise KeyError(memory_id)
+            if ctx.policy_enforced:
+                if record.get("source_uri"):
+                    self._confine_path(ctx, str(record["source_uri"]), kind="backing file")
+                meta_probe = {**record, "fact_text": "", "fact_summary": ""}
+                if ctx.apply_disclosure_to_row(meta_probe, operation="read") is None:
+                    raise KeyError(memory_id)
             with Timer() as t:
                 payload = hydrate_memory(db, memory_id, base_dir=self.base_dir)
             verified = bool(record["source_checksum"])
             source_format = record.get("source_format", "") or ""
+        if ctx.policy_enforced:
+            secret_action, _ = ctx.effective_disclosure_actions(record, operation="read")
+            if secret_action != "allow":
+                try:
+                    text = payload.decode("utf-8")
+                except UnicodeDecodeError as err:
+                    raise PolicyError(
+                        403,
+                        "policy_disclosure_blocked",
+                        f"policy cannot redact non-text payload for memory {memory_id!r}",
+                        detail={"reason": "non_text_payload", "memory_id": memory_id},
+                    ) from err
+                redacted_text, hits = scan_and_redact_text(text)
+                if hits:
+                    matched_patterns = sorted({pat for pat, _ in hits})
+                    if secret_action == "fail_closed":
+                        raise PolicyError(
+                            403,
+                            "policy_disclosure_blocked",
+                            f"policy blocked disclosure of secret/PII pattern(s) "
+                            f"in memory {memory_id!r}",
+                            detail={
+                                "reason": "secret_detected",
+                                "patterns": matched_patterns,
+                                "memory_id": memory_id,
+                            },
+                        )
+                    if secret_action == "omit":
+                        raise KeyError(memory_id)
+                    payload = redacted_text.encode("utf-8")
         headers = {
             "X-HotMem-Source-Format": source_format,
             "X-HotMem-Provenance": "verified" if verified else "unverified",
@@ -818,6 +1058,7 @@ class HotMemRuntime:
         verify: bool = True,
     ) -> dict[str, Any]:
         ctx.require_operation("read")
+        report = DisclosureReport()
         with self._read_db() as db, Timer() as t:
             results = []
             for mid in memory_ids:
@@ -826,6 +1067,16 @@ class HotMemRuntime:
                     # Do not distinguish "exists in another scope" from missing.
                     results.append({"memory_id": mid, "error": "not_found"})
                     continue
+                if ctx.policy_enforced:
+                    if record.get("source_uri"):
+                        self._confine_path(ctx, str(record["source_uri"]), kind="backing file")
+                    meta_probe = {**record, "fact_text": "", "fact_summary": ""}
+                    if (
+                        ctx.apply_disclosure_to_row(meta_probe, report=report, operation="read")
+                        is None
+                    ):
+                        results.append({"memory_id": mid, "error": "not_found"})
+                        continue
                 try:
                     ph = hydrate_with_profile(
                         db,
@@ -834,7 +1085,13 @@ class HotMemRuntime:
                         base_dir=self.base_dir,
                         verify=verify,
                     )
-                    results.append(ph.to_dict())
+                    disclosed_d = self._apply_hydrated_dict_disclosure(
+                        ctx, record, ph.to_dict(), report
+                    )
+                    if disclosed_d is None:
+                        results.append({"memory_id": mid, "error": "not_found"})
+                    else:
+                        results.append(disclosed_d)
                 except KeyError:
                     results.append({"memory_id": mid, "error": "not_found"})
                 except ProvenanceError as err:
@@ -843,14 +1100,23 @@ class HotMemRuntime:
                             "memory_id": mid,
                             "error": "provenance_mismatch",
                             "reason": err.reason,
-                            "source_uri": err.source_uri,
+                            "source_uri": ctx.sanitize_source_uri(
+                                err.source_uri, base_dir=self.base_dir
+                            ),
                         }
                     )
                 except ValueError as err:
                     results.append(
                         {"memory_id": mid, "error": "invalid_profile", "message": str(err)}
                     )
-        return {"results": results, "count": len(results), "trace_ms": round(t.ms, 2)}
+        out: dict[str, Any] = {
+            "results": results,
+            "count": len(results),
+            "trace_ms": round(t.ms, 2),
+        }
+        if ctx.policy_enforced:
+            out["disclosure"] = report.to_dict()
+        return out
 
     def hydrate_snapshot(self, ctx: CallerContext, *, target: str | None = None) -> dict[str, Any]:
         ctx.require_operation("hydrate")
@@ -865,11 +1131,17 @@ class HotMemRuntime:
 
             if _detect_snapshot_format(resolved_target) in ("v2", "package"):
                 _verify_snapshot(resolved_target)
+        target_ns = ctx.hydrate_target_namespace()
         # Validate every imported namespace against the caller's write scope
         # before any record is written (fail closed, no partial import).
-        self._guard_hydrate_scope(ctx, resolved_target)
+        self._guard_hydrate_scope(ctx, resolved_target, default_namespace=target_ns)
         with self._write_slot() as db:
-            result = snapshot_hydrate(db, resolved_target, embedder=self.embedder)
+            result = snapshot_hydrate(
+                db,
+                resolved_target,
+                embedder=self.embedder,
+                target_namespace=target_ns or None,
+            )
             emit_import_event(
                 db,
                 path=resolved_target,
@@ -881,7 +1153,7 @@ class HotMemRuntime:
             "loaded": result.loaded,
             "skipped_dupes": result.skipped_dupes,
             "invalid": result.invalid,
-            "path": resolved_target,
+            "path": ctx.sanitize_source_uri(resolved_target, base_dir=self.base_dir),
             **result.disposition(),
         }
 
@@ -895,6 +1167,12 @@ class HotMemRuntime:
         gz: bool = False,
     ) -> dict[str, Any]:
         ctx.require_operation("export")
+        if ctx.policy_enforced and copy_attachments and not ctx.allow_attachments_enabled:
+            raise PolicyError(
+                403,
+                "attachments_not_permitted",
+                f"caller {ctx.caller_id!r} is not permitted to export raw file attachments",
+            )
         resolved_target = str(
             self._confine_path(
                 ctx, target or self.swap_path or "swap.jsonl", kind="snapshot target"
@@ -910,30 +1188,87 @@ class HotMemRuntime:
             if (ctx.policy_enforced or ctx.namespace is not None)
             else None
         )
-        export_scope: dict[str, Any] | None = None
-        if ctx.policy_enforced:
-            with self._read_db() as read_db:
-                total_count = read_db.count()
-                permitted = (
-                    sum(1 for row in read_db.iter_rows(include_embedding=False) if row_filter(row))
-                    if row_filter is not None
-                    else total_count
+
+        def _prepare_export_row(
+            row: dict[str, Any], row_report: DisclosureReport | None = None
+        ) -> dict[str, Any] | None:
+            if not ctx.policy_enforced:
+                return row
+            if row.get("memory_type") == "file" and not ctx.sanitize_source_uri(
+                row.get("source_uri"), base_dir=self.base_dir
+            ):
+                # A file-backed record with no expressible portable reference
+                # would hydrate as invalid; omit it instead of emitting a
+                # dangling pointer (portable-cassette guarantee).
+                if row_report is not None:
+                    row_report.record_omission(
+                        memory_id=str(row.get("id") or ""),
+                        identifier=str(row.get("identifier") or ""),
+                        reason="file_reference_unavailable",
+                    )
+                return None
+            disclosed = ctx.apply_disclosure_to_row(row, report=row_report, operation="export")
+            if disclosed is None:
+                return None
+            fact_text_changed = disclosed.get("fact_text") != row.get("fact_text")
+            summary_changed = disclosed.get("fact_summary") != row.get("fact_summary")
+            if fact_text_changed and disclosed.get("memory_type") != "file":
+                disclosed["content_hash"] = compute_content_hash(
+                    str(disclosed.get("identifier") or ""),
+                    str(disclosed.get("fact_text") or ""),
                 )
-            cred = ctx.credential
-            export_scope = {
-                "caller_id": ctx.caller_id,
-                "session_id": ctx.session_id,
-                "source": ctx.source,
-                "namespace": ctx.namespace,
-                "permitted_namespaces": list(cred.namespaces) if cred else [],
-                "share_approvals": [
-                    s.approval_id for s in (cred.share_approvals if cred else ()) if not s.revoked
-                ],
-                "exported_count": permitted,
-                "omitted_count": max(0, total_count - permitted),
-                "store_id": self.store_id,
-            }
+            embed_input_changed = fact_text_changed or (
+                disclosed.get("memory_type") == "file" and summary_changed
+            )
+            if embed_input_changed and disclosed.get("embedding") is not None:
+                embed_text = str(disclosed.get("fact_text") or disclosed.get("fact_summary") or "")
+                if embed_text:
+                    disclosed["embedding"] = pack_embedding(self.embedder.embed(embed_text))
+            if ctx.redact_host_paths_enabled and disclosed.get("source_uri"):
+                disclosed["source_uri"] = ctx.sanitize_source_uri(
+                    disclosed.get("source_uri"), base_dir=self.base_dir
+                )
+            return disclosed
+
+        export_scope: dict[str, Any] | None = None
+        report: DisclosureReport | None = None
         with self._write_slot() as db:
+            if ctx.policy_enforced:
+                # Count within the same write slot as the export so scope and
+                # disclosure counts describe the emitted snapshot.
+                report = DisclosureReport()
+                exported_after_disclosure = 0
+                scope_omitted = 0
+                total_count = db.count()
+                for row in db.iter_rows(include_embedding=False):
+                    if row_filter is not None and not row_filter(row):
+                        scope_omitted += 1
+                        continue
+                    if copy_attachments and row.get("source_uri"):
+                        self._confine_path(ctx, str(row["source_uri"]), kind="backing file")
+                    disclosed_probe = _prepare_export_row(row, report)
+                    if disclosed_probe is not None:
+                        exported_after_disclosure += 1
+                cred = ctx.credential
+                export_scope = {
+                    "caller_id": ctx.caller_id,
+                    "session_id": ctx.session_id,
+                    "source": ctx.source,
+                    "namespace": ctx.namespace,
+                    "permitted_namespaces": list(cred.namespaces) if cred else [],
+                    "share_approvals": [
+                        s.approval_id
+                        for s in (cred.share_approvals if cred else ())
+                        if not s.revoked
+                    ],
+                    "exported_count": exported_after_disclosure,
+                    "scope_omitted_count": scope_omitted,
+                    "disclosure_omitted_count": report.omitted_count,
+                    "omitted_count": max(0, total_count - exported_after_disclosure),
+                    "redacted_count": report.redacted_count,
+                    "disclosure": report.to_dict(),
+                    "store_id": self.store_id,
+                }
             result = snapshot_write(
                 db,
                 resolved_target,
@@ -942,13 +1277,18 @@ class HotMemRuntime:
                 package=package,
                 gz=gz,
                 row_filter=row_filter,
-                redact_host_paths=ctx.policy_enforced,
+                row_transform=_prepare_export_row if ctx.policy_enforced else None,
+                redact_host_paths=ctx.redact_host_paths_enabled,
                 export_scope=export_scope,
             )
-        return {
+        out: dict[str, Any] = {
             "exported": result.exported,
-            "path": result.path,
+            "path": ctx.sanitize_source_uri(result.path, base_dir=self.base_dir),
         }
+        if ctx.policy_enforced and report is not None:
+            out["disclosure"] = report.to_dict()
+            out["policy_revision"] = self.policy.revision
+        return out
 
     def handoff_prepare(
         self,
@@ -982,7 +1322,7 @@ class HotMemRuntime:
                 "redacted_count": result.coverage["redacted_count"],
                 "recoverable_count": result.coverage["recoverable_count"],
             },
-            "path": result.path,
+            "path": ctx.sanitize_source_uri(result.path, base_dir=self.base_dir),
             "timings_ms": result.timings_ms,
         }
 
@@ -999,17 +1339,31 @@ class HotMemRuntime:
 
     def handoff_inspect(self, ctx: CallerContext, *, package: str) -> dict[str, Any]:
         ctx.require_operation("read")
-        return inspect_handoff(str(self._confine_path(ctx, package, kind="handoff package")))
+        report = inspect_handoff(str(self._confine_path(ctx, package, kind="handoff package")))
+        if isinstance(report, dict) and "path" in report:
+            report["path"] = ctx.sanitize_source_uri(report.get("path"), base_dir=self.base_dir)
+        return report
 
     def handoff_hydrate(self, ctx: CallerContext, *, package: str) -> dict[str, Any]:
         ctx.require_operation("hydrate")
         resolved_package = str(self._confine_path(ctx, package, kind="handoff package"))
+        target_ns: str | None = ctx.namespace
         if ctx.policy_enforced:
             # Integrity before scope checks (and before any write).
             verify_handoff(resolved_package)
-        self._guard_hydrate_scope(ctx, resolved_package)
+            target_ns = ctx.hydrate_target_namespace()
+        self._guard_hydrate_scope(
+            ctx,
+            resolved_package,
+            default_namespace=target_ns or "",
+        )
         with self._write_slot() as db:
-            result = hydrate_handoff(db, resolved_package, embedder=self.embedder)
+            result = hydrate_handoff(
+                db,
+                resolved_package,
+                embedder=self.embedder,
+                target_namespace=target_ns,
+            )
         return {
             "handoff_id": result.handoff_id,
             "package_id": result.package_id,
@@ -1018,29 +1372,37 @@ class HotMemRuntime:
             "invalid": result.invalid,
             "already_applied": result.already_applied,
             "brief": result.brief_identifier,
+            "brief_accessible": result.brief_accessible,
             **result.disposition(),
         }
 
     def list_files(self, ctx: CallerContext, *, identifier: str | None = None) -> dict[str, Any]:
         ctx.require_operation("read")
+        report = DisclosureReport() if ctx.policy_enforced else None
         with self._read_db() as db, Timer() as t:
             rows = ctx.filter_rows(db.list_file_backed(), operation="read")
             if identifier:
                 rows = [r for r in rows if r["identifier"] == identifier]
             files = []
             for row in rows:
+                if ctx.policy_enforced and report is not None:
+                    disclosed = ctx.apply_disclosure_to_row(row, report=report, operation="read")
+                    if disclosed is None:
+                        continue
+                    row = disclosed
                 source_uri = row.get("source_uri") or ""
+                display_uri = ctx.sanitize_source_uri(source_uri, base_dir=self.base_dir)
                 exists = False
                 size = row.get("byte_length") or 0
-                if source_uri:
-                    resolved = source_uri
-                    if "://" not in source_uri and not Path(source_uri).is_absolute():
-                        resolved = str(Path(self.base_dir) / source_uri)
+                stat_uri = display_uri
+                if stat_uri and "://" not in stat_uri and not Path(stat_uri).is_absolute():
+                    stat_uri = str(Path(self.base_dir) / stat_uri)
+                if stat_uri:
                     try:
-                        adapter = get_adapter(resolved)
-                        exists = adapter.exists(resolved)
+                        adapter = get_adapter(stat_uri)
+                        exists = adapter.exists(stat_uri)
                         if exists:
-                            meta = adapter.metadata(resolved)
+                            meta = adapter.metadata(stat_uri)
                             size = meta["size"]
                     except Exception:
                         pass
@@ -1048,7 +1410,7 @@ class HotMemRuntime:
                     {
                         "memory_id": row["id"],
                         "identifier": row["identifier"],
-                        "source_uri": source_uri,
+                        "source_uri": display_uri,
                         "byte_offset": row.get("byte_offset") or 0,
                         "byte_length": row.get("byte_length") or 0,
                         "source_format": row.get("source_format") or "",
@@ -1057,7 +1419,15 @@ class HotMemRuntime:
                         "size": size,
                     }
                 )
-        return {"files": files, "count": len(files), "trace_ms": round(t.ms, 2)}
+        out: dict[str, Any] = {
+            "files": files,
+            "count": len(files),
+            "trace_ms": round(t.ms, 2),
+        }
+        if report is not None:
+            out["disclosure"] = report.to_dict()
+            out["policy_revision"] = self.policy.revision
+        return out
 
     def list_bundles(self, ctx: CallerContext) -> dict[str, Any]:
         # Bundle index entries are store-wide filesystem paths, not
@@ -1066,6 +1436,18 @@ class HotMemRuntime:
             ctx.require_operation("manage")
         with self._read_db() as db, Timer() as t:
             rows = db.list_bundle_index()
+        if ctx.redact_host_paths_enabled:
+            rows = [
+                {
+                    **row,
+                    **{
+                        key: ctx.sanitize_source_uri(row.get(key), base_dir=self.base_dir)
+                        for key in ("path", "primary_file")
+                        if key in row
+                    },
+                }
+                for row in rows
+            ]
         return {"bundles": rows, "count": len(rows), "trace_ms": round(t.ms, 2)}
 
     def discover(self, ctx: CallerContext, *, root: str, max_depth: int = 10) -> dict[str, Any]:
@@ -1093,11 +1475,19 @@ class HotMemRuntime:
 
     def hygiene(self, ctx: CallerContext) -> dict[str, Any]:
         ctx.require_operation("read")
-        row_filter = (
-            (lambda row: ctx.can_access_row(row, operation="read"))
-            if (ctx.policy_enforced or ctx.namespace is not None)
-            else None
-        )
+
+        def _hygiene_filter(row: dict[str, Any]) -> bool:
+            if not ctx.can_access_row(row, operation="read"):
+                return False
+            if ctx.policy_enforced:
+                try:
+                    if ctx.apply_disclosure_to_row(row, operation="read") is None:
+                        return False
+                except PolicyError:
+                    return False
+            return True
+
+        row_filter = _hygiene_filter if (ctx.policy_enforced or ctx.namespace is not None) else None
         with self._read_db() as db:
             report = check_hygiene(db, base_dir=self.base_dir, row_filter=row_filter)
         counts = {
@@ -1121,6 +1511,15 @@ class HotMemRuntime:
                 for w in report.warnings:
                     if w.severity != "error":
                         continue
+                    raw_uri = w.detail.get("source_uri")
+                    sanitized_uri = (
+                        ctx.sanitize_source_uri(raw_uri, base_dir=self.base_dir)
+                        if raw_uri is not None
+                        else None
+                    )
+                    msg = w.message
+                    if raw_uri and sanitized_uri is not None and raw_uri != sanitized_uri:
+                        msg = msg.replace(str(raw_uri), sanitized_uri or "<redacted>")
                     append_event(
                         db,
                         event_type=EventType.HYGIENE_WARNING,
@@ -1128,14 +1527,31 @@ class HotMemRuntime:
                         payload={
                             "category": w.category,
                             "severity": w.severity,
-                            "message": w.message,
-                            "source_uri": w.detail.get("source_uri"),
+                            "message": msg,
+                            "source_uri": sanitized_uri,
                             "identifier": w.detail.get("identifier"),
                         },
                     )
                 with contextlib.suppress(Exception):
                     db.trim_events_by_count(10_000)
-        return report.to_dict()
+        out = report.to_dict()
+        if ctx.redact_host_paths_enabled and isinstance(out.get("warnings"), list):
+            sanitized_warnings = []
+            for w_dict in out["warnings"]:
+                w_copy = dict(w_dict)
+                detail = dict(w_copy.get("detail") or {})
+                raw_uri = detail.get("source_uri")
+                if raw_uri:
+                    san_uri = ctx.sanitize_source_uri(raw_uri, base_dir=self.base_dir)
+                    detail["source_uri"] = san_uri
+                    w_copy["detail"] = detail
+                    if isinstance(w_copy.get("message"), str) and raw_uri != san_uri:
+                        w_copy["message"] = w_copy["message"].replace(
+                            str(raw_uri), san_uri or "<redacted>"
+                        )
+                sanitized_warnings.append(w_copy)
+            out["warnings"] = sanitized_warnings
+        return out
 
     def list_events(
         self,
@@ -1204,6 +1620,11 @@ class HotMemRuntime:
                 page = listing["events"]
                 if not page:
                     break
+                page_ids = [
+                    str(ev.get("memory_id") or (ev.get("payload") or {}).get("id") or "")
+                    for ev in page
+                ]
+                page_meta = db.get_memories(page_ids)
                 for ev in page:
                     last_scanned_seq = int(ev["seq"])
                     ev_ns = str(ev.get("namespace") or "")
@@ -1215,11 +1636,58 @@ class HotMemRuntime:
                     }
                     if not ctx.can_access_row(row_probe, operation="read"):
                         continue
+                    ev_mid = ev.get("memory_id") or payload.get("id")
+                    mem_row = page_meta.get(str(ev_mid)) if ev_mid else None
+                    probe = (
+                        mem_row
+                        if mem_row is not None
+                        else {
+                            **row_probe,
+                            "metadata_json": payload.get("metadata_json") or "{}",
+                            "tags": payload.get("tags") or "[]",
+                            "provenance_json": payload.get("provenance_json"),
+                        }
+                    )
+                    disclosed_probe = ctx.apply_disclosure_to_row(probe, operation="read")
+                    if disclosed_probe is None:
+                        continue
                     # Strip raw embedding blobs and full fact_text from the
                     # daemon activity stream.
                     sanitized_payload = dict(payload)
                     sanitized_payload.pop("embedding_b64", None)
                     sanitized_payload.pop("fact_text", None)
+                    for key in (
+                        "identifier",
+                        "metadata_json",
+                        "provenance_json",
+                        "tags",
+                        "fact_summary",
+                        "parent_memory",
+                        "related_memories",
+                    ):
+                        if key in sanitized_payload and key in disclosed_probe:
+                            sanitized_payload[key] = disclosed_probe[key]
+                    secret_action, _ = ctx.effective_disclosure_actions(probe, operation="read")
+                    if secret_action != "allow":
+                        redacted_payload, hits = redact_structure(sanitized_payload)
+                        if hits:
+                            patterns = sorted({p for p, _ in hits})
+                            if secret_action == "fail_closed":
+                                raise PolicyError(
+                                    403,
+                                    "policy_disclosure_blocked",
+                                    "policy blocked disclosure of secret/PII "
+                                    f"pattern(s) in event {ev.get('seq')!r}",
+                                    detail={"reason": "secret_detected", "patterns": patterns},
+                                )
+                            if secret_action == "omit":
+                                continue
+                            sanitized_payload = redacted_payload
+                    for path_key in ("source_uri", "path", "root"):
+                        if path_key in sanitized_payload and ctx.redact_host_paths_enabled:
+                            sanitized_payload[path_key] = ctx.sanitize_source_uri(
+                                sanitized_payload.get(path_key), base_dir=self.base_dir
+                            )
                     filtered_events.append({**ev, "payload": sanitized_payload})
                 if len(filtered_events) >= limit or len(page) < limit:
                     break
@@ -1313,6 +1781,14 @@ class HotMemRuntime:
             rows = ctx.filter_rows(
                 list_candidates(db, namespace=namespace, state=state), operation="read"
             )
+        report = DisclosureReport() if ctx.policy_enforced else None
+        if ctx.policy_enforced and report is not None:
+            disclosed_rows: list[dict[str, Any]] = []
+            for r in rows:
+                d = ctx.apply_disclosure_to_row(r, report=report, operation="read")
+                if d is not None:
+                    disclosed_rows.append(d)
+            rows = disclosed_rows
         candidates = [
             {
                 "memory_id": r["id"],
@@ -1324,11 +1800,15 @@ class HotMemRuntime:
             }
             for r in rows
         ]
-        return {
+        out: dict[str, Any] = {
             "candidates": candidates,
             "count": len(candidates),
             "trace_ms": round(t.ms, 2),
         }
+        if report is not None:
+            out["disclosure"] = report.to_dict()
+            out["policy_revision"] = self.policy.revision
+        return out
 
     def promotion_states(self, ctx: CallerContext) -> dict[str, Any]:
         ctx.require_operation("read")
@@ -1344,6 +1824,14 @@ class HotMemRuntime:
         ctx.require_operation("read")
         with self._read_db() as db, Timer() as t:
             rows = ctx.filter_rows(list_by_state(db, state, namespace=namespace), operation="read")
+        report = DisclosureReport() if ctx.policy_enforced else None
+        if ctx.policy_enforced and report is not None:
+            disclosed_rows = []
+            for r in rows:
+                d = ctx.apply_disclosure_to_row(r, report=report, operation="read")
+                if d is not None:
+                    disclosed_rows.append(d)
+            rows = disclosed_rows
         summaries = [
             {
                 "memory_id": r["id"],
@@ -1357,15 +1845,22 @@ class HotMemRuntime:
             }
             for r in rows
         ]
-        return {
+        out: dict[str, Any] = {
             "memories": summaries,
             "count": len(summaries),
             "trace_ms": round(t.ms, 2),
         }
+        if report is not None:
+            out["disclosure"] = report.to_dict()
+            out["policy_revision"] = self.policy.revision
+        return out
 
     def vector_index_rebuild(self, ctx: CallerContext) -> tuple[int, dict[str, Any]]:
         self._require_db()
-        ctx.require_operation("write")
+        if ctx.policy_enforced:
+            ctx.require_operation("manage")
+        else:
+            ctx.require_operation("write")
         vector_index = self.vector_index
         if vector_index is None or isinstance(vector_index, NullVectorIndex):
             req_backend = (
@@ -1413,12 +1908,32 @@ class HotMemRuntime:
         ctx.require_operation("read")
         assert self.vector_index is not None
         with self._read_db() as db, Timer() as t:
-            status = self.vector_index.status(db)
+            status = dict(self.vector_index.status(db))
+            if ctx.policy_enforced and not (
+                ctx.credential is not None and ctx.credential.is_management
+            ):
+                visible = ctx.filter_rows(db.all_rows(include_embedding=False), operation="read")
+                disclosed_visible = []
+                for r in visible:
+                    try:
+                        if ctx.apply_disclosure_to_row(r, operation="read") is not None:
+                            disclosed_visible.append(r)
+                    except PolicyError:
+                        continue
+                status["db_count"] = len(disclosed_visible)
+                status["indexed_count"] = min(
+                    int(status.get("indexed_count") or 0), len(disclosed_visible)
+                )
+        if ctx.redact_host_paths_enabled:
+            status["path"] = None
         status["trace_ms"] = round(t.ms, 2)
         return status
 
     def vector_index_clear(self, ctx: CallerContext) -> dict[str, Any]:
-        ctx.require_operation("write")
+        if ctx.policy_enforced:
+            ctx.require_operation("manage")
+        else:
+            ctx.require_operation("write")
         assert self.vector_index is not None
         with self._write_slot() as db, Timer() as t:
             self.vector_index.clear()

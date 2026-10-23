@@ -124,6 +124,7 @@ def write_snapshot_v2(
     base_dir: str | Path | None = None,
     attach_threshold: int = ATTACH_THRESHOLD,
     row_filter: Any | None = None,
+    row_transform: Any | None = None,
     redact_host_paths: bool = False,
     export_scope: dict[str, Any] | None = None,
 ) -> SnapshotResult:
@@ -169,15 +170,21 @@ def write_snapshot_v2(
             for row in db.iter_rows(include_embedding=True):
                 if row_filter is not None and not row_filter(row):
                     continue
+                orig_source_uri = str(row.get("source_uri") or "")
+                if row_transform is not None:
+                    transformed = row_transform(row)
+                    if transformed is None:
+                        continue
+                    row = transformed
                 rec = _row_to_record(row)
                 memory_count += 1
 
                 if rec["memory_type"] == "file":
                     file_backed_count += 1
-                    if rec["source_uri"]:
+                    if rec["source_uri"] or orig_source_uri:
                         ref = FileReference(
                             memory_id=rec["id"],
-                            source_uri=rec["source_uri"],
+                            source_uri=rec["source_uri"] or "",
                             byte_offset=rec["byte_offset"] or 0,
                             byte_length=rec["byte_length"] or 0,
                             source_format=rec["source_format"],
@@ -189,11 +196,18 @@ def write_snapshot_v2(
                             and adapter is not None
                             and 0 < ref.byte_length < attach_threshold
                         ):
-                            att_name = _copy_attachment(adapter, ref, attachments_dir, base_dir)
+                            att_name = _copy_attachment(
+                                adapter,
+                                ref,
+                                attachments_dir,
+                                base_dir,
+                                source_uri_override=orig_source_uri or None,
+                            )
                             if att_name is not None:
                                 ref.attachment = att_name
                                 copied[att_name] = ref.memory_id
-                        file_references.append(ref)
+                        if ref.source_uri or ref.attachment:
+                            file_references.append(ref)
                 else:
                     inline_count += 1
 
@@ -296,6 +310,8 @@ def _copy_attachment(
     ref: FileReference,
     attachments_dir: Path,
     base_dir: str | Path | None = None,
+    *,
+    source_uri_override: str | None = None,
 ) -> str | None:
     """Copy a small byte range into attachments/; return the filename or None on error.
 
@@ -304,7 +320,7 @@ def _copy_attachment(
     snapshot continues (references, not duplicates — never fail over a copy).
     """
     # Resolve relative URIs against base_dir before passing to the adapter.
-    uri = ref.source_uri
+    uri = source_uri_override or ref.source_uri
     if base_dir is not None and "://" not in uri and not Path(uri).is_absolute():
         uri = str(Path(base_dir) / uri)
     try:

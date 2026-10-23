@@ -120,7 +120,12 @@ def _parse_json(value: str | None) -> Any:
 
 
 def _write_payload(
-    db: MemoryDB, sink, hasher, *, row_filter: Any | None = None
+    db: MemoryDB,
+    sink,
+    hasher,
+    *,
+    row_filter: Any | None = None,
+    row_transform: Any | None = None,
 ) -> tuple[int, list[str], set[tuple[str, int]]]:
     """Stream canonical records to ``sink``, hashing payload bytes.
 
@@ -139,6 +144,11 @@ def _write_payload(
     for row in db.iter_rows():
         if row_filter is not None and not row_filter(row):
             continue
+        if row_transform is not None:
+            transformed = row_transform(row)
+            if transformed is None:
+                continue
+            row = transformed
         data = canonical_line(row_to_record(row)).encode()
         hasher.update(data)
         sink.write(data)
@@ -177,6 +187,7 @@ def write_package(
     *,
     gz: bool = False,
     row_filter: Any | None = None,
+    row_transform: Any | None = None,
     export_scope: dict[str, Any] | None = None,
 ) -> PackageResult:
     """Write a hotmem-interchange-v1 package atomically (#69).
@@ -206,11 +217,11 @@ def write_package(
                     filename="", mode="wb", compresslevel=9, fileobj=raw_file, mtime=0
                 ) as gz_file:
                     record_count, content_hashes, spaces = _write_payload(
-                        db, gz_file, hasher, row_filter=row_filter
+                        db, gz_file, hasher, row_filter=row_filter, row_transform=row_transform
                     )
             else:
                 record_count, content_hashes, spaces = _write_payload(
-                    db, raw_file, hasher, row_filter=row_filter
+                    db, raw_file, hasher, row_filter=row_filter, row_transform=row_transform
                 )
             raw_file.flush()
             os.fsync(raw_file.fileno())

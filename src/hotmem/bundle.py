@@ -37,7 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -290,6 +290,7 @@ def read_bundle(
     *,
     base_dir: str | Path | None = None,
     embedder: Embedder | None = None,
+    target_namespace: str | None = None,
 ) -> BundleResult:
     """Read a loose local markdown bundle into HotMem.
 
@@ -301,6 +302,11 @@ def read_bundle(
     bundle_dir = Path(bundle_dir)
     with Timer() as t:
         records, warnings = parse_bundle(bundle_dir, base_dir=base_dir, embedder=embedder)
+        if target_namespace is not None:
+            records = [
+                r if getattr(r, "namespace", "") else replace(r, namespace=target_namespace)
+                for r in records
+            ]
         loaded = db.insert_many_ignore(records)
         skipped = len(records) - loaded
         embedded = sum(1 for r in records if r.embedding)

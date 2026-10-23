@@ -133,6 +133,7 @@ def hydrate_v2(
     snapshot_dir: str | Path,
     *,
     embedder: Embedder | None = None,
+    target_namespace: str | None = None,
 ) -> HydrateResult:
     """Verify the manifest and load all memories into the DB.
 
@@ -223,6 +224,8 @@ def hydrate_v2(
                     continue
                 try:
                     rec = normalize_record(record, default_source="snapshot")
+                    if target_namespace is not None and not rec.get("namespace"):
+                        rec["namespace"] = target_namespace
                 except AnnotationValidationError as err:
                     counters["invalid"] += 1  # malformed envelope: skip record (#79)
                     _trace.debug(

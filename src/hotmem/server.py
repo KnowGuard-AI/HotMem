@@ -456,7 +456,9 @@ def create_app(
                         "reason": err.reason,
                         "expected": err.expected,
                         "actual": err.actual,
-                        "source_uri": err.source_uri,
+                        "source_uri": ctx.sanitize_source_uri(
+                            err.source_uri, base_dir=owned_runtime.base_dir
+                        ),
                         "message": str(err),
                     },
                 )
@@ -483,7 +485,9 @@ def create_app(
                     "reason": err.reason,
                     "expected": err.expected,
                     "actual": err.actual,
-                    "source_uri": err.source_uri,
+                    "source_uri": ctx.sanitize_source_uri(
+                        err.source_uri, base_dir=owned_runtime.base_dir
+                    ),
                     "message": str(err),
                 },
             )

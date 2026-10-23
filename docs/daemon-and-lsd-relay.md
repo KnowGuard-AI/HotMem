@@ -145,6 +145,10 @@ Closing or restarting the MCP host closes only the `stdio` relay; the daemon and
   read-only WAL connections; the shared write connection is never read
   concurrently mid-transaction. Slow writes and exports do not block
   `/v1/health` or basic reads.
+- **Scoped diagnostics are O(rows) under redaction.** `/v1/health` and
+  `/v1/vector-index/status` scan visible rows and run disclosure patterns to
+  produce scoped counts; this is linear in store size and should be monitored
+  on large stores.
 - **Scoped diagnostics.** `/v1/hygiene`, `/v1/events`, `/v1/health`, and
   snapshots report only the caller's permitted rows; health exposes
   `store_state` as `verified_empty`, `ready`, or `empty_scope`, and omits
@@ -162,12 +166,75 @@ Closing or restarting the MCP host closes only the `stdio` relay; the daemon and
   `hotmem policy revoke --url ... --caller caller-b` or `--approval <id>`, and
   `hotmem policy reload --url ...` to re-read the policy file.
 - **Exports are self-describing.** Scoped snapshot/package exports record their
-  `scope`, `exported_count`, and `omitted_count` in the manifest/metadata and
-  redact host/database paths. Snapshot v2 records declare record schema 2;
-  interchange v1 records keep `schema_version: 1` and carry the stored row
-  version separately as `record_schema_version`.
+  `scope`, `exported_count`, `omitted_count`, `redacted_count`, and
+  `disclosure` summary in the manifest/metadata and redact host/database paths.
+  Snapshot v2 records declare record schema 2; interchange v1 records keep
+  `schema_version: 1` and carry the stored row version separately as
+  `record_schema_version`.
 
-### Store schema migration (v5 -> v6)
+### Scoped Disclosure & Privacy Policy Contract (#110)
+
+When a policy (`--policy` or `<mount>/policy.json`) is active, `HotMemRuntime`
+enforces both **pre-ranking namespace/share scope** and **outbound disclosure
+rules** across retrieval (`search`, `list`, `get_memory`, `hydrate`,
+`hydrate-batch`, `files`, `promotion/candidates`, `promotion/by-state`,
+`events`, `hygiene`, `health`, `vector-index/status`) and exports (`snapshot`):
+
+| Policy Field | Values | Default | Behavior |
+| --- | --- | --- | --- |
+| `secret_action` | `"allow"` \| `"redact"` \| `"omit"` \| `"fail_closed"` | `"redact"` on shared (`ShareApproval`) access; `"allow"` on direct self-owned namespaces unless explicitly set. Top-level `default_secret_action` applies to shared access. | Controls how secret-shaped (`api_key`, `bearer_token`, `private_key`, `prefixed_credential`, `dsn_inline_password`) and PII (`pii_ssn`, `pii_email`) patterns are handled in text, summaries, hydrated file bytes, and metadata. |
+| `private_classification_action` | `"allow"` \| `"omit"` \| `"fail_closed"` | `"omit"` on shared (`ShareApproval`) access; `"allow"` on direct self-owned namespaces unless explicitly set. Top-level `default_private_classification_action` applies to shared access. | Controls how records tagged with `metadata.classification` / `visibility` in `{"private", "secret", "confidential", "restricted"}` (or `metadata.private: true`) are handled. |
+| `redact_host_paths` | `true` \| `false` | `true` | Strips absolute host directory prefixes from `source_uri` in API responses, hygiene warnings, events, and exports, and omits `db_path`/`host` from health, vector status, and Snapshot v2 `metadata.json`. |
+| `allow_attachments` | `true` \| `false` | `false` (`true` for `is_management`) | Gates `copy_attachments=true` on `/v1/snapshot` (403 `attachments_not_permitted` when disabled). |
+
+- **Pre-ranking candidate selection:** Scope (`ctx.can_access_row`) and
+  disclosure transforms (`omit` / `redact` / `fail_closed`) run **before** FTS
+  BM25 min/max normalization, hybrid score sorting, second-stage MMR reranking,
+  and `top_k` / `max_chars` truncation. When the optional derived `VectorIndex`
+  is active and out-of-scope private vectors crowd the ANN oversample window,
+  search automatically falls back to the exact scoped SQLite scan so authorized
+  callers are never starved.
+- **Inbound bulk-import confinement:** `POST /v1/hydrate` and
+  `POST /v1/handoff/hydrate` validate every record's target namespace against
+  `ctx.can_access_namespace(..., operation="write")` before committing any
+  rows. Snapshot v2 and interchange packages are integrity-verified first;
+  legacy JSONL and markdown bundles are structurally validated only (they
+  carry no checksummed envelope). Unscoped records bind to the caller's
+  namespace (pinned header, or the single granted namespace); explicit foreign
+  namespaces still fail closed with `403 scope_denied`.
+- **Distinct security guarantees (Scoped Snapshot vs. Consented Handoff):**
+
+| Guarantee Dimension | Scoped Snapshot (`POST /v1/snapshot`) | Consented Handoff (`POST /v1/handoff/prepare`) |
+| --- | --- | --- |
+| **Primary Purpose** | Portable cassette backup/clone of authorized SQLite rows (`.jsonl`, Snapshot v2, `hotmem-interchange-v1`) | Bounded session transfer (`hotmem-handoff-v1`) with `resume-brief.json` and inert history |
+| **API Authorization** | Requires `export` + `read` on permitted namespaces / `ShareApproval` | Requires `export` operation and path confined to `base_dir` |
+| **Explicit User Consent** | Not required (governed by caller credential & share policy) | **Mandatory** non-empty `consent` verified before reading source lines |
+| **Secret / PII Redaction** | Configurable per credential/share (`allow`, `redact`, `omit`, `fail_closed`) including PII patterns; recomputes `content_hash` and embeddings when redacted | Always-on credential redaction (`redact.py`: assignments, bearer tokens, private keys, prefixed keys, inline DSN passwords) + fail-closed `assert_no_secrets` output gate; PII/classification rules are policy-surface only |
+| **Tool Execution Safety** | Stores declarative facts and file pointers only | Forces `executable=false` on all historical tool calls |
+| **Artifact Integrity** | SHA-256 per-file & overall digests (`hotmem verify`) | SHA-256 per-file, `package_id`, and `handoff_id` (`hotmem handoff verify`) |
+| **Encryption & Signing** | Not provided (plaintext JSONL/JSON; use OS/volume or external age/GPG encryption) | Not provided (plaintext JSONL/JSON; checksums prove integrity, not cryptographic authorship) |
+
+#- **Handoff ledger is store-global.** A `package_id` applies once per store.
+  A second caller hydrating it in another namespace receives
+  `already_applied: true`, `loaded: 0`, `brief_accessible: false`, and no
+  brief identifier for the foreign namespace.
+- **Non-text hydration fails closed.** Raw hydration of a file-backed payload
+  that is not valid UTF-8 returns `403 policy_disclosure_blocked`
+  (`reason: non_text_payload`) when `secret_action` is not `allow`; bytes are
+  never decoded and re-encoded destructively.
+- **PII patterns are opinionated.** `pii_email` matches ordinary addresses
+  (support aliases, bot accounts) and `pii_ssn` matches 3-2-4 digit strings, so
+  shared rows can be redacted or fail closed on benign data. Set
+  `secret_action: "allow"` for a share when those patterns are unacceptable.
+- **Artifact validation is point-in-time.** `hydrate` scans namespaces before
+  the loader re-reads the artifact; a caller with write access to `base_dir`
+  could race a replacement between the two reads. Treat the daemon base
+  directory as trusted operator-controlled storage.
+- **Event payloads obey the same disclosure action.** `metadata_json`,
+  `provenance_json`, `tags`, `identifier`, and `fact_summary` are redacted,
+  omitted, or fail closed before an event is returned.
+
+## Store schema migration (v5 -> v6)
 
 The persistent SQLite schema moved from `user_version = 5` to `6`. The
 migration runs automatically on the next open and is **fail-closed**:
@@ -213,8 +280,8 @@ Every route on the daemon is registered in `DAEMON_ROUTE_INVENTORY` (`src/hotmem
 | `GET` | `/v1/handoff/inspect` | `read` | Inspect handoff package metadata & coverage |
 | `POST` | `/v1/handoff/hydrate` | `hydrate` | Hydrate verified handoff package into store |
 | `GET` | `/v1/files` | `read` | List file-backed references visible to caller |
-| `GET` | `/v1/bundles` | `read` | List indexed bundles |
-| `POST` | `/v1/discover` | `write` | Scan directory root for bundles |
+| `GET` | `/v1/bundles` | `manage` | List indexed bundles |
+| `POST` | `/v1/discover` | `manage` | Scan directory root for bundles |
 | `GET` | `/v1/hygiene` | `read` | Run store hygiene check |
 | `GET` | `/v1/events` | `read` | Scoped activity stream with `store_id`, `runtime_generation`, `policy_revision` (strips raw `fact_text` & `embedding_b64`) |
 | `POST` | `/v1/memory/{memory_id}/promote` | `promote` | Lifecycle state transition (`HOT` -> `READY` -> `PROMOTED` -> `ARCHIVED`) |
@@ -222,9 +289,9 @@ Every route on the daemon is registered in `DAEMON_ROUTE_INVENTORY` (`src/hotmem
 | `GET` | `/v1/promotion/candidates` | `read` | List promotion candidates in caller scope |
 | `GET` | `/v1/promotion/states` | `read` | Return promotion state machine model |
 | `GET` | `/v1/promotion/by-state` | `read` | List memories by promotion state in caller scope |
-| `POST` | `/v1/vector-index/rebuild` | `write` | Rebuild derived vector index |
+| `POST` | `/v1/vector-index/rebuild` | `manage` | Rebuild derived vector index |
 | `GET` | `/v1/vector-index/status` | `read` | Derived vector index status |
-| `DELETE` | `/v1/vector-index` | `write` | Clear derived vector index |
+| `DELETE` | `/v1/vector-index` | `manage` | Clear derived vector index |
 | `POST` | `/v1/policy/revoke` | `manage` | Immediately revoke a caller credential and/or share approval |
 | `POST` | `/v1/policy/reload` | `manage` | Reload the daemon policy file without restart |
 

@@ -268,3 +268,16 @@ def test_fixture_coverage_shape_end_to_end():
     assert coverage["redacted_count"] == 1
     assert coverage["recoverable_count"] == 6  # hidden prompt is the only non-recoverable
     assert SECRET_VALUE not in json.dumps(coverage)
+
+
+def test_modern_openai_key_and_dsn_password_are_redacted():
+    """sk-proj-* and inline DSN passwords are credential shapes, not prose."""
+    key = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+    dsn = "postgres://admin:SuperSecret99@db.internal:5432/ops"
+    redacted, hits = DEFAULT_ENGINE.redact_text(f"use {key} with {dsn} now")
+    assert key not in redacted
+    assert "SuperSecret99" not in redacted
+    assert "[REDACTED:prefixed_credential]" in redacted
+    assert "[REDACTED:dsn_inline_password]" in redacted
+    kinds = {h["kind"] for h in hits}
+    assert {"prefixed_credential", "dsn_inline_password"} <= kinds

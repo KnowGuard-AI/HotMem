@@ -609,6 +609,25 @@ class MemoryDB:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_memories(self, memory_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Return metadata rows for ``memory_ids`` keyed by id (one query per chunk)."""
+        wanted = [str(i) for i in dict.fromkeys(memory_ids) if i]
+        if not wanted:
+            return {}
+        cols = ", ".join(_MEMORY_COLUMNS)
+        found: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(wanted), 900):
+            chunk = wanted[start : start + 900]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT {cols} FROM memories WHERE id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                entry = dict(row)
+                found[str(entry["id"])] = entry
+        return found
+
     # ── Promotion lifecycle (#42) ───────────────────────────────────────
 
     def update_promotion_state(
@@ -1024,7 +1043,7 @@ class MemoryDB:
         rows = self._conn.execute(
             f"""SELECT id, identifier, fact_text, fact_summary, importance,
                        metadata_json, source, created_at, namespace, provenance_json,
-                       {cosine_expr} AS cosine_score
+                       tags, {cosine_expr} AS cosine_score
                 FROM memories
                 WHERE {_ttl_live()}{archived_clause}
                 ORDER BY cosine_score DESC, id ASC""",
@@ -1047,7 +1066,7 @@ class MemoryDB:
         rows = self._conn.execute(
             f"""SELECT m.id, m.identifier, m.fact_text, m.importance, m.metadata_json,
                        m.source, m.created_at, m.namespace, m.provenance_json,
-                       bm25(memories_fts) AS bm25_score
+                       m.tags, bm25(memories_fts) AS bm25_score
                 FROM memories_fts
                 JOIN memories AS m ON m.rowid = memories_fts.rowid
                 WHERE memories_fts MATCH ?
@@ -1262,7 +1281,7 @@ class MemoryDB:
             rows = self._conn.execute(
                 f"""SELECT id, identifier, fact_text, fact_summary, importance,
                            metadata_json, source, created_at, namespace, provenance_json,
-                           {cosine_expr} AS cosine_score
+                           tags, {cosine_expr} AS cosine_score
                     FROM memories
                     WHERE id IN ({placeholders})
                       AND {_ttl_live()}{archived_clause}""",
@@ -1431,13 +1450,14 @@ class MemoryDB:
         order: str = "asc",
         limit: int = 100,
         row_filter: Any | None = None,
+        row_transform: Any | None = None,
     ) -> list[dict[str, Any]]:
         """Return memories for an identifier in created_at order (chronological).
 
         Excludes TTL-expired memories, consistent with search.
         """
         direction = "ASC" if order.lower() == "asc" else "DESC"
-        if row_filter is None:
+        if row_filter is None and row_transform is None:
             rows = self._conn.execute(
                 f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
                            created_at
@@ -1452,7 +1472,7 @@ class MemoryDB:
 
         rows = self._conn.execute(
             f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
-                       created_at, namespace
+                       created_at, namespace, tags
                 FROM memories
                 WHERE identifier = ?
                   AND {_ttl_live()}
@@ -1462,11 +1482,17 @@ class MemoryDB:
         filtered: list[dict[str, Any]] = []
         for r in rows:
             d = dict(r)
-            if row_filter(d):
-                d.pop("namespace", None)
-                filtered.append(d)
-                if len(filtered) >= limit:
-                    break
+            if row_filter is not None and not row_filter(d):
+                continue
+            if row_transform is not None:
+                transformed = row_transform(d)
+                if transformed is None:
+                    continue
+                d = transformed
+            d.pop("namespace", None)
+            filtered.append(d)
+            if len(filtered) >= limit:
+                break
         return filtered
 
     def import_sqlite(self, src_path: str | Path) -> tuple[int, int]:
