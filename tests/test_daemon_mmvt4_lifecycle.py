@@ -246,9 +246,7 @@ def test_mmvt4_lifecycle_reconnect_abrupt_stop_idempotent_retry_and_ownership(
         assert h["status"] == "ok"
         # 2 records in ops/shared + 1 record in ops/private = 3 total for caller-a
         assert h["memory_count"] == 2
-        with HotMemClient(
-            url2, token="tok-a", expected_store_id="store-mmvt4"
-        ) as client_a_all:
+        with HotMemClient(url2, token="tok-a", expected_store_id="store-mmvt4") as client_a_all:
             assert client_a_all.health()["memory_count"] == 3
 
         # Retry the exact write with the same idempotency_key
@@ -275,10 +273,7 @@ def test_mmvt4_lifecycle_reconnect_abrupt_stop_idempotent_retry_and_ownership(
                 idempotency_key="op-demo-17-v1",
             )
         assert conflict_err.value.response.status_code == 409
-        assert (
-            conflict_err.value.response.json()["error"]
-            == "idempotency_key_conflict"
-        )
+        assert conflict_err.value.response.json()["error"] == "idempotency_key_conflict"
 
     # After graceful shutdown, the lock file is cleaned up and mount can be removed cleanly
     shutil.rmtree(mount)
@@ -340,6 +335,7 @@ def test_mmvt4_existing_db_content_hash_index_migrates_to_namespace_scoped(
     finally:
         db.close()
 
+
 def test_mmvt4_graceful_restart_preserves_acknowledged_writes(tmp_path: Path):
     """Graceful stop/restart keeps acknowledged writes and recovers ownership cleanly."""
     mount = tmp_path / "graceful_mount"
@@ -360,26 +356,32 @@ def test_mmvt4_graceful_restart_preserves_acknowledged_writes(tmp_path: Path):
     )
     policy.save(mount / "policy.json")
 
-    with _daemon_process(mount) as (url1, _proc1), HotMemClient(
-        url1,
-        token="tok-a",
-        session_id="sess-graceful",
-        namespace="ops/shared",
-        expected_store_id="store-mmvt4",
-    ) as client:
-        memory_id = client.add(
-            "ops/graceful", "acknowledged before a graceful restart"
-        )["memory_id"]
+    with (
+        _daemon_process(mount) as (url1, _proc1),
+        HotMemClient(
+            url1,
+            token="tok-a",
+            session_id="sess-graceful",
+            namespace="ops/shared",
+            expected_store_id="store-mmvt4",
+        ) as client,
+    ):
+        memory_id = client.add("ops/graceful", "acknowledged before a graceful restart")[
+            "memory_id"
+        ]
         assert client.health()["memory_count"] == 1
         # Leaving the context terminates the daemon gracefully (SIGTERM).
 
-    with _daemon_process(mount) as (url2, _proc2), HotMemClient(
-        url2,
-        token="tok-a",
-        session_id="sess-graceful",
-        namespace="ops/shared",
-        expected_store_id="store-mmvt4",
-    ) as client:
+    with (
+        _daemon_process(mount) as (url2, _proc2),
+        HotMemClient(
+            url2,
+            token="tok-a",
+            session_id="sess-graceful",
+            namespace="ops/shared",
+            expected_store_id="store-mmvt4",
+        ) as client,
+    ):
         health = client.health()
         assert health["status"] == "ok"
         assert health["memory_count"] == 1

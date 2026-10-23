@@ -83,9 +83,7 @@ class ShareApproval:
             return False
         if self.memory_ids and str(row.get("id") or "") not in self.memory_ids:
             return False
-        return not (
-            self.identifiers and str(row.get("identifier") or "") not in self.identifiers
-        )
+        return not (self.identifiers and str(row.get("identifier") or "") not in self.identifiers)
 
     def allows_namespace(self, namespace: str, caller_id: str, operation: str = "read") -> bool:
         if self.revoked:
@@ -216,9 +214,7 @@ class SessionEnvelope:
     store_id: str
     envelope_version: str = SESSION_ENVELOPE_VERSION
 
-    def to_provenance_dict(
-        self, existing: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
+    def to_provenance_dict(self, existing: dict[str, Any] | None = None) -> dict[str, Any]:
         merged = dict(existing) if isinstance(existing, dict) else {}
         merged.update(
             {
@@ -286,8 +282,7 @@ class CallerContext:
         if operation not in self.credential.operations:
             # Also check if any share approval grants this operation
             has_share_op = any(
-                not s.revoked and operation in s.operations
-                for s in self.credential.share_approvals
+                not s.revoked and operation in s.operations for s in self.credential.share_approvals
             )
             if not has_share_op:
                 raise PolicyError(
@@ -327,8 +322,7 @@ class CallerContext:
         ):
             return True
         return any(
-            s.allows_row(row, self.caller_id, operation)
-            for s in self.credential.share_approvals
+            s.allows_row(row, self.caller_id, operation) for s in self.credential.share_approvals
         )
 
     def filter_rows(
@@ -336,9 +330,7 @@ class CallerContext:
     ) -> list[dict[str, Any]]:
         if not self.policy_enforced or self.credential is None:
             if self.namespace is not None:
-                return [
-                    r for r in rows if str(r.get("namespace") or "") == self.namespace
-                ]
+                return [r for r in rows if str(r.get("namespace") or "") == self.namespace]
             return list(rows)
         return [r for r in rows if self.can_access_row(r, operation=operation)]
 
@@ -626,9 +618,7 @@ class PolicyConfig:
             store_id=str(data.get("store_id", "")),
             require_auth=bool(data.get("require_auth", False)),
             revision=int(data.get("revision", 1)),
-            credentials=[
-                CallerCredential.from_dict(c) for c in data.get("credentials", ())
-            ],
+            credentials=[CallerCredential.from_dict(c) for c in data.get("credentials", ())],
         )
 
     def save(self, path: str | Path) -> None:

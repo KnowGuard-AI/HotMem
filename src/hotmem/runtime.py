@@ -150,9 +150,7 @@ class HotMemRuntime:
                 f"{self.policy.store_id!r}; refusing to start with two store identities"
             )
         self._requested_store_id: str | None = store_id or self.policy.store_id or None
-        self.store_id: str = derive_store_id(
-            self.db_path, self._requested_store_id
-        )
+        self.store_id: str = derive_store_id(self.db_path, self._requested_store_id)
         if not self.policy.store_id:
             self.policy.store_id = self.store_id
         self.runtime_generation: str = uuid.uuid4().hex[:12]
@@ -187,10 +185,7 @@ class HotMemRuntime:
             # change the id clients are pinned to.
             stored_store_id = self.db.get_meta("store_id")
             if stored_store_id:
-                if (
-                    self._requested_store_id
-                    and self._requested_store_id != stored_store_id
-                ):
+                if self._requested_store_id and self._requested_store_id != stored_store_id:
                     raise StoreIdentityError(
                         f"configured store id {self._requested_store_id!r} does not "
                         f"match the store's persistent identity {stored_store_id!r}"
@@ -309,8 +304,7 @@ class HotMemRuntime:
             artifacts = sorted(
                 p
                 for p in path.iterdir()
-                if p.is_file()
-                and (p.name == "memories.jsonl" or p.name == "memories.jsonl.gz")
+                if p.is_file() and (p.name == "memories.jsonl" or p.name == "memories.jsonl.gz")
             )
         else:
             return
@@ -465,9 +459,7 @@ class HotMemRuntime:
                     "embedding": {"model": descriptor.key, "dim": descriptor.dimension},
                 }
 
-            visible_rows = ctx.filter_rows(
-                db.all_rows(include_embedding=False), operation="read"
-            )
+            visible_rows = ctx.filter_rows(db.all_rows(include_embedding=False), operation="read")
             visible_count = len(visible_rows)
         if total_count == 0:
             store_state = "verified_empty"
@@ -486,9 +478,7 @@ class HotMemRuntime:
             "store_id": self.store_id,
             "store_state": store_state,
             "total_memory_count": (
-                total_count
-                if ctx.credential is not None and ctx.credential.is_management
-                else 0
+                total_count if ctx.credential is not None and ctx.credential.is_management else 0
             ),
             "runtime_generation": self.runtime_generation,
         }
@@ -802,9 +792,7 @@ class HotMemRuntime:
         d["trace_ms"] = round(t.ms, 2)
         return d
 
-    def hydrate_one_raw(
-        self, ctx: CallerContext, memory_id: str
-    ) -> tuple[bytes, dict[str, str]]:
+    def hydrate_one_raw(self, ctx: CallerContext, memory_id: str) -> tuple[bytes, dict[str, str]]:
         ctx.require_operation("read")
         with self._read_db() as db:
             record = get_memory_metadata(db, memory_id)
@@ -864,9 +852,7 @@ class HotMemRuntime:
                     )
         return {"results": results, "count": len(results), "trace_ms": round(t.ms, 2)}
 
-    def hydrate_snapshot(
-        self, ctx: CallerContext, *, target: str | None = None
-    ) -> dict[str, Any]:
+    def hydrate_snapshot(self, ctx: CallerContext, *, target: str | None = None) -> dict[str, Any]:
         ctx.require_operation("hydrate")
         resolved_target = str(
             self._confine_path(ctx, target or self.swap_path or "swap.jsonl", kind="hydrate target")
@@ -916,8 +902,10 @@ class HotMemRuntime:
         )
         row_filter = (
             (
-                lambda row: ctx.can_access_row(row, operation="export")
-                and ctx.can_access_row(row, operation="read")
+                lambda row: (
+                    ctx.can_access_row(row, operation="export")
+                    and ctx.can_access_row(row, operation="read")
+                )
             )
             if (ctx.policy_enforced or ctx.namespace is not None)
             else None
@@ -1000,9 +988,7 @@ class HotMemRuntime:
 
     def handoff_verify(self, ctx: CallerContext, *, package: str) -> dict[str, Any]:
         ctx.require_operation("read")
-        verified = verify_handoff(
-            str(self._confine_path(ctx, package, kind="handoff package"))
-        )
+        verified = verify_handoff(str(self._confine_path(ctx, package, kind="handoff package")))
         return {
             "valid": True,
             "package_id": verified.manifest["package_id"],
@@ -1013,15 +999,11 @@ class HotMemRuntime:
 
     def handoff_inspect(self, ctx: CallerContext, *, package: str) -> dict[str, Any]:
         ctx.require_operation("read")
-        return inspect_handoff(
-            str(self._confine_path(ctx, package, kind="handoff package"))
-        )
+        return inspect_handoff(str(self._confine_path(ctx, package, kind="handoff package")))
 
     def handoff_hydrate(self, ctx: CallerContext, *, package: str) -> dict[str, Any]:
         ctx.require_operation("hydrate")
-        resolved_package = str(
-            self._confine_path(ctx, package, kind="handoff package")
-        )
+        resolved_package = str(self._confine_path(ctx, package, kind="handoff package"))
         if ctx.policy_enforced:
             # Integrity before scope checks (and before any write).
             verify_handoff(resolved_package)
@@ -1039,9 +1021,7 @@ class HotMemRuntime:
             **result.disposition(),
         }
 
-    def list_files(
-        self, ctx: CallerContext, *, identifier: str | None = None
-    ) -> dict[str, Any]:
+    def list_files(self, ctx: CallerContext, *, identifier: str | None = None) -> dict[str, Any]:
         ctx.require_operation("read")
         with self._read_db() as db, Timer() as t:
             rows = ctx.filter_rows(db.list_file_backed(), operation="read")
@@ -1088,9 +1068,7 @@ class HotMemRuntime:
             rows = db.list_bundle_index()
         return {"bundles": rows, "count": len(rows), "trace_ms": round(t.ms, 2)}
 
-    def discover(
-        self, ctx: CallerContext, *, root: str, max_depth: int = 10
-    ) -> dict[str, Any]:
+    def discover(self, ctx: CallerContext, *, root: str, max_depth: int = 10) -> dict[str, Any]:
         if ctx.policy_enforced:
             ctx.require_operation("manage")
         self._confine_path(ctx, root, kind="discover root")
@@ -1121,9 +1099,7 @@ class HotMemRuntime:
             else None
         )
         with self._read_db() as db:
-            report = check_hygiene(
-                db, base_dir=self.base_dir, row_filter=row_filter
-            )
+            report = check_hygiene(db, base_dir=self.base_dir, row_filter=row_filter)
         counts = {
             "warning_count": len(report.warnings),
             "error_count": sum(1 for w in report.warnings if w.severity == "error"),
@@ -1176,9 +1152,7 @@ class HotMemRuntime:
         order: str = "asc",
     ) -> dict[str, Any]:
         ctx.require_operation("read")
-        if namespace is not None and not ctx.can_access_namespace(
-            namespace, operation="read"
-        ):
+        if namespace is not None and not ctx.can_access_namespace(namespace, operation="read"):
             raise PolicyError(
                 403,
                 "scope_denied",
@@ -1369,9 +1343,7 @@ class HotMemRuntime:
     ) -> dict[str, Any]:
         ctx.require_operation("read")
         with self._read_db() as db, Timer() as t:
-            rows = ctx.filter_rows(
-                list_by_state(db, state, namespace=namespace), operation="read"
-            )
+            rows = ctx.filter_rows(list_by_state(db, state, namespace=namespace), operation="read")
         summaries = [
             {
                 "memory_id": r["id"],

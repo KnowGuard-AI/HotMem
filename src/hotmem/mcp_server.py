@@ -366,8 +366,7 @@ def _build_tool_list() -> list[Tool]:
         Tool(
             name="handoff_hydrate",
             description=(
-                "Hydrate a verified handoff package into this HotMem instance "
-                "(atomic, idempotent)."
+                "Hydrate a verified handoff package into this HotMem instance (atomic, idempotent)."
             ),
             inputSchema=_TOOL_SCHEMAS["handoff_hydrate"],
         ),

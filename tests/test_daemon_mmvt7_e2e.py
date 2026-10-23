@@ -147,9 +147,7 @@ def test_mmvt7_fresh_setup_management_seam_and_diagnostics(tmp_path: Path):
 
     with _daemon(mount) as url:
         # 1. Verified empty store is explicitly reported before any writes
-        with HotMemClient(
-            url, token="tok-a", expected_store_id="store-mmvt7"
-        ) as client_a_init:
+        with HotMemClient(url, token="tok-a", expected_store_id="store-mmvt7") as client_a_init:
             h0 = client_a_init.health()
             assert h0["status"] == "ok"
             assert h0["memory_count"] == 0
@@ -304,9 +302,9 @@ def test_mmvt7_dynamic_revocation_unavailable_store_and_route_audit(tmp_path: Pa
 
         assert client.get(f"/v1/memory/{mid}", headers=hdr_b).status_code == 404
         assert (
-            client.post(
-                "/v1/search", headers=hdr_b, json={"query": "DEMO-17", "top_k": 5}
-            ).json()["count"]
+            client.post("/v1/search", headers=hdr_b, json={"query": "DEMO-17", "top_k": 5}).json()[
+                "count"
+            ]
             == 0
         )
         ev_after = client.get("/v1/events", headers=hdr_b).json()

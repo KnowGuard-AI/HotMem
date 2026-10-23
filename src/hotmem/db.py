@@ -759,9 +759,7 @@ class MemoryDB:
 
     def get_meta(self, key: str) -> str | None:
         """Return a store-level metadata value (e.g. persistent store_id)."""
-        row = self._conn.execute(
-            "SELECT value FROM store_meta WHERE key = ?", (key,)
-        ).fetchone()
+        row = self._conn.execute("SELECT value FROM store_meta WHERE key = ?", (key,)).fetchone()
         return str(row["value"]) if row is not None else None
 
     def set_meta(self, key: str, value: str) -> None:
@@ -789,9 +787,7 @@ class MemoryDB:
         ).fetchone()
         return dict(row) if row is not None else None
 
-    def batch_existing_namespace_hashes(
-        self, pairs: list[tuple[str, str]]
-    ) -> set[tuple[str, str]]:
+    def batch_existing_namespace_hashes(self, pairs: list[tuple[str, str]]) -> set[tuple[str, str]]:
         """Return the subset of `(namespace, content_hash)` pairs already in `memories`."""
         existing: set[tuple[str, str]] = set()
         if not pairs:

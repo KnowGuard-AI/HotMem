@@ -126,9 +126,7 @@ def _running_daemon(mount: Path):
         )
         url = f"http://127.0.0.1:{port}"
         try:
-            with HotMemClient(
-                url, token="tok-a", expected_store_id="store-mmvt3"
-            ) as probe:
+            with HotMemClient(url, token="tok-a", expected_store_id="store-mmvt3") as probe:
                 deadline = time.monotonic() + 15.0
                 while True:
                     if proc.poll() is not None or time.monotonic() > deadline:
@@ -210,9 +208,7 @@ def test_mmvt3_cross_adapter_routing_and_stdio_relay_disconnect(
         with err_log_path.open("w", encoding="utf-8") as errlog:
             async with (
                 stdio_client(params, errlog=errlog) as (read, write),
-                ClientSession(
-                    read, write, read_timeout_seconds=timedelta(seconds=10)
-                ) as session,
+                ClientSession(read, write, read_timeout_seconds=timedelta(seconds=10)) as session,
             ):
                 await session.initialize()
                 yield session
@@ -303,18 +299,14 @@ def test_mmvt3_cross_adapter_routing_and_stdio_relay_disconnect(
                 session_id="sess-b-mcp",
                 source="mcp://cursor-b",
             ) as session_b:
-                h_b = json.loads(
-                    (await session_b.call_tool("memory_health", {})).content[0].text
-                )
+                h_b = json.loads((await session_b.call_tool("memory_health", {})).content[0].text)
                 assert h_b["memory_count"] == 1
                 assert h_b["store_id"] == "store-mmvt3"
 
                 s_b = json.loads(
-                    (
-                        await session_b.call_tool(
-                            "search_memories", {"query": "CANARY-MMVT3-8821"}
-                        )
-                    ).content[0].text
+                    (await session_b.call_tool("search_memories", {"query": "CANARY-MMVT3-8821"}))
+                    .content[0]
+                    .text
                 )
                 for m in s_b["memories"]:
                     assert canary_fact not in m["content"]
@@ -354,8 +346,6 @@ def test_mmvt3_cross_adapter_routing_and_stdio_relay_disconnect(
             assert sdk_a.get_memory(canary_mid)["fact_text"] == canary_fact
 
         # 6. CLI status with wrong token or unreachable port fails visibly
-        bad_status = runner.invoke(
-            main, ["status", "--url", url, "--token", "invalid-token"]
-        )
+        bad_status = runner.invoke(main, ["status", "--url", url, "--token", "invalid-token"])
         assert bad_status.exit_code != 0
         assert "invalid_credential" in bad_status.output

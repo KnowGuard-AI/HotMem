@@ -70,9 +70,7 @@ def test_mmvt5_scoped_daemon_export_verify_restore_and_record_v2_fidelity(
     src_app = create_app(db_path=src_db, policy=_make_policy("store-src"))
 
     canary_secret = "CANARY-PORTABILITY-7712: private root key rotation schedule"
-    shared_decision = (
-        "Incident DEMO-17: roll back worker release v2.4.1 before queue resume."
-    )
+    shared_decision = "Incident DEMO-17: roll back worker release v2.4.1 before queue resume."
 
     hdr_a_shared = {
         "Authorization": "Bearer tok-a",
@@ -272,9 +270,7 @@ def test_mmvt5_corrupt_artifact_fails_before_mutating_daemon_store(tmp_path: Pat
         )
 
         before_count = client.get("/v1/health", headers=hdr_a).json()["memory_count"]
-        resp = client.post(
-            "/v1/hydrate", headers=hdr_a, json={"path": str(tampered_v2)}
-        )
+        resp = client.post("/v1/hydrate", headers=hdr_a, json={"path": str(tampered_v2)})
         assert resp.status_code == 409
         assert resp.json()["error"] == "snapshot_checksum_mismatch"
         after_count = client.get("/v1/health", headers=hdr_a).json()["memory_count"]
@@ -295,8 +291,6 @@ def test_mmvt5_corrupt_artifact_fails_before_mutating_daemon_store(tmp_path: Pat
             + "\n",
             encoding="utf-8",
         )
-        leg_resp = client.post(
-            "/v1/hydrate", headers=hdr_a, json={"path": str(legacy_jsonl)}
-        )
+        leg_resp = client.post("/v1/hydrate", headers=hdr_a, json={"path": str(legacy_jsonl)})
         assert leg_resp.status_code == 200
         assert leg_resp.json()["loaded"] == 1

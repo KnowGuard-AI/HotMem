@@ -102,9 +102,7 @@ def test_mmvt1_incident_isolation_and_attribution_in_process(
     app = create_app(db_path=db_path, policy=incident_policy)
 
     canary_secret = "CANARY-SECRET-9941: root token leaked in staging worker env"
-    shared_decision = (
-        "Incident DEMO-17: roll back worker release v2.4.1 before resuming the queue."
-    )
+    shared_decision = "Incident DEMO-17: roll back worker release v2.4.1 before resuming the queue."
 
     with TestClient(app) as client:
         # 1. Missing credentials fail closed with 401
@@ -337,9 +335,7 @@ def test_mmvt1_incident_with_two_pooled_http_clients_on_loopback(
 
     base_url = f"http://127.0.0.1:{port}"
     canary_secret = "CANARY-SECRET-9941: root token leaked in staging worker env"
-    shared_decision = (
-        "Incident DEMO-17: roll back worker release v2.4.1 before resuming the queue."
-    )
+    shared_decision = "Incident DEMO-17: roll back worker release v2.4.1 before resuming the queue."
 
     try:
         with (
@@ -404,4 +400,3 @@ def test_mmvt1_incident_with_two_pooled_http_clients_on_loopback(
     finally:
         server.should_exit = True
         thread.join(timeout=5.0)
-

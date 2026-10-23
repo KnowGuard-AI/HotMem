@@ -501,9 +501,7 @@ def create_app(
         ctx = _resolve_caller(owned_runtime, request)
         target = req.path or req.__dict__.get("file")
         try:
-            return await asyncio.to_thread(
-                owned_runtime.hydrate_snapshot, ctx, target=target
-            )
+            return await asyncio.to_thread(owned_runtime.hydrate_snapshot, ctx, target=target)
         except SnapshotChecksumError as err:
             return JSONResponse(
                 status_code=409,
@@ -575,9 +573,7 @@ def create_app(
 
         ctx = _resolve_caller(owned_runtime, request)
         try:
-            return await asyncio.to_thread(
-                owned_runtime.handoff_verify, ctx, package=req.package
-            )
+            return await asyncio.to_thread(owned_runtime.handoff_verify, ctx, package=req.package)
         except HandoffError as err:
             return JSONResponse(
                 status_code=409,
@@ -596,9 +592,7 @@ def create_app(
         import asyncio
 
         ctx = _resolve_caller(owned_runtime, request)
-        return await asyncio.to_thread(
-            owned_runtime.handoff_inspect, ctx, package=package
-        )
+        return await asyncio.to_thread(owned_runtime.handoff_inspect, ctx, package=package)
 
     @app.post("/v1/handoff/hydrate")
     async def handoff_hydrate(req: HandoffPackageRequest, request: Request):
@@ -606,9 +600,7 @@ def create_app(
 
         ctx = _resolve_caller(owned_runtime, request)
         try:
-            return await asyncio.to_thread(
-                owned_runtime.handoff_hydrate, ctx, package=req.package
-            )
+            return await asyncio.to_thread(owned_runtime.handoff_hydrate, ctx, package=req.package)
         except HandoffError as err:
             return JSONResponse(
                 status_code=409,
@@ -629,9 +621,7 @@ def create_app(
         import asyncio
 
         ctx = _resolve_caller(owned_runtime, request)
-        return await asyncio.to_thread(
-            owned_runtime.list_files, ctx, identifier=identifier
-        )
+        return await asyncio.to_thread(owned_runtime.list_files, ctx, identifier=identifier)
 
     @app.get("/v1/bundles")
     async def list_bundles(request: Request):
@@ -791,9 +781,7 @@ def create_app(
         import asyncio
 
         ctx = _resolve_caller(owned_runtime, request)
-        status_code, payload = await asyncio.to_thread(
-            owned_runtime.vector_index_rebuild, ctx
-        )
+        status_code, payload = await asyncio.to_thread(owned_runtime.vector_index_rebuild, ctx)
         if status_code != 200:
             return JSONResponse(status_code=status_code, content=payload)
         return payload

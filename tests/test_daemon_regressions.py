@@ -175,9 +175,7 @@ def test_health_hides_paths_and_distinguishes_empty_scope(daemon_app):
         operations=("read",),
     )
     app.state.runtime.policy.credentials.append(only_private)
-    none_visible = client.get(
-        "/v1/health", headers=_hdr("tok-noscope")
-    ).json()
+    none_visible = client.get("/v1/health", headers=_hdr("tok-noscope")).json()
     assert none_visible["memory_count"] == 0
     assert none_visible["store_state"] == "empty_scope"
 
@@ -434,9 +432,7 @@ def test_management_can_revoke_and_reload_policy(tmp_path: Path):
             == 0
         )
 
-        reloaded = client.post(
-            "/v1/policy/reload", headers=_hdr("tok-mgmt", store_id="s-policy")
-        )
+        reloaded = client.post("/v1/policy/reload", headers=_hdr("tok-mgmt", store_id="s-policy"))
         assert reloaded.status_code == 200
         assert reloaded.json()["reloaded"] is True
 

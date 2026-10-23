@@ -196,19 +196,13 @@ def _flush_batch(
     pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in pending]
     existing = db.batch_existing_namespace_hashes(pairs)
     todo = [
-        r
-        for r in pending
-        if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
+        r for r in pending if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
     ]
     counters["skipped"] += len(pending) - len(todo)
 
     merge_duplicate_annotations(
         db,
-        [
-            r
-            for r in pending
-            if (str(r.get("namespace") or ""), r["content_hash"]) in existing
-        ],
+        [r for r in pending if (str(r.get("namespace") or ""), r["content_hash"]) in existing],
         counters,
         # Per-batch autocommit path: no later commit exists to carry an
         # all-duplicate batch's merge (durability, #79 review).
