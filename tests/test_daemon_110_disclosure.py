@@ -1175,3 +1175,76 @@ def test_mvt110_5_diagnostics_inspect_health_vector_revocation_and_surfaces(tmp_
         assert client.get(f"/v1/memory/{shared_id}", headers=_hdr("tok-b")).status_code == 404
         assert client.get("/v1/events", headers=_hdr("tok-b")).json()["count"] == 0
         assert client.get("/v1/health", headers=_hdr("tok-b")).json()["memory_count"] == 0
+
+
+def test_mvt110_1b_tag_classification_enforced_on_search_and_list(tmp_path: Path):
+    """Tag-only private classification must be enforced on search/list, not just direct ID."""
+    import json as _json
+    import uuid as _uuid
+
+    from hotmem.db import MemoryDB
+    from hotmem.embed import DEFAULT_EMBEDDER, pack_embedding
+
+    db_path = tmp_path / "mvt110_1b.sqlite"
+    db = MemoryDB(db_path)
+    tagged_id = _uuid.uuid4().hex
+    db.insert(
+        id=tagged_id,
+        identifier="ops/tagged-private",
+        fact_text="tag-only private canary TAG-CANARY-771",
+        embedding=pack_embedding(DEFAULT_EMBEDDER.embed("tag-only private canary TAG-CANARY-771")),
+        embedding_dim=DEFAULT_EMBEDDER.descriptor.dimension,
+        embedding_model=DEFAULT_EMBEDDER.descriptor.key,
+        source="seed",
+        importance=0.9,
+        metadata_json=_json.dumps({}),
+        content_hash="tag-canary-hash",
+        ttl_seconds=None,
+        namespace="shared/ops",
+        tags=_json.dumps(["private"]),
+    )
+    db.close()
+
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-tag-reader",
+                caller_id="tag-reader",
+                store_id="store-110",
+                namespaces=("reader/private",),
+                operations=("read",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-tag",
+                        namespace="shared/ops",
+                        audience=("tag-reader",),
+                        operations=("read",),
+                        secret_action="redact",
+                        private_classification_action="omit",
+                    ),
+                ),
+            )
+        ],
+    )
+    app = create_app(db_path=db_path, base_dir=tmp_path, policy=policy)
+    with TestClient(app) as client:
+        headers = _hdr("tok-tag-reader")
+        search = client.post(
+            "/v1/search", headers=headers, json={"query": "tag-only private canary", "top_k": 5}
+        )
+        assert search.status_code == 200
+        assert search.json()["memories"] == []
+        assert search.json()["disclosure"]["omitted_count"] == 1
+        assert "TAG-CANARY-771" not in search.text
+
+        listed = client.get(
+            "/v1/memories", headers=headers, params={"identifier": "ops/tagged-private"}
+        )
+        assert listed.status_code == 200
+        assert listed.json()["memories"] == []
+        assert listed.json()["disclosure"]["omitted_count"] == 1
+        assert "TAG-CANARY-771" not in listed.text
+
+        assert client.get(f"/v1/memory/{tagged_id}", headers=headers).status_code == 404

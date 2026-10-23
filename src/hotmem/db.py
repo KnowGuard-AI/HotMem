@@ -1024,7 +1024,7 @@ class MemoryDB:
         rows = self._conn.execute(
             f"""SELECT id, identifier, fact_text, fact_summary, importance,
                        metadata_json, source, created_at, namespace, provenance_json,
-                       {cosine_expr} AS cosine_score
+                       tags, {cosine_expr} AS cosine_score
                 FROM memories
                 WHERE {_ttl_live()}{archived_clause}
                 ORDER BY cosine_score DESC, id ASC""",
@@ -1047,7 +1047,7 @@ class MemoryDB:
         rows = self._conn.execute(
             f"""SELECT m.id, m.identifier, m.fact_text, m.importance, m.metadata_json,
                        m.source, m.created_at, m.namespace, m.provenance_json,
-                       bm25(memories_fts) AS bm25_score
+                       m.tags, bm25(memories_fts) AS bm25_score
                 FROM memories_fts
                 JOIN memories AS m ON m.rowid = memories_fts.rowid
                 WHERE memories_fts MATCH ?
@@ -1262,7 +1262,7 @@ class MemoryDB:
             rows = self._conn.execute(
                 f"""SELECT id, identifier, fact_text, fact_summary, importance,
                            metadata_json, source, created_at, namespace, provenance_json,
-                           {cosine_expr} AS cosine_score
+                           tags, {cosine_expr} AS cosine_score
                     FROM memories
                     WHERE id IN ({placeholders})
                       AND {_ttl_live()}{archived_clause}""",
@@ -1453,7 +1453,7 @@ class MemoryDB:
 
         rows = self._conn.execute(
             f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
-                       created_at, namespace
+                       created_at, namespace, tags
                 FROM memories
                 WHERE identifier = ?
                   AND {_ttl_live()}
