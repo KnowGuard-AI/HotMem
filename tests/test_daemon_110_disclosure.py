@@ -1414,7 +1414,7 @@ def test_mvt110_2c_sanitize_source_uri_preserves_non_local_uris(tmp_path: Path):
     )
     assert ctx.sanitize_source_uri("s3://bucket/key", base_dir=tmp_path) == "s3://bucket/key"
     assert ctx.sanitize_source_uri(str(inside), base_dir=tmp_path) == "inside.txt"
-    assert ctx.sanitize_source_uri(f"file://{inside}", base_dir=tmp_path) == "inside.txt"
+    assert ctx.sanitize_source_uri(inside.as_uri(), base_dir=tmp_path) == "inside.txt"
     assert ctx.sanitize_source_uri(str(outside), base_dir=tmp_path) == ""
     assert ctx.sanitize_source_uri("../escape.txt", base_dir=tmp_path) == ""
 

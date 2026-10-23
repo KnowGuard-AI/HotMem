@@ -602,17 +602,24 @@ class CallerContext:
         if not raw or not self.redact_host_paths_enabled:
             return raw
         candidate = raw
-        scheme = ""
-        if "://" in raw:
-            from urllib.parse import unquote, urlparse
+        if raw[:7].lower() == "file://":
+            from urllib.parse import unquote
 
-            parsed = urlparse(raw)
-            scheme = (parsed.scheme or "").lower()
-            if scheme and scheme != "file":
+            rest = unquote(raw[7:])
+            if rest.lower().startswith("localhost/"):
+                rest = "/" + rest[len("localhost/") :]
+            if len(rest) > 3 and rest[0] == "/" and rest[2] == ":":
+                # file:///C:/... -> C:/... (Windows drive path)
+                rest = rest[1:]
+            candidate = rest
+        elif "://" in raw:
+            from urllib.parse import urlparse
+
+            scheme = (urlparse(raw).scheme or "").lower()
+            if scheme:
                 # Non-local URIs are not host filesystem paths: preserve them
                 # verbatim rather than collapsing ``://`` through Path().
                 return raw
-            candidate = unquote(parsed.path or "")
         p = Path(candidate)
         if base_dir is not None:
             try:
