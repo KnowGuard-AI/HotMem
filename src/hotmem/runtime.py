@@ -1225,37 +1225,43 @@ class HotMemRuntime:
 
         export_scope: dict[str, Any] | None = None
         report: DisclosureReport | None = None
-        if ctx.policy_enforced:
-            report = DisclosureReport()
-            exported_after_disclosure = 0
-            with self._read_db() as read_db:
-                total_count = read_db.count()
-                for row in read_db.iter_rows(include_embedding=False):
+        with self._write_slot() as db:
+            if ctx.policy_enforced:
+                # Count within the same write slot as the export so scope and
+                # disclosure counts describe the emitted snapshot.
+                report = DisclosureReport()
+                exported_after_disclosure = 0
+                scope_omitted = 0
+                total_count = db.count()
+                for row in db.iter_rows(include_embedding=False):
                     if row_filter is not None and not row_filter(row):
+                        scope_omitted += 1
                         continue
                     if copy_attachments and row.get("source_uri"):
                         self._confine_path(ctx, str(row["source_uri"]), kind="backing file")
                     disclosed_probe = _prepare_export_row(row, report)
                     if disclosed_probe is not None:
                         exported_after_disclosure += 1
-            cred = ctx.credential
-            export_scope = {
-                "caller_id": ctx.caller_id,
-                "session_id": ctx.session_id,
-                "source": ctx.source,
-                "namespace": ctx.namespace,
-                "permitted_namespaces": list(cred.namespaces) if cred else [],
-                "share_approvals": [
-                    s.approval_id for s in (cred.share_approvals if cred else ()) if not s.revoked
-                ],
-                "exported_count": exported_after_disclosure,
-                "omitted_count": max(0, total_count - exported_after_disclosure),
-                "redacted_count": report.redacted_count,
-                "disclosure": report.to_dict(),
-                "store_id": self.store_id,
-            }
-
-        with self._write_slot() as db:
+                cred = ctx.credential
+                export_scope = {
+                    "caller_id": ctx.caller_id,
+                    "session_id": ctx.session_id,
+                    "source": ctx.source,
+                    "namespace": ctx.namespace,
+                    "permitted_namespaces": list(cred.namespaces) if cred else [],
+                    "share_approvals": [
+                        s.approval_id
+                        for s in (cred.share_approvals if cred else ())
+                        if not s.revoked
+                    ],
+                    "exported_count": exported_after_disclosure,
+                    "scope_omitted_count": scope_omitted,
+                    "disclosure_omitted_count": report.omitted_count,
+                    "omitted_count": max(0, total_count - exported_after_disclosure),
+                    "redacted_count": report.redacted_count,
+                    "disclosure": report.to_dict(),
+                    "store_id": self.store_id,
+                }
             result = snapshot_write(
                 db,
                 resolved_target,

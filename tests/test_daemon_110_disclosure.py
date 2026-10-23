@@ -869,6 +869,8 @@ def test_mvt110_4_scoped_export_modes_attachments_and_handoff_guarantees(tmp_pat
         pkg_manifest = json.loads((pkg_dir / "manifest.json").read_text(encoding="utf-8"))
         assert pkg_manifest["scope"]["exported_count"] == 3
         assert pkg_manifest["scope"]["omitted_count"] == 2
+        assert pkg_manifest["scope"]["scope_omitted_count"] == 1
+        assert pkg_manifest["scope"]["disclosure_omitted_count"] == 1
         assert pkg_manifest["scope"]["redacted_count"] == 1
 
         # 4. omit mode: omits both secret-bearing and private-classified records (exports 2)
@@ -1416,6 +1418,8 @@ def test_mvt110_2c_sanitize_source_uri_preserves_non_local_uris(tmp_path: Path):
 
 def test_mvt110_4b_unportable_file_refs_are_omitted_not_dangling(tmp_path: Path):
     """Exports must not emit file-backed records whose path cannot be represented portably."""
+    import json as _json
+
     from hotmem.db import MemoryDB
     from hotmem.embed import DEFAULT_EMBEDDER
     from hotmem.memory import FileRef, add_file_backed
@@ -1479,6 +1483,9 @@ def test_mvt110_4b_unportable_file_refs_are_omitted_not_dangling(tmp_path: Path)
         assert body["exported"] == 0
         assert body["disclosure"]["omitted_count"] == 1
         assert "file_reference_unavailable" in body["disclosure"]["reasons"]
+        manifest = _json.loads((Path(base_dir, body["path"]) / "manifest.json").read_text())
+        assert manifest["scope"]["scope_omitted_count"] == 0
+        assert manifest["scope"]["disclosure_omitted_count"] == 1
 
         pkg = Path(base_dir, body["path"])
         assert verify_snapshot(pkg)["record_count"] == 0
