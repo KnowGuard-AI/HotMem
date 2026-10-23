@@ -64,7 +64,11 @@ _EXTRA_DISCLOSURE_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
 )
 DISCLOSURE_ENGINE = RedactionEngine(
     patterns=(
-        *[p for p in _HANDOFF_PATTERNS if p[0] != "prefixed_credential"],
+        *[
+            p
+            for p in _HANDOFF_PATTERNS
+            if p[0] not in {"prefixed_credential", "dsn_inline_password"}
+        ],
         *_EXTRA_DISCLOSURE_PATTERNS,
     )
 )
