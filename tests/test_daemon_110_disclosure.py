@@ -1287,7 +1287,7 @@ def test_mvt110_2b_provenance_and_event_payload_disclosure(tmp_path: Path):
                 token="tok-writer",
                 caller_id="writer",
                 store_id="store-110",
-                namespaces=("shared/ops",),
+                namespaces=("shared/ops", "shared/secrets", "shared/cls"),
                 operations=("read", "write"),
             ),
             CallerCredential.from_token(
@@ -1569,3 +1569,95 @@ def test_mvt110_2d_binary_hydration_fails_closed_instead_of_corrupting(tmp_path:
         allowed = client.post(f"/v1/memory/{memory_id}/hydrate", headers=_hdr("tok-allow"))
         assert allowed.status_code == 200
         assert allowed.content == blob.read_bytes()
+
+
+def test_mvt110_1c_policy_defaults_apply_to_shared_access(tmp_path: Path):
+    """PolicyConfig defaults must govern shared access while direct access stays allow."""
+    secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        default_secret_action="omit",
+        default_private_classification_action="fail_closed",
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-writer",
+                caller_id="writer",
+                store_id="store-110",
+                namespaces=("shared/ops", "shared/secrets", "shared/cls"),
+                operations=("read", "write"),
+            ),
+            CallerCredential.from_token(
+                token="tok-secret",
+                caller_id="secret-reader",
+                store_id="store-110",
+                namespaces=("secret/private",),
+                operations=("read",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-default-secret",
+                        namespace="shared/secrets",
+                        audience=("secret-reader",),
+                        operations=("read",),
+                    ),
+                ),
+            ),
+            CallerCredential.from_token(
+                token="tok-cls",
+                caller_id="cls-reader",
+                store_id="store-110",
+                namespaces=("cls/private",),
+                operations=("read",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-default-cls",
+                        namespace="shared/cls",
+                        audience=("cls-reader",),
+                        operations=("read",),
+                    ),
+                ),
+            ),
+        ],
+    )
+    app = create_app(db_path=tmp_path / "mvt110_1c.sqlite", base_dir=tmp_path, policy=policy)
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/v1/add",
+                headers=_hdr("tok-writer", ns="shared/secrets", session="s-w"),
+                json={"identifier": "ops/secret", "fact": f"token {secret} here"},
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/v1/add",
+                headers=_hdr("tok-writer", ns="shared/cls", session="s-w"),
+                json={
+                    "identifier": "ops/classified",
+                    "fact": "classified default note",
+                    "metadata": {"classification": "private"},
+                },
+            ).status_code
+            == 200
+        )
+
+        omitted = client.post(
+            "/v1/search", headers=_hdr("tok-secret"), json={"query": "token here", "top_k": 5}
+        )
+        assert omitted.status_code == 200
+        assert omitted.json()["memories"] == []
+        assert omitted.json()["disclosure"]["omitted_count"] == 1
+        assert "policy_secret_omitted" in omitted.json()["disclosure"]["reasons"]
+
+        direct = client.post(
+            "/v1/search", headers=_hdr("tok-writer"), json={"query": "token here", "top_k": 5}
+        )
+        assert direct.status_code == 200
+        assert secret in direct.text
+
+        blocked = client.post(
+            "/v1/search", headers=_hdr("tok-cls"), json={"query": "classified default", "top_k": 5}
+        )
+        assert blocked.status_code == 403
+        assert blocked.json()["reason"] == "private_classification"

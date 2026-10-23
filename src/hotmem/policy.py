@@ -489,6 +489,8 @@ class CallerContext:
     namespace: str | None = None
     credential: CallerCredential | None = None
     idempotency_key: str | None = None
+    policy_default_secret_action: str = "redact"
+    policy_default_private_classification_action: str = "omit"
 
     @property
     def effective_write_namespace(self) -> str:
@@ -641,11 +643,15 @@ class CallerContext:
                 break
 
         if matched_share is not None and not is_direct:
-            secret_action = matched_share.secret_action or self.credential.secret_action or "redact"
+            secret_action = (
+                matched_share.secret_action
+                or self.credential.secret_action
+                or self.policy_default_secret_action
+            )
             cls_action = (
                 matched_share.private_classification_action
                 or self.credential.private_classification_action
-                or "omit"
+                or self.policy_default_private_classification_action
             )
             return (secret_action, cls_action)
 
@@ -1114,6 +1120,10 @@ class PolicyConfig:
             namespace=namespace,
             credential=matched,
             idempotency_key=idempotency_key,
+            policy_default_secret_action=self.default_secret_action,
+            policy_default_private_classification_action=(
+                self.default_private_classification_action
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1139,13 +1149,10 @@ class PolicyConfig:
             default_secret_action=default_secret,
             default_private_classification_action=default_cls,
             credentials=[
-                CallerCredential.from_dict(
-                    c,
-                    default_secret_action=(str(raw_secret) if raw_secret is not None else None),
-                    default_private_classification_action=(
-                        str(raw_cls) if raw_cls is not None else None
-                    ),
-                )
+                # Top-level defaults are applied to shared access at request
+                # time; direct self-owned access keeps its documented "allow"
+                # fallback unless the credential sets an action explicitly.
+                CallerCredential.from_dict(c)
                 for c in data.get("credentials", ())
             ],
         )
