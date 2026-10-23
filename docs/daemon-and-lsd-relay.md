@@ -167,6 +167,30 @@ Closing or restarting the MCP host closes only the `stdio` relay; the daemon and
   interchange v1 records keep `schema_version: 1` and carry the stored row
   version separately as `record_schema_version`.
 
+### Store schema migration (v5 -> v6)
+
+The persistent SQLite schema moved from `user_version = 5` to `6`. The
+migration runs automatically on the next open and is **fail-closed**:
+
+| Change | Purpose |
+| --- | --- |
+| `store_meta(key, value)` table | Persists the store id so identity survives moves/copies |
+| `operation_ledger` table | Atomic idempotent write outcomes (caller, namespace, key, request hash) |
+| `idx_memories_content_hash_unique` redefined as `(namespace, content_hash)` | Namespace-safe logical identity (#100) |
+
+There is no manual migration step and no data rewrite. If the new unique
+index cannot be created because the store already contains duplicate
+`(namespace, content_hash)` rows, startup aborts with an explicit error and
+the original index/transaction is preserved — resolve the duplicates and
+restart. Downgrading to a pre-v6 binary is not supported for writes; take a
+verified snapshot before downgrading.
+
+**No artifact format bump is required.** Snapshot v2 stays `schema_version: 2`
+for records/manifest, and interchange packages stay `schema_version: 1`; the
+row's stored schema version travels additively as `record_schema_version`.
+Scoped exports add an informational `scope` block (not part of any logical
+identity or digest).
+
 ---
 
 ## 4. Exposed Daemon Route Inventory
@@ -224,6 +248,22 @@ Measured on macOS (`darwin`), `hotmem-hash-v1` embedder, 2 callers (`caller-a`, 
 ---
 
 # Design intent: the cassette and the detachable player
+
+## HotMem: carry the brain, change the player
+
+An incident is contained. The next shift is coming online. One agent has the
+investigation, another has the recovery runbook, and the person taking over
+needs to know why the team chose to roll back. They should be able to continue
+from that decision, with its evidence and permissions intact.
+
+This is the experience HotMem is being built to deliver: a working brain that
+belongs to its owner and can travel between compatible tools. **JSONL is the
+memory cassette. HotMem is the recorder and player. LSD is the detachable
+interface that keeps the recorder in view.**
+
+For a developer, the job is concrete. Keep memory durable. Give each client the
+right view. Make the service survive a disconnected agent, a closed window, and
+a restart. Then show two people and their agents continuing useful work.
 
 The sections below preserve the original v0.2.7 design narrative for the shared daemon, memory cassette, and LSD management surface (#112). The runbook above is the implemented operator contract.
 

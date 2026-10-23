@@ -6,6 +6,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Security
+
+- Daemon mode authenticates before disclosing the store id, and scoped
+  callers no longer receive other namespaces' records, counts, diagnostics,
+  events, or absolute store paths (#109, #110).
+- Hydration is namespace-scoped and fails closed before any write; daemon
+  filesystem paths (`snapshot`, `hydrate`, `handoff *`, `discover`) are
+  confined to the base directory; SQLite artifacts are rejected through the
+  HTTP boundary (#109).
+- Request-body `source` attribution can no longer impersonate another
+  caller's bound source (#111).
+
+### Changed (daemon mode, contract)
+
+- Policy-enforced writes now require `X-HotMem-Session-Id`
+  (`400 session_required`).
+- Out-of-scope memory ids return `404` (never `403`), removing an existence
+  oracle.
+- Scoped `/v1/health` omits `db_path`, distinguishes `verified_empty`,
+  `ready`, and `empty_scope`, and requires the `read` operation.
+- `/v1/bundles` and `/v1/discover` require management authority.
+- Duplicate writes return the existing `memory_id` with `deduplicated: true`
+  and record a `memory.deduplicated` event (previously silent).
+- Snapshots/packages record `scope`, `exported_count`, and `omitted_count`;
+  scoped exports redact host/database paths.
+- Store identity is persisted; a conflicting `--store-id` against the policy
+  or stored identity fails startup.
+- `/v1/events` cursors advance over invisible events instead of ending the
+  stream.
+
+### Added
+
+- Runtime policy management: `POST /v1/policy/revoke`,
+  `POST /v1/policy/reload`, and `hotmem policy revoke|reload`.
+- `hotmem handoff prepare|verify|inspect --url` daemon routing.
+- Per-thread read-only WAL connections so reads never observe uncommitted
+  writes and slow writes/exports do not block health or basic reads.
+- 19 regression tests covering the daemon review findings.
+- Store schema v6: `store_meta`, `operation_ledger`, and namespace-scoped
+  content identity (automatic, fail-closed migration).
+
 ### Fixed
 
 - Decode percent-encoded local file URIs so spaces, Unicode, and literal

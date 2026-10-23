@@ -14,6 +14,36 @@ Interactive Swagger UI is available at `http://127.0.0.1:8711/docs` when the ser
 - New file-native fields are optional.
 - Unsupported future formats should fail with explicit errors.
 
+### 2.1 Policy-enforced daemon mode (#109, #110, #111)
+
+When the daemon is started with a policy (`--policy` / `mount/policy.json`),
+these additional rules apply. They are **breaking** relative to an
+unauthenticated embedded server and are intentional for multi-caller use:
+
+- Every request requires a bearer token (or `X-HotMem-Token`).
+- `POST /v1/add` requires `X-HotMem-Session-Id`; missing attribution returns
+  `400 session_required`.
+- A request-body `source` must match the credential's bound sources and may
+  not claim another caller's source (`403 session_impersonation_denied`).
+- `X-HotMem-Store-Id` is a typo-safety assertion only; authorization comes
+  from the token. A mismatch returns `409 store_mismatch` **after**
+  authentication.
+- Reading or hydrating a memory outside the caller's scope returns `404`
+  (identical to a missing id); list/search/event results are filtered before
+  ranking/output.
+- `GET /v1/health` requires the `read` operation, omits `db_path`, and reports
+  `store_state` as `verified_empty`, `ready`, or `empty_scope`.
+- `GET /v1/bundles` and `POST /v1/discover` require management authority.
+- `GET /v1/hygiene` reports only the caller's visible rows and does not write
+  audit events for read-only callers.
+- `POST /v1/snapshot` records the caller's scope and omissions in the
+  manifest/metadata and redacts host/database paths.
+- Filesystem paths supplied to `snapshot`, `hydrate`, `handoff *`, and
+  `discover` must resolve inside the daemon base directory
+  (`403 path_not_permitted`).
+- Management callers can revoke immediately via `POST /v1/policy/revoke` and
+  reload the policy file via `POST /v1/policy/reload`.
+
 ## 3. Health
 
 ```http
