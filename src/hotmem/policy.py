@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hotmem.handoff.redact import _PATTERNS as _HANDOFF_PATTERNS
+from hotmem.handoff.redact import DEFAULT_ENGINE as HANDOFF_ENGINE
 from hotmem.handoff.redact import RedactionEngine
 
 SESSION_ENVELOPE_VERSION = "hotmem-session-v1"
@@ -66,7 +66,7 @@ DISCLOSURE_ENGINE = RedactionEngine(
     patterns=(
         *[
             p
-            for p in _HANDOFF_PATTERNS
+            for p in HANDOFF_ENGINE.patterns
             if p[0] not in {"prefixed_credential", "dsn_inline_password"}
         ],
         *_EXTRA_DISCLOSURE_PATTERNS,
