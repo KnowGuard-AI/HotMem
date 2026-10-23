@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -29,6 +30,11 @@ from hotmem.trace import get_tracer
 _trace = get_tracer("mount")
 
 LOCK_FILENAME = "daemon.owner.lock"
+
+# Process-local guard: Windows byte-range locks are not reliably exclusive
+# across handles in the same process, so track held paths explicitly.
+_HELD_LOCKS: set[str] = set()
+_HELD_LOCKS_GUARD = threading.Lock()
 
 
 class StoreOwnershipError(RuntimeError):
@@ -68,8 +74,16 @@ class StoreLock:
         if self.lock_path is None or self._fd is not None:
             return
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        key = str(self.lock_path)
+        with _HELD_LOCKS_GUARD:
+            if key in _HELD_LOCKS:
+                owner = self.read_owner() or {}
+                raise StoreOwnershipError(
+                    f"store {self.db_path!r} is already owned by this process",
+                    owner=owner,
+                )
         existing_info = self.read_owner()
-        fd = os.open(str(self.lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        fd = os.open(key, os.O_CREAT | os.O_RDWR, 0o600)
         try:
             if os.name == "nt":
                 import msvcrt
@@ -109,6 +123,8 @@ class StoreLock:
         }
         self._write_owner_payload(fd, owner_payload)
         self._fd = fd
+        with _HELD_LOCKS_GUARD:
+            _HELD_LOCKS.add(key)
 
     def _write_owner_payload(self, fd: int, payload: dict[str, Any]) -> None:
         raw = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
@@ -151,6 +167,8 @@ class StoreLock:
                 with contextlib.suppress(OSError):
                     fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
+            with _HELD_LOCKS_GUARD:
+                _HELD_LOCKS.discard(str(self.lock_path))
             # The lock file is intentionally NOT unlinked: unlinking after
             # unlocking races with a competing owner (a waiter can hold a
             # lock on an unlinked inode while a third process creates and
