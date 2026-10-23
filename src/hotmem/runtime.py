@@ -925,12 +925,14 @@ class HotMemRuntime:
         if not ctx.can_access_row(record, operation="read"):
             # Out-of-scope rows are reported as missing (no existence oracle).
             return None
+        report: DisclosureReport | None = None
         if ctx.policy_enforced:
-            disclosed = ctx.apply_disclosure_to_row(record, operation="read")
+            report = DisclosureReport()
+            disclosed = ctx.apply_disclosure_to_row(record, report=report, operation="read")
             if disclosed is None:
                 return None
             record = disclosed
-        return {
+        out = {
             "id": record["id"],
             "identifier": record["identifier"],
             "memory_type": record["memory_type"],
@@ -950,6 +952,10 @@ class HotMemRuntime:
             "provenance": _safe_json(record.get("provenance_json"), None),
             "created_at": record["created_at"],
         }
+        if report is not None:
+            out["disclosure"] = report.to_dict()
+            out["policy_revision"] = self.policy.revision
+        return out
 
     def hydrate_one_profiled(
         self,
@@ -1371,14 +1377,15 @@ class HotMemRuntime:
 
     def list_files(self, ctx: CallerContext, *, identifier: str | None = None) -> dict[str, Any]:
         ctx.require_operation("read")
+        report = DisclosureReport() if ctx.policy_enforced else None
         with self._read_db() as db, Timer() as t:
             rows = ctx.filter_rows(db.list_file_backed(), operation="read")
             if identifier:
                 rows = [r for r in rows if r["identifier"] == identifier]
             files = []
             for row in rows:
-                if ctx.policy_enforced:
-                    disclosed = ctx.apply_disclosure_to_row(row, operation="read")
+                if ctx.policy_enforced and report is not None:
+                    disclosed = ctx.apply_disclosure_to_row(row, report=report, operation="read")
                     if disclosed is None:
                         continue
                     row = disclosed
@@ -1411,7 +1418,15 @@ class HotMemRuntime:
                         "size": size,
                     }
                 )
-        return {"files": files, "count": len(files), "trace_ms": round(t.ms, 2)}
+        out: dict[str, Any] = {
+            "files": files,
+            "count": len(files),
+            "trace_ms": round(t.ms, 2),
+        }
+        if report is not None:
+            out["disclosure"] = report.to_dict()
+            out["policy_revision"] = self.policy.revision
+        return out
 
     def list_bundles(self, ctx: CallerContext) -> dict[str, Any]:
         # Bundle index entries are store-wide filesystem paths, not
@@ -1765,10 +1780,11 @@ class HotMemRuntime:
             rows = ctx.filter_rows(
                 list_candidates(db, namespace=namespace, state=state), operation="read"
             )
-        if ctx.policy_enforced:
+        report = DisclosureReport() if ctx.policy_enforced else None
+        if ctx.policy_enforced and report is not None:
             disclosed_rows: list[dict[str, Any]] = []
             for r in rows:
-                d = ctx.apply_disclosure_to_row(r, operation="read")
+                d = ctx.apply_disclosure_to_row(r, report=report, operation="read")
                 if d is not None:
                     disclosed_rows.append(d)
             rows = disclosed_rows
@@ -1783,11 +1799,15 @@ class HotMemRuntime:
             }
             for r in rows
         ]
-        return {
+        out: dict[str, Any] = {
             "candidates": candidates,
             "count": len(candidates),
             "trace_ms": round(t.ms, 2),
         }
+        if report is not None:
+            out["disclosure"] = report.to_dict()
+            out["policy_revision"] = self.policy.revision
+        return out
 
     def promotion_states(self, ctx: CallerContext) -> dict[str, Any]:
         ctx.require_operation("read")
@@ -1803,10 +1823,11 @@ class HotMemRuntime:
         ctx.require_operation("read")
         with self._read_db() as db, Timer() as t:
             rows = ctx.filter_rows(list_by_state(db, state, namespace=namespace), operation="read")
-        if ctx.policy_enforced:
+        report = DisclosureReport() if ctx.policy_enforced else None
+        if ctx.policy_enforced and report is not None:
             disclosed_rows = []
             for r in rows:
-                d = ctx.apply_disclosure_to_row(r, operation="read")
+                d = ctx.apply_disclosure_to_row(r, report=report, operation="read")
                 if d is not None:
                     disclosed_rows.append(d)
             rows = disclosed_rows
@@ -1823,11 +1844,15 @@ class HotMemRuntime:
             }
             for r in rows
         ]
-        return {
+        out: dict[str, Any] = {
             "memories": summaries,
             "count": len(summaries),
             "trace_ms": round(t.ms, 2),
         }
+        if report is not None:
+            out["disclosure"] = report.to_dict()
+            out["policy_revision"] = self.policy.revision
+        return out
 
     def vector_index_rebuild(self, ctx: CallerContext) -> tuple[int, dict[str, Any]]:
         self._require_db()

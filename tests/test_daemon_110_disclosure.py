@@ -423,6 +423,7 @@ def test_mvt110_2_direct_id_hydration_profiles_and_file_confinement(tmp_path: Pa
         assert gh_secret not in json.dumps(meta_body)
         assert "[REDACTED:prefixed_credential]" in meta_body["fact_summary"]
         assert meta_body["source_uri"] == "ops_runbook.txt"
+        assert meta_body["disclosure"]["redacted_count"] >= 1
         assert str(base_dir) not in json.dumps(meta_body)
 
         # 4. Profiled hydration (/v1/memory/{id}/hydrate profile="full") redacts content & path
@@ -485,10 +486,12 @@ def test_mvt110_2_direct_id_hydration_profiles_and_file_confinement(tmp_path: Pa
         assert r_files.status_code == 200
         assert [f["memory_id"] for f in r_files.json()["files"]] == [file_id]
         assert r_files.json()["files"][0]["source_uri"] == "ops_runbook.txt"
+        assert r_files.json()["disclosure"]["redacted_count"] >= 1
 
         r_cands = client.get("/v1/promotion/candidates", headers=_hdr("tok-b-redact"))
         assert r_cands.status_code == 200
         assert [c["memory_id"] for c in r_cands.json()["candidates"]] == [file_id]
+        assert "disclosure" in r_cands.json()
 
 
 def test_mvt110_3_hydrate_and_handoff_inbound_namespace_confinement(tmp_path: Path):
