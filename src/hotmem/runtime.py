@@ -1143,44 +1143,26 @@ class HotMemRuntime:
             if (ctx.policy_enforced or ctx.namespace is not None)
             else None
         )
-        export_scope: dict[str, Any] | None = None
-        report: DisclosureReport | None = None
-        if ctx.policy_enforced:
-            report = DisclosureReport()
-            exported_after_disclosure = 0
-            with self._read_db() as read_db:
-                total_count = read_db.count()
-                for row in read_db.iter_rows(include_embedding=False):
-                    if row_filter is not None and not row_filter(row):
-                        continue
-                    if copy_attachments and row.get("source_uri"):
-                        self._confine_path(ctx, str(row["source_uri"]), kind="backing file")
-                    disclosed_probe = ctx.apply_disclosure_to_row(
-                        row, report=report, operation="export"
-                    )
-                    if disclosed_probe is not None:
-                        exported_after_disclosure += 1
-            cred = ctx.credential
-            export_scope = {
-                "caller_id": ctx.caller_id,
-                "session_id": ctx.session_id,
-                "source": ctx.source,
-                "namespace": ctx.namespace,
-                "permitted_namespaces": list(cred.namespaces) if cred else [],
-                "share_approvals": [
-                    s.approval_id for s in (cred.share_approvals if cred else ()) if not s.revoked
-                ],
-                "exported_count": exported_after_disclosure,
-                "omitted_count": max(0, total_count - exported_after_disclosure),
-                "redacted_count": report.redacted_count,
-                "disclosure": report.to_dict(),
-                "store_id": self.store_id,
-            }
 
-        def _transform_export_row(row: dict[str, Any]) -> dict[str, Any] | None:
+        def _prepare_export_row(
+            row: dict[str, Any], row_report: DisclosureReport | None = None
+        ) -> dict[str, Any] | None:
             if not ctx.policy_enforced:
                 return row
-            disclosed = ctx.apply_disclosure_to_row(row, operation="export")
+            if row.get("memory_type") == "file" and not ctx.sanitize_source_uri(
+                row.get("source_uri"), base_dir=self.base_dir
+            ):
+                # A file-backed record with no expressible portable reference
+                # would hydrate as invalid; omit it instead of emitting a
+                # dangling pointer (portable-cassette guarantee).
+                if row_report is not None:
+                    row_report.record_omission(
+                        memory_id=str(row.get("id") or ""),
+                        identifier=str(row.get("identifier") or ""),
+                        reason="file_reference_unavailable",
+                    )
+                return None
+            disclosed = ctx.apply_disclosure_to_row(row, report=row_report, operation="export")
             if disclosed is None:
                 return None
             text_changed = disclosed.get("fact_text") != row.get("fact_text") or disclosed.get(
@@ -1204,6 +1186,38 @@ class HotMemRuntime:
                 )
             return disclosed
 
+        export_scope: dict[str, Any] | None = None
+        report: DisclosureReport | None = None
+        if ctx.policy_enforced:
+            report = DisclosureReport()
+            exported_after_disclosure = 0
+            with self._read_db() as read_db:
+                total_count = read_db.count()
+                for row in read_db.iter_rows(include_embedding=False):
+                    if row_filter is not None and not row_filter(row):
+                        continue
+                    if copy_attachments and row.get("source_uri"):
+                        self._confine_path(ctx, str(row["source_uri"]), kind="backing file")
+                    disclosed_probe = _prepare_export_row(row, report)
+                    if disclosed_probe is not None:
+                        exported_after_disclosure += 1
+            cred = ctx.credential
+            export_scope = {
+                "caller_id": ctx.caller_id,
+                "session_id": ctx.session_id,
+                "source": ctx.source,
+                "namespace": ctx.namespace,
+                "permitted_namespaces": list(cred.namespaces) if cred else [],
+                "share_approvals": [
+                    s.approval_id for s in (cred.share_approvals if cred else ()) if not s.revoked
+                ],
+                "exported_count": exported_after_disclosure,
+                "omitted_count": max(0, total_count - exported_after_disclosure),
+                "redacted_count": report.redacted_count,
+                "disclosure": report.to_dict(),
+                "store_id": self.store_id,
+            }
+
         with self._write_slot() as db:
             result = snapshot_write(
                 db,
@@ -1213,7 +1227,7 @@ class HotMemRuntime:
                 package=package,
                 gz=gz,
                 row_filter=row_filter,
-                row_transform=_transform_export_row if ctx.policy_enforced else None,
+                row_transform=_prepare_export_row if ctx.policy_enforced else None,
                 redact_host_paths=ctx.redact_host_paths_enabled,
                 export_scope=export_scope,
             )

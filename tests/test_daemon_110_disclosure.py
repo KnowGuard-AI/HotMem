@@ -1412,3 +1412,78 @@ def test_mvt110_2c_sanitize_source_uri_preserves_non_local_uris(tmp_path: Path):
     assert ctx.sanitize_source_uri(f"file://{inside}", base_dir=tmp_path) == "inside.txt"
     assert ctx.sanitize_source_uri(str(outside), base_dir=tmp_path) == ""
     assert ctx.sanitize_source_uri("../escape.txt", base_dir=tmp_path) == ""
+
+
+def test_mvt110_4b_unportable_file_refs_are_omitted_not_dangling(tmp_path: Path):
+    """Exports must not emit file-backed records whose path cannot be represented portably."""
+    from hotmem.db import MemoryDB
+    from hotmem.embed import DEFAULT_EMBEDDER
+    from hotmem.memory import FileRef, add_file_backed
+    from hotmem.snapshot import hydrate as snapshot_hydrate
+    from hotmem.snapshot import verify as verify_snapshot
+
+    base_dir = tmp_path / "workspace"
+    base_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside bytes\n", encoding="utf-8")
+
+    db_path = base_dir / "mvt110_4b.sqlite"
+    db = MemoryDB(db_path)
+    add_file_backed(
+        db,
+        "ops/outside-file",
+        FileRef(
+            source_uri=str(outside),
+            byte_offset=0,
+            byte_length=outside.stat().st_size,
+            source_format="text/plain",
+        ),
+        summary="outside file reference",
+        namespace="shared/ops",
+        embedder=DEFAULT_EMBEDDER,
+    )
+    db.close()
+
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-export",
+                caller_id="exporter",
+                store_id="store-110",
+                namespaces=("export/private",),
+                operations=("read", "export"),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-export",
+                        namespace="shared/ops",
+                        audience=("exporter",),
+                        operations=("read", "export"),
+                        secret_action="redact",
+                        private_classification_action="omit",
+                    ),
+                ),
+            )
+        ],
+    )
+    app = create_app(db_path=db_path, base_dir=base_dir, policy=policy)
+    with TestClient(app) as client:
+        result = client.post(
+            "/v1/snapshot",
+            headers=_hdr("tok-export"),
+            json={"path": "export/pkg", "package": True},
+        )
+        assert result.status_code == 200
+        body = result.json()
+        assert body["exported"] == 0
+        assert body["disclosure"]["omitted_count"] == 1
+        assert "file_reference_unavailable" in body["disclosure"]["reasons"]
+
+        pkg = Path(body["path"])
+        assert verify_snapshot(pkg)["record_count"] == 0
+        restored = MemoryDB(base_dir / "restored.sqlite")
+        hydrated = snapshot_hydrate(restored, pkg)
+        assert hydrated.loaded == 0
+        assert hydrated.invalid == 0
+        restored.close()
