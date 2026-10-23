@@ -1248,3 +1248,139 @@ def test_mvt110_1b_tag_classification_enforced_on_search_and_list(tmp_path: Path
         assert "TAG-CANARY-771" not in listed.text
 
         assert client.get(f"/v1/memory/{tagged_id}", headers=headers).status_code == 404
+
+
+def test_mvt110_2b_provenance_and_event_payload_disclosure(tmp_path: Path):
+    """Provenance, identifier, tags, and event payloads must honor disclosure actions."""
+    import json as _json
+    import uuid as _uuid
+
+    from hotmem.db import MemoryDB
+    from hotmem.embed import DEFAULT_EMBEDDER, pack_embedding
+
+    secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+    db_path = tmp_path / "mvt110_2b.sqlite"
+    db = MemoryDB(db_path)
+    prov_id = _uuid.uuid4().hex
+    db.insert(
+        id=prov_id,
+        identifier="ops/provenance",
+        fact_text="plain provenance fact",
+        embedding=pack_embedding(DEFAULT_EMBEDDER.embed("plain provenance fact")),
+        embedding_dim=DEFAULT_EMBEDDER.descriptor.dimension,
+        embedding_model=DEFAULT_EMBEDDER.descriptor.key,
+        source="seed",
+        importance=0.9,
+        metadata_json=_json.dumps({}),
+        content_hash="prov-hash",
+        ttl_seconds=None,
+        namespace="shared/ops",
+        provenance_json=_json.dumps({"note": f"token {secret} leaked"}),
+    )
+    db.close()
+
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-writer",
+                caller_id="writer",
+                store_id="store-110",
+                namespaces=("shared/ops",),
+                operations=("read", "write"),
+            ),
+            CallerCredential.from_token(
+                token="tok-read",
+                caller_id="reader",
+                store_id="store-110",
+                namespaces=("reader/private",),
+                operations=("read",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-read",
+                        namespace="shared/ops",
+                        audience=("reader",),
+                        operations=("read",),
+                        secret_action="redact",
+                        private_classification_action="omit",
+                    ),
+                ),
+            ),
+            CallerCredential.from_token(
+                token="tok-allow",
+                caller_id="allower",
+                store_id="store-110",
+                namespaces=("allow/private",),
+                operations=("read",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-allow",
+                        namespace="shared/ops",
+                        audience=("allower",),
+                        operations=("read",),
+                        secret_action="allow",
+                        private_classification_action="allow",
+                    ),
+                ),
+            ),
+            CallerCredential.from_token(
+                token="tok-fail",
+                caller_id="failer",
+                store_id="store-110",
+                namespaces=("fail/private",),
+                operations=("read",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-fail",
+                        namespace="shared/ops",
+                        audience=("failer",),
+                        operations=("read",),
+                        secret_action="fail_closed",
+                        private_classification_action="omit",
+                    ),
+                ),
+            ),
+        ],
+    )
+    app = create_app(db_path=db_path, base_dir=tmp_path, policy=policy)
+    with TestClient(app) as client:
+        added = client.post(
+            "/v1/add",
+            headers=_hdr("tok-writer", ns="shared/ops", session="s-w"),
+            json={
+                "identifier": "ops/metadata-secret",
+                "fact": "metadata carrying note",
+                "metadata": {"note": f"api key {secret}"},
+            },
+        )
+        assert added.status_code == 200
+
+        search = client.post(
+            "/v1/search",
+            headers=_hdr("tok-read"),
+            json={"query": "provenance fact metadata carrying", "top_k": 5},
+        )
+        assert search.status_code == 200
+        assert secret not in search.text
+        assert "[REDACTED:prefixed_credential]" in search.text
+        assert search.json()["disclosure"]["redacted_count"] >= 2
+
+        got = client.get(f"/v1/memory/{prov_id}", headers=_hdr("tok-read"))
+        assert got.status_code == 200
+        assert secret not in got.text
+        assert "[REDACTED:prefixed_credential]" in got.text
+
+        events = client.get("/v1/events", headers=_hdr("tok-read"))
+        assert events.status_code == 200
+        assert secret not in events.text
+        assert "[REDACTED:prefixed_credential]" in events.text
+
+        allowed = client.get("/v1/events", headers=_hdr("tok-allow"))
+        assert allowed.status_code == 200
+        assert secret in allowed.text
+
+        blocked = client.get("/v1/events", headers=_hdr("tok-fail"))
+        assert blocked.status_code == 403
+        assert blocked.json()["error"] == "policy_disclosure_blocked"
+        assert secret not in blocked.text

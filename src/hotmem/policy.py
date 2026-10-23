@@ -225,6 +225,11 @@ def _redact_metadata_obj(value: Any) -> tuple[Any, list[tuple[str, int]]]:
     return value, []
 
 
+def redact_structure(value: Any) -> tuple[Any, list[tuple[str, int]]]:
+    """Recursively redact secret/PII patterns in arbitrary JSON-like values."""
+    return _redact_metadata_obj(value)
+
+
 def _is_private_classified(meta: dict[str, Any], tags: list[Any]) -> bool:
     cls_val = str(meta.get("classification") or "").strip().lower()
     vis_val = str(meta.get("visibility") or "").strip().lower()
@@ -721,7 +726,13 @@ class CallerContext:
         out = dict(row)
         field_hits: list[tuple[str, str, int]] = []
 
-        for text_field in ("fact_text", "fact_summary", "content"):
+        for text_field in (
+            "fact_text",
+            "fact_summary",
+            "content",
+            "identifier",
+            "source_uri",
+        ):
             val = out.get(text_field)
             if isinstance(val, str) and val:
                 redacted_val, hits = scan_and_redact_text(val)
@@ -739,6 +750,39 @@ class CallerContext:
                     out["metadata"] = redacted_meta
                 if "metadata_json" in out:
                     out["metadata_json"] = json.dumps(redacted_meta)
+
+        prov_obj: Any = out.get("provenance")
+        if prov_obj is None and isinstance(out.get("provenance_json"), str):
+            try:
+                parsed_prov = json.loads(out["provenance_json"])
+            except (json.JSONDecodeError, TypeError):
+                parsed_prov = None
+            if isinstance(parsed_prov, (dict, list)):
+                prov_obj = parsed_prov
+        if prov_obj is not None:
+            redacted_prov, prov_hits = _redact_metadata_obj(prov_obj)
+            if prov_hits:
+                for pat_name, cnt in prov_hits:
+                    field_hits.append(("provenance", pat_name, cnt))
+                if "provenance" in out:
+                    out["provenance"] = redacted_prov
+                if "provenance_json" in out:
+                    out["provenance_json"] = json.dumps(redacted_prov)
+
+        tags_obj: Any = out.get("tags")
+        if isinstance(tags_obj, str) and tags_obj:
+            try:
+                tags_obj = json.loads(tags_obj)
+            except (json.JSONDecodeError, TypeError):
+                tags_obj = None
+        if isinstance(tags_obj, (list, dict)):
+            redacted_tags, tag_hits = _redact_metadata_obj(tags_obj)
+            if tag_hits:
+                for pat_name, cnt in tag_hits:
+                    field_hits.append(("tags", pat_name, cnt))
+                out["tags"] = (
+                    json.dumps(redacted_tags) if isinstance(out.get("tags"), str) else redacted_tags
+                )
 
         if not field_hits:
             return out

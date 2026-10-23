@@ -43,6 +43,7 @@ from hotmem.policy import (
     DisclosureReport,
     PolicyConfig,
     PolicyError,
+    redact_structure,
     scan_and_redact_text,
 )
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
@@ -1541,26 +1542,57 @@ class HotMemRuntime:
                     if not ctx.can_access_row(row_probe, operation="read"):
                         continue
                     ev_mid = ev.get("memory_id") or payload.get("id")
-                    if ev_mid:
-                        mem_row = get_memory_metadata(db, str(ev_mid))
-                        if mem_row is not None:
-                            try:
-                                if ctx.apply_disclosure_to_row(mem_row, operation="read") is None:
-                                    continue
-                            except PolicyError:
-                                continue
+                    mem_row = get_memory_metadata(db, str(ev_mid)) if ev_mid else None
+                    probe = (
+                        mem_row
+                        if mem_row is not None
+                        else {
+                            **row_probe,
+                            "metadata_json": payload.get("metadata_json") or "{}",
+                            "tags": payload.get("tags") or "[]",
+                            "provenance_json": payload.get("provenance_json"),
+                        }
+                    )
+                    disclosed_probe = ctx.apply_disclosure_to_row(probe, operation="read")
+                    if disclosed_probe is None:
+                        continue
                     # Strip raw embedding blobs and full fact_text from the
                     # daemon activity stream.
                     sanitized_payload = dict(payload)
                     sanitized_payload.pop("embedding_b64", None)
                     sanitized_payload.pop("fact_text", None)
-                    if "source_uri" in sanitized_payload and ctx.redact_host_paths_enabled:
-                        sanitized_payload["source_uri"] = ctx.sanitize_source_uri(
-                            sanitized_payload.get("source_uri"), base_dir=self.base_dir
-                        )
-                    if isinstance(sanitized_payload.get("fact_summary"), str):
-                        red_sum, _ = scan_and_redact_text(sanitized_payload["fact_summary"])
-                        sanitized_payload["fact_summary"] = red_sum
+                    for key in (
+                        "identifier",
+                        "metadata_json",
+                        "provenance_json",
+                        "tags",
+                        "fact_summary",
+                        "parent_memory",
+                        "related_memories",
+                    ):
+                        if key in sanitized_payload and key in disclosed_probe:
+                            sanitized_payload[key] = disclosed_probe[key]
+                    secret_action, _ = ctx.effective_disclosure_actions(probe, operation="read")
+                    if secret_action != "allow":
+                        redacted_payload, hits = redact_structure(sanitized_payload)
+                        if hits:
+                            patterns = sorted({p for p, _ in hits})
+                            if secret_action == "fail_closed":
+                                raise PolicyError(
+                                    403,
+                                    "policy_disclosure_blocked",
+                                    "policy blocked disclosure of secret/PII "
+                                    f"pattern(s) in event {ev.get('seq')!r}",
+                                    detail={"reason": "secret_detected", "patterns": patterns},
+                                )
+                            if secret_action == "omit":
+                                continue
+                            sanitized_payload = redacted_payload
+                    for path_key in ("source_uri", "path", "root"):
+                        if path_key in sanitized_payload and ctx.redact_host_paths_enabled:
+                            sanitized_payload[path_key] = ctx.sanitize_source_uri(
+                                sanitized_payload.get(path_key), base_dir=self.base_dir
+                            )
                     filtered_events.append({**ev, "payload": sanitized_payload})
                 if len(filtered_events) >= limit or len(page) < limit:
                     break
