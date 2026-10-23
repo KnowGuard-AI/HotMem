@@ -136,6 +136,7 @@ def hydrate_handoff(
     pkg_dir: str,
     *,
     embedder=None,
+    target_namespace: str | None = None,
 ) -> HandoffHydrateResult:
     """Hydrate a verified handoff package into ``db`` atomically (#101).
 
@@ -172,18 +173,23 @@ def hydrate_handoff(
             "skipped": 0,
             "invalid": 0,
             "embedding_reused": 0,
+            "embedding_rb": 0,
             "embedding_rebuilt": 0,
             "embedding_missing": 0,
             "embedding_failed": 0,
         }
 
         def insert_records(records: list[dict[str, Any]]) -> None:
-            """Dedupe by content hash, resolve embeddings, insert, no commit."""
+            """Dedupe by (namespace, content_hash), resolve embeddings, insert, no commit."""
             if not records:
                 return
-            hashes = [r["content_hash"] for r in records]
-            existing = db.batch_existing_hashes(hashes)
-            todo = [r for r in records if r["content_hash"] not in existing]
+            pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in records]
+            existing = db.batch_existing_namespace_hashes(pairs)
+            todo = [
+                r
+                for r in records
+                if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
+            ]
             counters["skipped"] += len(records) - len(todo)
 
             rows = []
@@ -203,6 +209,8 @@ def hydrate_handoff(
             for line in verified.memory_lines():
                 try:
                     raw = json.loads(line)
+                    if target_namespace is not None and not raw.get("namespace"):
+                        raw = {**raw, "namespace": target_namespace}
                     rec = normalize_record(raw, default_source="handoff")
                 except Exception:
                     counters["invalid"] += 1
@@ -216,6 +224,8 @@ def hydrate_handoff(
             # 2. Exactly one resume-brief record (searchable, linked).
             brief_record = build_brief_record(verified)
             if brief_record is not None:
+                if target_namespace is not None:
+                    brief_record = {**brief_record, "namespace": target_namespace}
                 insert_records([normalize_record(brief_record, default_source="handoff")])
 
             # 3. Ledger + event inside the same transaction (#101 §11).
@@ -237,7 +247,7 @@ def hydrate_handoff(
             append_event(
                 db,
                 event_type=EventType.HANDOFF_APPLIED,
-                namespace="handoff",
+                namespace=target_namespace if target_namespace is not None else "handoff",
                 payload={
                     "handoff_id": handoff_id,
                     "package_id": package_id,

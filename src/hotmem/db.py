@@ -1431,13 +1431,14 @@ class MemoryDB:
         order: str = "asc",
         limit: int = 100,
         row_filter: Any | None = None,
+        row_transform: Any | None = None,
     ) -> list[dict[str, Any]]:
         """Return memories for an identifier in created_at order (chronological).
 
         Excludes TTL-expired memories, consistent with search.
         """
         direction = "ASC" if order.lower() == "asc" else "DESC"
-        if row_filter is None:
+        if row_filter is None and row_transform is None:
             rows = self._conn.execute(
                 f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
                            created_at
@@ -1462,11 +1463,17 @@ class MemoryDB:
         filtered: list[dict[str, Any]] = []
         for r in rows:
             d = dict(r)
-            if row_filter(d):
-                d.pop("namespace", None)
-                filtered.append(d)
-                if len(filtered) >= limit:
-                    break
+            if row_filter is not None and not row_filter(d):
+                continue
+            if row_transform is not None:
+                transformed = row_transform(d)
+                if transformed is None:
+                    continue
+                d = transformed
+            d.pop("namespace", None)
+            filtered.append(d)
+            if len(filtered) >= limit:
+                break
         return filtered
 
     def import_sqlite(self, src_path: str | Path) -> tuple[int, int]:

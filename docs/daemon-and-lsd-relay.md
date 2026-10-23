@@ -162,10 +162,51 @@ Closing or restarting the MCP host closes only the `stdio` relay; the daemon and
   `hotmem policy revoke --url ... --caller caller-b` or `--approval <id>`, and
   `hotmem policy reload --url ...` to re-read the policy file.
 - **Exports are self-describing.** Scoped snapshot/package exports record their
-  `scope`, `exported_count`, and `omitted_count` in the manifest/metadata and
-  redact host/database paths. Snapshot v2 records declare record schema 2;
-  interchange v1 records keep `schema_version: 1` and carry the stored row
-  version separately as `record_schema_version`.
+  `scope`, `exported_count`, `omitted_count`, `redacted_count`, and
+  `disclosure` summary in the manifest/metadata and redact host/database paths.
+  Snapshot v2 records declare record schema 2; interchange v1 records keep
+  `schema_version: 1` and carry the stored row version separately as
+  `record_schema_version`.
+
+### Scoped Disclosure & Privacy Policy Contract (#110)
+
+When a policy (`--policy` or `<mount>/policy.json`) is active, `HotMemRuntime`
+enforces both **pre-ranking namespace/share scope** and **outbound disclosure
+rules** across retrieval (`search`, `list`, `get_memory`, `hydrate`,
+`hydrate-batch`, `files`, `promotion/candidates`, `promotion/by-state`,
+`events`, `hygiene`, `health`, `vector-index/status`) and exports (`snapshot`):
+
+| Policy Field | Values | Default | Behavior |
+| --- | --- | --- | --- |
+| `secret_action` | `"allow"` \| `"redact"` \| `"omit"` \| `"fail_closed"` | `"redact"` on shared (`ShareApproval`) access; `"allow"` on direct self-owned namespaces unless explicitly set | Controls how secret-shaped (`api_key`, `bearer_token`, `private_key`, `prefixed_credential`, `dsn_inline_password`) and PII (`pii_ssn`, `pii_email`) patterns are handled in text, summaries, hydrated file bytes, and metadata. |
+| `private_classification_action` | `"allow"` \| `"omit"` \| `"fail_closed"` | `"omit"` on shared (`ShareApproval`) access; `"allow"` on direct self-owned namespaces unless explicitly set | Controls how records tagged with `metadata.classification` / `visibility` in `{"private", "secret", "confidential", "restricted"}` (or `metadata.private: true`) are handled. |
+| `redact_host_paths` | `true` \| `false` | `true` | Strips absolute host directory prefixes from `source_uri` in API responses, hygiene warnings, events, and exports, and omits `db_path`/`host` from health, vector status, and Snapshot v2 `metadata.json`. |
+| `allow_attachments` | `true` \| `false` | `false` (`true` for `is_management`) | Gates `copy_attachments=true` on `/v1/snapshot` (403 `attachments_not_permitted` when disabled). |
+
+- **Pre-ranking candidate selection:** Scope (`ctx.can_access_row`) and
+  disclosure transforms (`omit` / `redact` / `fail_closed`) run **before** FTS
+  BM25 min/max normalization, hybrid score sorting, second-stage MMR reranking,
+  and `top_k` / `max_chars` truncation. When the optional derived `VectorIndex`
+  is active and out-of-scope private vectors crowd the ANN oversample window,
+  search automatically falls back to the exact scoped SQLite scan so authorized
+  callers are never starved.
+- **Inbound bulk-import confinement:** `POST /v1/hydrate` and
+  `POST /v1/handoff/hydrate` verify artifact integrity first, then validate
+  every record's target namespace against `ctx.can_access_namespace(..., operation="write")`
+  before committing any rows. Handoff packages hydrated through a scoped daemon
+  caller bind unscoped records and the resume brief to the caller's
+  `effective_write_namespace`.
+- **Distinct security guarantees (Scoped Snapshot vs. Consented Handoff):**
+
+| Guarantee Dimension | Scoped Snapshot (`POST /v1/snapshot`) | Consented Handoff (`POST /v1/handoff/prepare`) |
+| --- | --- | --- |
+| **Primary Purpose** | Portable cassette backup/clone of authorized SQLite rows (`.jsonl`, Snapshot v2, `hotmem-interchange-v1`) | Bounded session transfer (`hotmem-handoff-v1`) with `resume-brief.json` and inert history |
+| **API Authorization** | Requires `export` + `read` on permitted namespaces / `ShareApproval` | Requires `export` operation and path confined to `base_dir` |
+| **Explicit User Consent** | Not required (governed by caller credential & share policy) | **Mandatory** non-empty `consent` verified before reading source lines |
+| **Secret / PII Redaction** | Configurable per credential/share (`allow`, `redact`, `omit`, `fail_closed`); recomputes `content_hash` and embeddings when redacted | Always-on 3-layer redaction (`redact.py`) + fail-closed `assert_no_secrets` output gate |
+| **Tool Execution Safety** | Stores declarative facts and file pointers only | Forces `executable=false` on all historical tool calls |
+| **Artifact Integrity** | SHA-256 per-file & overall digests (`hotmem verify`) | SHA-256 per-file, `package_id`, and `handoff_id` (`hotmem handoff verify`) |
+| **Encryption & Signing** | Not provided (plaintext JSONL/JSON; use OS/volume or external age/GPG encryption) | Not provided (plaintext JSONL/JSON; checksums prove integrity, not cryptographic authorship) |
 
 ### Store schema migration (v5 -> v6)
 

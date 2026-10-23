@@ -405,6 +405,7 @@ def snapshot(
     include_embeddings: bool = True,
     on_progress: Callable[[int], None] | None = None,
     row_filter: Callable[[dict], bool] | None = None,
+    row_transform: Callable[[dict], dict | None] | None = None,
 ) -> SnapshotResult:
     """Export memories from the database to a JSONL or JSONL.GZ swap file.
 
@@ -420,6 +421,11 @@ def snapshot(
             for row in db.iter_rows(include_embedding=include_embeddings):
                 if row_filter is not None and not row_filter(row):
                     continue
+                if row_transform is not None:
+                    transformed = row_transform(row)
+                    if transformed is None:
+                        continue
+                    row = transformed
                 embedding = row.pop("embedding", None)
                 if embedding is not None:
                     row["embedding_b64"] = base64.b64encode(embedding).decode("ascii")
