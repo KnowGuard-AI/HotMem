@@ -1977,3 +1977,63 @@ def test_mvt110_5c_health_policy_fields(tmp_path: Path):
         assert authenticated.json()["memory_count"] == 0
         assert authenticated.json()["policy_enforced"] is True
         assert authenticated.json()["policy_revision"] == policy.revision
+
+
+def test_mvt110_2e_list_files_does_not_probe_out_of_base_paths(tmp_path: Path):
+    """Scoped file listing must not stat host paths outside the base directory."""
+    from hotmem.db import MemoryDB
+    from hotmem.embed import DEFAULT_EMBEDDER
+    from hotmem.memory import FileRef, add_file_backed
+
+    base_dir = tmp_path / "workspace"
+    base_dir.mkdir()
+    outside = tmp_path / "outside-listed.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    db = MemoryDB(base_dir / "mvt110_2e.sqlite")
+    add_file_backed(
+        db,
+        "ops/outside",
+        FileRef(
+            source_uri=str(outside),
+            byte_offset=0,
+            byte_length=outside.stat().st_size,
+            source_format="text/plain",
+        ),
+        summary="outside listing",
+        namespace="shared/ops",
+        embedder=DEFAULT_EMBEDDER,
+    )
+    db.close()
+
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-files",
+                caller_id="files",
+                store_id="store-110",
+                namespaces=("files/private",),
+                operations=("read",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-files",
+                        namespace="shared/ops",
+                        audience=("files",),
+                        operations=("read",),
+                        secret_action="redact",
+                        private_classification_action="omit",
+                    ),
+                ),
+            )
+        ],
+    )
+    app = create_app(db_path=base_dir / "mvt110_2e.sqlite", base_dir=base_dir, policy=policy)
+    with TestClient(app) as client:
+        files = client.get("/v1/files", headers=_hdr("tok-files"))
+        assert files.status_code == 200
+        assert files.json()["count"] == 1
+        entry = files.json()["files"][0]
+        assert entry["source_uri"] == ""
+        assert entry["exists"] is False
+        assert str(tmp_path) not in files.text

@@ -1384,17 +1384,18 @@ class HotMemRuntime:
                         continue
                     row = disclosed
                 source_uri = row.get("source_uri") or ""
+                display_uri = ctx.sanitize_source_uri(source_uri, base_dir=self.base_dir)
                 exists = False
                 size = row.get("byte_length") or 0
-                if source_uri:
-                    resolved = source_uri
-                    if "://" not in source_uri and not Path(source_uri).is_absolute():
-                        resolved = str(Path(self.base_dir) / source_uri)
+                stat_uri = display_uri
+                if stat_uri and "://" not in stat_uri and not Path(stat_uri).is_absolute():
+                    stat_uri = str(Path(self.base_dir) / stat_uri)
+                if stat_uri:
                     try:
-                        adapter = get_adapter(resolved)
-                        exists = adapter.exists(resolved)
+                        adapter = get_adapter(stat_uri)
+                        exists = adapter.exists(stat_uri)
                         if exists:
-                            meta = adapter.metadata(resolved)
+                            meta = adapter.metadata(stat_uri)
                             size = meta["size"]
                     except Exception:
                         pass
@@ -1402,7 +1403,7 @@ class HotMemRuntime:
                     {
                         "memory_id": row["id"],
                         "identifier": row["identifier"],
-                        "source_uri": ctx.sanitize_source_uri(source_uri, base_dir=self.base_dir),
+                        "source_uri": display_uri,
                         "byte_offset": row.get("byte_offset") or 0,
                         "byte_length": row.get("byte_length") or 0,
                         "source_format": row.get("source_format") or "",
