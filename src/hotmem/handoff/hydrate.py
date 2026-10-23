@@ -173,7 +173,6 @@ def hydrate_handoff(
             "skipped": 0,
             "invalid": 0,
             "embedding_reused": 0,
-            "embedding_rb": 0,
             "embedding_rebuilt": 0,
             "embedding_missing": 0,
             "embedding_failed": 0,
