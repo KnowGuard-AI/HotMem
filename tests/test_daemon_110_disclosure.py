@@ -1480,7 +1480,7 @@ def test_mvt110_4b_unportable_file_refs_are_omitted_not_dangling(tmp_path: Path)
         assert body["disclosure"]["omitted_count"] == 1
         assert "file_reference_unavailable" in body["disclosure"]["reasons"]
 
-        pkg = Path(body["path"])
+        pkg = Path(base_dir, body["path"])
         assert verify_snapshot(pkg)["record_count"] == 0
         restored = MemoryDB(base_dir / "restored.sqlite")
         hydrated = snapshot_hydrate(restored, pkg)
@@ -1661,3 +1661,102 @@ def test_mvt110_1c_policy_defaults_apply_to_shared_access(tmp_path: Path):
         )
         assert blocked.status_code == 403
         assert blocked.json()["reason"] == "private_classification"
+
+
+def test_mvt110_5b_operation_paths_are_not_disclosed(tmp_path: Path):
+    """Scoped responses must not reveal absolute host/base paths."""
+    import json as _json
+
+    base_dir = tmp_path / "workspace"
+    base_dir.mkdir()
+    db_path = base_dir / "mvt110_5b.sqlite"
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-writer",
+                caller_id="writer",
+                store_id="store-110",
+                namespaces=("shared/ops",),
+                operations=("read", "write"),
+            ),
+            CallerCredential.from_token(
+                token="tok-export",
+                caller_id="exporter",
+                store_id="store-110",
+                namespaces=("export/private",),
+                operations=("read", "export", "hydrate"),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-path",
+                        namespace="shared/ops",
+                        audience=("exporter",),
+                        operations=("read", "export", "hydrate", "write"),
+                        secret_action="redact",
+                        private_classification_action="omit",
+                    ),
+                ),
+            ),
+        ],
+    )
+    app = create_app(db_path=db_path, base_dir=base_dir, policy=policy)
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/v1/add",
+                headers=_hdr("tok-writer", ns="shared/ops", session="s-w"),
+                json={"identifier": "ops/path", "fact": "path sanitization fact"},
+            ).status_code
+            == 200
+        )
+        exported = client.post(
+            "/v1/snapshot",
+            headers=_hdr("tok-export"),
+            json={"path": "export/pkg", "package": True},
+        )
+        assert exported.status_code == 200
+        assert exported.json()["path"] == "export/pkg"
+        assert str(base_dir) not in exported.text
+
+        hydrated = client.post(
+            "/v1/hydrate",
+            headers=_hdr("tok-export"),
+            json={"path": "export/pkg"},
+        )
+        assert hydrated.status_code == 200
+        assert hydrated.json()["path"] == "export/pkg"
+        assert str(base_dir) not in hydrated.text
+
+        codex = base_dir / "codex_src"
+        codex.mkdir()
+        (codex / "export.json").write_text(
+            _json.dumps({"format": "codex-export-v1", "session": {"id": "s-path", "label": "l"}}),
+            encoding="utf-8",
+        )
+        (codex / "session.jsonl").write_text(
+            _json.dumps({"id": "e1", "seq": 1, "type": "decision", "text": "decision text"}) + "\n",
+            encoding="utf-8",
+        )
+        prepared = client.post(
+            "/v1/handoff/prepare",
+            headers=_hdr("tok-export"),
+            json={
+                "source": "codex_src",
+                "output": "handoff_pkg",
+                "mode": "resume",
+                "consent": "approved",
+            },
+        )
+        assert prepared.status_code == 200, prepared.text
+        assert prepared.json()["path"] == "handoff_pkg"
+        assert str(base_dir) not in prepared.text
+
+        inspected = client.get(
+            "/v1/handoff/inspect",
+            headers=_hdr("tok-export"),
+            params={"package": "handoff_pkg"},
+        )
+        assert inspected.status_code == 200
+        assert inspected.json()["path"] == "handoff_pkg"
+        assert str(base_dir) not in inspected.text

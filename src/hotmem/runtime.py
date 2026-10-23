@@ -1124,7 +1124,7 @@ class HotMemRuntime:
             "loaded": result.loaded,
             "skipped_dupes": result.skipped_dupes,
             "invalid": result.invalid,
-            "path": resolved_target,
+            "path": ctx.sanitize_source_uri(resolved_target, base_dir=self.base_dir),
             **result.disposition(),
         }
 
@@ -1249,7 +1249,7 @@ class HotMemRuntime:
             )
         out: dict[str, Any] = {
             "exported": result.exported,
-            "path": result.path,
+            "path": ctx.sanitize_source_uri(result.path, base_dir=self.base_dir),
         }
         if ctx.policy_enforced and report is not None:
             out["disclosure"] = report.to_dict()
@@ -1288,7 +1288,7 @@ class HotMemRuntime:
                 "redacted_count": result.coverage["redacted_count"],
                 "recoverable_count": result.coverage["recoverable_count"],
             },
-            "path": result.path,
+            "path": ctx.sanitize_source_uri(result.path, base_dir=self.base_dir),
             "timings_ms": result.timings_ms,
         }
 
@@ -1305,7 +1305,10 @@ class HotMemRuntime:
 
     def handoff_inspect(self, ctx: CallerContext, *, package: str) -> dict[str, Any]:
         ctx.require_operation("read")
-        return inspect_handoff(str(self._confine_path(ctx, package, kind="handoff package")))
+        report = inspect_handoff(str(self._confine_path(ctx, package, kind="handoff package")))
+        if isinstance(report, dict) and "path" in report:
+            report["path"] = ctx.sanitize_source_uri(report.get("path"), base_dir=self.base_dir)
+        return report
 
     def handoff_hydrate(self, ctx: CallerContext, *, package: str) -> dict[str, Any]:
         ctx.require_operation("hydrate")
@@ -1388,6 +1391,18 @@ class HotMemRuntime:
             ctx.require_operation("manage")
         with self._read_db() as db, Timer() as t:
             rows = db.list_bundle_index()
+        if ctx.redact_host_paths_enabled:
+            rows = [
+                {
+                    **row,
+                    **{
+                        key: ctx.sanitize_source_uri(row.get(key), base_dir=self.base_dir)
+                        for key in ("path", "primary_file")
+                        if key in row
+                    },
+                }
+                for row in rows
+            ]
         return {"bundles": rows, "count": len(rows), "trace_ms": round(t.ms, 2)}
 
     def discover(self, ctx: CallerContext, *, root: str, max_depth: int = 10) -> dict[str, Any]:
