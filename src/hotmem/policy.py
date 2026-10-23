@@ -183,7 +183,6 @@ class PolicyError(Exception):
         payload: dict[str, Any] = {
             "error": self.error,
             "message": self.message,
-            "detail": self.message,
         }
         payload.update(self.detail)
         return payload
