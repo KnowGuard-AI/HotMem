@@ -156,4 +156,4 @@ def test_mmvt6_two_client_direct_vs_loopback_http_baseline():
     assert report["loopback_http_pooled"]["wall_p50_ms"] >= 0.0
     assert report["loopback_http_pooled"]["trace_p50_ms"] >= 0.0
     assert "approx_transport_delta_p50_ms" in report["loopback_http_pooled"]
-    assert report["rss_mb"] > 0.0
+    assert report["rss_mb"] >= 0.0  # best-effort on platforms without psapi

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import resource
 import socket
 import statistics
 import tempfile
@@ -33,15 +32,53 @@ def _percentile(sorted_vals: list[float], p: float) -> float:
 
 
 def _rss_mb() -> float:
-    ru = resource.getrusage(resource.RUSAGE_SELF)
-    # On macOS (darwin), ru_maxrss is in bytes; on Linux it is in kilobytes.
-    divisor = (1024.0 * 1024.0) if os.uname().sysname == "Darwin" else 1024.0
-    return round(ru.ru_maxrss / divisor, 2)
+    """Resident set size in MiB (cross-platform, best effort)."""
+    try:
+        import resource
+
+        ru = resource.getrusage(resource.RUSAGE_SELF)
+        # On macOS (darwin), ru_maxrss is in bytes; on Linux it is kilobytes.
+        sysname = os.uname().sysname if hasattr(os, "uname") else ""
+        divisor = (1024.0 * 1024.0) if sysname == "Darwin" else 1024.0
+        return round(ru.ru_maxrss / divisor, 2)
+    except (ImportError, AttributeError):
+        pass
+
+    # Windows: PROCESS_MEMORY_COUNTERS.WorkingSetSize via psapi.
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        counters = ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(ProcessMemoryCounters)
+        kernel32 = ctypes.windll.kernel32
+        psapi = ctypes.windll.psapi
+        if not psapi.GetProcessMemoryInfo(
+            kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+        ):
+            return 0.0
+        return round(counters.WorkingSetSize / (1024.0 * 1024.0), 2)
+    except Exception:
+        return 0.0
 
 
 def _cpu_seconds() -> float:
-    ru = resource.getrusage(resource.RUSAGE_SELF)
-    return round(ru.ru_utime + ru.ru_stime, 4)
+    # time.process_time() is process CPU time and works on every platform.
+    return round(time.process_time(), 4)
 
 
 def run_baseline(reads_per_client: int = 25, warmup: int = 5) -> dict[str, Any]:
@@ -185,8 +222,7 @@ def run_baseline(reads_per_client: int = 25, warmup: int = 5) -> dict[str, Any]:
 
                 for i in range(10):
                     shared_text = (
-                        f"Incident DEMO-{i}: roll back worker release v2.4.{i} "
-                        "before queue resume."
+                        f"Incident DEMO-{i}: roll back worker release v2.4.{i} before queue resume."
                     )
                     client_a.add(
                         f"ops/demo-{i}",
@@ -241,9 +277,7 @@ def run_baseline(reads_per_client: int = 25, warmup: int = 5) -> dict[str, Any]:
         "rss_mb": _rss_mb(),
         "direct": {
             "samples": len(direct_wall_ms),
-            "payload_bytes_avg": round(
-                direct_payload_bytes / max(1, len(direct_wall_ms)), 1
-            ),
+            "payload_bytes_avg": round(direct_payload_bytes / max(1, len(direct_wall_ms)), 1),
             "wall_p50_ms": _percentile(direct_wall_sorted, 50),
             "wall_p95_ms": _percentile(direct_wall_sorted, 95),
             "wall_mean_ms": round(statistics.mean(direct_wall_ms), 3),
@@ -253,9 +287,7 @@ def run_baseline(reads_per_client: int = 25, warmup: int = 5) -> dict[str, Any]:
         },
         "loopback_http_pooled": {
             "samples": len(http_wall_ms),
-            "payload_bytes_avg": round(
-                http_payload_bytes / max(1, len(http_wall_ms)), 1
-            ),
+            "payload_bytes_avg": round(http_payload_bytes / max(1, len(http_wall_ms)), 1),
             "wall_p50_ms": _percentile(http_wall_sorted, 50),
             "wall_p95_ms": _percentile(http_wall_sorted, 95),
             "wall_mean_ms": round(statistics.mean(http_wall_ms), 3),
