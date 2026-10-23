@@ -145,6 +145,10 @@ Closing or restarting the MCP host closes only the `stdio` relay; the daemon and
   read-only WAL connections; the shared write connection is never read
   concurrently mid-transaction. Slow writes and exports do not block
   `/v1/health` or basic reads.
+- **Scoped diagnostics are O(rows) under redaction.** `/v1/health` and
+  `/v1/vector-index/status` scan visible rows and run disclosure patterns to
+  produce scoped counts; this is linear in store size and should be monitored
+  on large stores.
 - **Scoped diagnostics.** `/v1/hygiene`, `/v1/events`, `/v1/health`, and
   snapshots report only the caller's permitted rows; health exposes
   `store_state` as `verified_empty`, `ready`, or `empty_scope`, and omits
@@ -218,6 +222,14 @@ rules** across retrieval (`search`, `list`, `get_memory`, `hydrate`,
   that is not valid UTF-8 returns `403 policy_disclosure_blocked`
   (`reason: non_text_payload`) when `secret_action` is not `allow`; bytes are
   never decoded and re-encoded destructively.
+- **PII patterns are opinionated.** `pii_email` matches ordinary addresses
+  (support aliases, bot accounts) and `pii_ssn` matches 3-2-4 digit strings, so
+  shared rows can be redacted or fail closed on benign data. Set
+  `secret_action: "allow"` for a share when those patterns are unacceptable.
+- **Artifact validation is point-in-time.** `hydrate` scans namespaces before
+  the loader re-reads the artifact; a caller with write access to `base_dir`
+  could race a replacement between the two reads. Treat the daemon base
+  directory as trusted operator-controlled storage.
 - **Event payloads obey the same disclosure action.** `metadata_json`,
   `provenance_json`, `tags`, `identifier`, and `fact_summary` are redacted,
   omitted, or fail closed before an event is returned.
