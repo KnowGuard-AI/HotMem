@@ -314,7 +314,7 @@ def _stop_sidecar(proc: subprocess.Popen) -> None:
             subprocess.run(
                 ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                 capture_output=True,
-                check=True,
+                check=False,
                 timeout=10,
             )
         else:
@@ -372,8 +372,16 @@ def _sidecar(mount: Path):
                 yield client, proc
         finally:
             _stop_sidecar(proc)
-            with socket.socket() as probe:
-                assert probe.connect_ex(("127.0.0.1", port)) != 0, "sidecar child still listening"
+            # Windows may take a moment to tear down the console-script
+            # child's listening socket after the process tree is killed.
+            deadline = time.monotonic() + 10
+            while True:
+                with socket.socket() as probe:
+                    if probe.connect_ex(("127.0.0.1", port)) != 0:
+                        break
+                if time.monotonic() > deadline:
+                    pytest.fail("sidecar child still listening after stop")
+                time.sleep(0.05)
 
 
 def test_installed_cli_http_restart_and_verified_restore(tmp_path: Path):
