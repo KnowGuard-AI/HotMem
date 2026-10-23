@@ -1202,21 +1202,20 @@ class HotMemRuntime:
             disclosed = ctx.apply_disclosure_to_row(row, report=row_report, operation="export")
             if disclosed is None:
                 return None
-            text_changed = disclosed.get("fact_text") != row.get("fact_text") or disclosed.get(
-                "fact_summary"
-            ) != row.get("fact_summary")
-            if text_changed:
-                if disclosed.get("memory_type") != "file":
-                    disclosed["content_hash"] = compute_content_hash(
-                        str(disclosed.get("identifier") or ""),
-                        str(disclosed.get("fact_text") or ""),
-                    )
-                if disclosed.get("embedding") is not None:
-                    embed_text = str(
-                        disclosed.get("fact_text") or disclosed.get("fact_summary") or ""
-                    )
-                    if embed_text:
-                        disclosed["embedding"] = pack_embedding(self.embedder.embed(embed_text))
+            fact_text_changed = disclosed.get("fact_text") != row.get("fact_text")
+            summary_changed = disclosed.get("fact_summary") != row.get("fact_summary")
+            if fact_text_changed and disclosed.get("memory_type") != "file":
+                disclosed["content_hash"] = compute_content_hash(
+                    str(disclosed.get("identifier") or ""),
+                    str(disclosed.get("fact_text") or ""),
+                )
+            embed_input_changed = fact_text_changed or (
+                disclosed.get("memory_type") == "file" and summary_changed
+            )
+            if embed_input_changed and disclosed.get("embedding") is not None:
+                embed_text = str(disclosed.get("fact_text") or disclosed.get("fact_summary") or "")
+                if embed_text:
+                    disclosed["embedding"] = pack_embedding(self.embedder.embed(embed_text))
             if ctx.redact_host_paths_enabled and disclosed.get("source_uri"):
                 disclosed["source_uri"] = ctx.sanitize_source_uri(
                     disclosed.get("source_uri"), base_dir=self.base_dir
@@ -1602,6 +1601,11 @@ class HotMemRuntime:
                 page = listing["events"]
                 if not page:
                     break
+                page_ids = [
+                    str(ev.get("memory_id") or (ev.get("payload") or {}).get("id") or "")
+                    for ev in page
+                ]
+                page_meta = db.get_memories(page_ids)
                 for ev in page:
                     last_scanned_seq = int(ev["seq"])
                     ev_ns = str(ev.get("namespace") or "")
@@ -1614,7 +1618,7 @@ class HotMemRuntime:
                     if not ctx.can_access_row(row_probe, operation="read"):
                         continue
                     ev_mid = ev.get("memory_id") or payload.get("id")
-                    mem_row = get_memory_metadata(db, str(ev_mid)) if ev_mid else None
+                    mem_row = page_meta.get(str(ev_mid)) if ev_mid else None
                     probe = (
                         mem_row
                         if mem_row is not None

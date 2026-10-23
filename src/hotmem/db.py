@@ -609,6 +609,25 @@ class MemoryDB:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_memories(self, memory_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Return metadata rows for ``memory_ids`` keyed by id (one query per chunk)."""
+        wanted = [str(i) for i in dict.fromkeys(memory_ids) if i]
+        if not wanted:
+            return {}
+        cols = ", ".join(_MEMORY_COLUMNS)
+        found: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(wanted), 900):
+            chunk = wanted[start : start + 900]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"SELECT {cols} FROM memories WHERE id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                entry = dict(row)
+                found[str(entry["id"])] = entry
+        return found
+
     # ── Promotion lifecycle (#42) ───────────────────────────────────────
 
     def update_promotion_state(
