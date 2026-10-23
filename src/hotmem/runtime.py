@@ -1123,11 +1123,17 @@ class HotMemRuntime:
 
             if _detect_snapshot_format(resolved_target) in ("v2", "package"):
                 _verify_snapshot(resolved_target)
+        target_ns = ctx.hydrate_target_namespace()
         # Validate every imported namespace against the caller's write scope
         # before any record is written (fail closed, no partial import).
-        self._guard_hydrate_scope(ctx, resolved_target)
+        self._guard_hydrate_scope(ctx, resolved_target, default_namespace=target_ns)
         with self._write_slot() as db:
-            result = snapshot_hydrate(db, resolved_target, embedder=self.embedder)
+            result = snapshot_hydrate(
+                db,
+                resolved_target,
+                embedder=self.embedder,
+                target_namespace=target_ns or None,
+            )
             emit_import_event(
                 db,
                 path=resolved_target,
@@ -1332,7 +1338,7 @@ class HotMemRuntime:
         if ctx.policy_enforced:
             # Integrity before scope checks (and before any write).
             verify_handoff(resolved_package)
-            target_ns = ctx.effective_write_namespace
+            target_ns = ctx.hydrate_target_namespace()
         self._guard_hydrate_scope(
             ctx,
             resolved_package,

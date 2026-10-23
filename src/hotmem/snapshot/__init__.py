@@ -159,6 +159,7 @@ def hydrate(
     path: str | Path,
     *,
     embedder: Embedder | None = None,
+    target_namespace: str | None = None,
 ) -> HydrateResult:
     """Import memories from ``path`` using the format inferred from the path.
 
@@ -192,26 +193,33 @@ def hydrate(
             is_bundle = False
         if is_bundle:
             _trace.info("dispatch", "bundle hydrate", detail={"path": str(p)})
-            return read_bundle(db, p, embedder=embedder).as_hydrate_result
+            return read_bundle(
+                db, p, embedder=embedder, target_namespace=target_namespace
+            ).as_hydrate_result
         if is_manifest_dir:
             if _manifest_format(p) == PACKAGE_FORMAT_ID:
                 _trace.info("dispatch", "package hydrate", detail={"path": str(p)})
-                return hydrate_package(db, p, embedder=embedder)
+                return hydrate_package(db, p, embedder=embedder, target_namespace=target_namespace)
             _trace.info("dispatch", "v2 directory hydrate", detail={"path": str(p)})
-            return hydrate_v2(db, p, embedder=embedder)
+            return hydrate_v2(db, p, embedder=embedder, target_namespace=target_namespace)
         if (p / MEMORIES_NAME).is_file():
             _trace.info(
                 "dispatch",
                 "legacy hydrate (memories.jsonl, no manifest)",
                 detail={"path": str(p / MEMORIES_NAME)},
             )
-            return legacy_hydrate(db, p / MEMORIES_NAME, embedder=embedder)
+            return legacy_hydrate(
+                db,
+                p / MEMORIES_NAME,
+                embedder=embedder,
+                target_namespace=target_namespace,
+            )
         # Directory with neither memory.md, manifest, nor memories.jsonl.
         raise SnapshotChecksumError("missing_manifest", file=str(p / MANIFEST_NAME))
 
     # File -> legacy reader.
     _trace.info("dispatch", "legacy single-file hydrate", detail={"path": str(p)})
-    return legacy_hydrate(db, p, embedder=embedder)
+    return legacy_hydrate(db, p, embedder=embedder, target_namespace=target_namespace)
 
 
 def verify(path: str | Path) -> dict:

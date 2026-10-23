@@ -303,6 +303,7 @@ def hydrate_package(
     pkg_dir: str | Path,
     *,
     embedder: Embedder | None = None,
+    target_namespace: str | None = None,
 ) -> HydrateResult:
     """Verify, then restore a package in one transaction (#69).
 
@@ -394,6 +395,8 @@ def hydrate_package(
                     continue
                 try:
                     rec = normalize_record(record, default_source="interchange")
+                    if target_namespace is not None and not rec.get("namespace"):
+                        rec["namespace"] = target_namespace
                 except AnnotationValidationError as err:
                     # Malformed known envelope structure: the RECORD is
                     # invalid (#79) — counted and skipped, never a

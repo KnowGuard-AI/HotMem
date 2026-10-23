@@ -1686,7 +1686,7 @@ def test_mvt110_5b_operation_paths_are_not_disclosed(tmp_path: Path):
                 caller_id="exporter",
                 store_id="store-110",
                 namespaces=("export/private",),
-                operations=("read", "export", "hydrate"),
+                operations=("read", "write", "export", "hydrate"),
                 share_approvals=(
                     ShareApproval(
                         approval_id="share-path",
@@ -1857,3 +1857,86 @@ def test_mvt110_1d_ann_window_does_not_starve_after_disclosure_omission(tmp_path
         assert result.status_code == 200
         assert result.json()["count"] == 1
         assert result.json()["memories"][0]["memory_id"] == clean_id
+
+
+def test_mvt110_3b_unscoped_hydrate_binds_to_caller_namespace(tmp_path: Path):
+    """Generic hydrate must bind unscoped legacy artifacts like handoff hydration does."""
+    import json as _json
+
+    base_dir = tmp_path / "workspace"
+    base_dir.mkdir()
+    (base_dir / "unscoped.jsonl").write_text(
+        _json.dumps(
+            {
+                "identifier": "ops/legacy",
+                "fact_text": "legacy unscoped note",
+                "content_hash": "legacy-hash-1",
+                "source": "legacy",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (base_dir / "unscoped2.jsonl").write_text(
+        _json.dumps(
+            {
+                "identifier": "ops/legacy-two",
+                "fact_text": "second unscoped note",
+                "content_hash": "legacy-hash-2",
+                "source": "legacy",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-p",
+                caller_id="p",
+                store_id="store-110",
+                namespaces=("b/priv",),
+                operations=("read", "write", "hydrate"),
+            ),
+            CallerCredential.from_token(
+                token="tok-q",
+                caller_id="q",
+                store_id="store-110",
+                namespaces=("q/priv",),
+                operations=("read",),
+            ),
+        ],
+    )
+    app = create_app(db_path=base_dir / "mvt110_3b.sqlite", base_dir=base_dir, policy=policy)
+    with TestClient(app) as client:
+        pinned = client.post(
+            "/v1/hydrate",
+            headers=_hdr("tok-p", ns="b/priv"),
+            json={"path": "unscoped.jsonl"},
+        )
+        assert pinned.status_code == 200, pinned.text
+        assert pinned.json()["loaded"] == 1
+
+        unpinned = client.post(
+            "/v1/hydrate", headers=_hdr("tok-p"), json={"path": "unscoped2.jsonl"}
+        )
+        assert unpinned.status_code == 200, unpinned.text
+        assert unpinned.json()["loaded"] == 1
+
+        mine = client.get(
+            "/v1/memories", headers=_hdr("tok-p"), params={"identifier": "ops/legacy"}
+        )
+        assert mine.status_code == 200
+        assert mine.json()["count"] == 1
+
+        mine2 = client.get(
+            "/v1/memories", headers=_hdr("tok-p"), params={"identifier": "ops/legacy-two"}
+        )
+        assert mine2.json()["count"] == 1
+
+        other = client.get(
+            "/v1/memories", headers=_hdr("tok-q"), params={"identifier": "ops/legacy"}
+        )
+        assert other.json()["count"] == 0

@@ -517,6 +517,17 @@ class CallerContext:
             )
         return target
 
+    def hydrate_target_namespace(self) -> str:
+        """Namespace to bind unscoped imported records to ("" = leave as-is)."""
+        if not self.policy_enforced or self.credential is None:
+            return self.namespace or ""
+        if self.namespace is not None:
+            return self.effective_write_namespace
+        cred = self.credential
+        if cred.namespaces and "*" not in cred.namespaces:
+            return self.effective_write_namespace
+        return ""
+
     def require_operation(self, operation: str) -> None:
         if not self.policy_enforced or self.credential is None:
             return

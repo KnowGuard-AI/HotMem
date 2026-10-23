@@ -226,6 +226,7 @@ def hydrate(
     *,
     on_progress: Callable[[int], None] | None = None,
     embedder: Embedder | None = None,
+    target_namespace: str | None = None,
 ) -> HydrateResult:
     """Load memories from a swap file into the database.
 
@@ -295,6 +296,8 @@ def hydrate(
                         continue
                     try:
                         rec = normalize_record(record)
+                        if target_namespace is not None and not rec.get("namespace"):
+                            rec["namespace"] = target_namespace
                     except AnnotationValidationError as err:
                         counters["invalid"] += 1  # malformed envelope: skip record (#79)
                         _trace.debug(
