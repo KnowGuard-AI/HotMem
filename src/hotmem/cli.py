@@ -375,14 +375,8 @@ def mcp(
     """Start the HotMem MCP server on stdio (--url for daemon relay, --mount/--db for embedded)."""
     import asyncio
 
-    try:
-        from hotmem.mcp_server import run as run_mcp_server
-        from hotmem.mcp_server import run_relay as run_mcp_relay
-    except ImportError as err:
-        raise click.ClickException(
-            "MCP support is not installed. Install it with: uv pip install 'hotmem[mcp]'"
-        ) from err
-
+    # Validate the target before importing the optional MCP extra so the
+    # argument contract is identical with and without `hotmem[mcp]`.
     if url and (mount or db_path):
         raise click.ClickException(
             "pass either --url (daemon relay mode) or --mount/--db (embedded mode), not both"
@@ -392,6 +386,14 @@ def mcp(
             "mcp requires an explicit target: pass --url URL for daemon relay mode "
             "or --mount DIR / --db PATH for embedded mode"
         )
+
+    try:
+        from hotmem.mcp_server import run as run_mcp_server
+        from hotmem.mcp_server import run_relay as run_mcp_relay
+    except ImportError as err:
+        raise click.ClickException(
+            "MCP support is not installed. Install it with: uv pip install 'hotmem[mcp]'"
+        ) from err
 
     if url:
         _trace.info(
