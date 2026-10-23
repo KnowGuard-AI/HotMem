@@ -1949,8 +1949,8 @@ def test_mvt110_3b_unscoped_hydrate_binds_to_caller_namespace(tmp_path: Path):
         assert other.json()["count"] == 0
 
 
-def test_mvt110_5c_health_liveness_and_policy_fields(tmp_path: Path):
-    """Health must expose a leak-free liveness probe and policy revision metadata."""
+def test_mvt110_5c_health_policy_fields(tmp_path: Path):
+    """Authenticated health must expose scoped counts and policy revision metadata."""
     policy = PolicyConfig(
         store_id="store-110",
         require_auth=True,
@@ -1966,15 +1966,8 @@ def test_mvt110_5c_health_liveness_and_policy_fields(tmp_path: Path):
     )
     app = create_app(db_path=tmp_path / "mvt110_5c.sqlite", base_dir=tmp_path, policy=policy)
     with TestClient(app) as client:
-        live = client.get("/v1/health")
-        assert live.status_code == 200
-        body = live.json()
-        assert body["status"] == "ok"
-        assert body["policy_enforced"] is True
-        assert body["policy_revision"] == policy.revision
-        assert body["store_id"] == "store-110"
-        assert "memory_count" not in body
-        assert "db_path" not in body
+        unauthenticated = client.get("/v1/health")
+        assert unauthenticated.status_code == 401
 
         unauthorized = client.get("/v1/health", headers={"Authorization": "Bearer nope"})
         assert unauthorized.status_code == 401

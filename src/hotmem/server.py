@@ -333,15 +333,7 @@ def create_app(
     async def health(request: Request):
         import asyncio
 
-        if _extract_token(request) is None:
-            try:
-                ctx = _resolve_caller(owned_runtime, request)
-            except PolicyError as exc:
-                if exc.status_code == 401 and exc.error == "missing_credential":
-                    return await asyncio.to_thread(owned_runtime.health_liveness)
-                raise
-        else:
-            ctx = _resolve_caller(owned_runtime, request)
+        ctx = _resolve_caller(owned_runtime, request)
         return await asyncio.to_thread(owned_runtime.health, ctx)
 
     @app.post("/v1/add")
