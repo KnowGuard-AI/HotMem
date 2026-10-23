@@ -1384,3 +1384,31 @@ def test_mvt110_2b_provenance_and_event_payload_disclosure(tmp_path: Path):
         assert blocked.status_code == 403
         assert blocked.json()["error"] == "policy_disclosure_blocked"
         assert secret not in blocked.text
+
+
+def test_mvt110_2c_sanitize_source_uri_preserves_non_local_uris(tmp_path: Path):
+    """Host-path sanitization must not mangle non-local URIs or hide credentials silently."""
+    from hotmem.policy import CallerContext
+
+    credential = CallerCredential.from_token(token="t-san", caller_id="san", store_id="s-san")
+    ctx = CallerContext(
+        authenticated=True,
+        policy_enforced=True,
+        caller_id="san",
+        store_id="s-san",
+        credential=credential,
+    )
+    inside = tmp_path / "inside.txt"
+    inside.write_text("x", encoding="utf-8")
+    outside = tmp_path.parent / "outside-san.txt"
+    outside.write_text("x", encoding="utf-8")
+
+    assert (
+        ctx.sanitize_source_uri("https://user:pw@example.com/a?b=1", base_dir=tmp_path)
+        == "https://user:pw@example.com/a?b=1"
+    )
+    assert ctx.sanitize_source_uri("s3://bucket/key", base_dir=tmp_path) == "s3://bucket/key"
+    assert ctx.sanitize_source_uri(str(inside), base_dir=tmp_path) == "inside.txt"
+    assert ctx.sanitize_source_uri(f"file://{inside}", base_dir=tmp_path) == "inside.txt"
+    assert ctx.sanitize_source_uri(str(outside), base_dir=tmp_path) == ""
+    assert ctx.sanitize_source_uri("../escape.txt", base_dir=tmp_path) == ""

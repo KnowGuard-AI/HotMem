@@ -598,10 +598,16 @@ class CallerContext:
         if not raw or not self.redact_host_paths_enabled:
             return raw
         candidate = raw
-        if candidate.startswith("file://"):
+        scheme = ""
+        if "://" in raw:
             from urllib.parse import unquote, urlparse
 
-            parsed = urlparse(candidate)
+            parsed = urlparse(raw)
+            scheme = (parsed.scheme or "").lower()
+            if scheme and scheme != "file":
+                # Non-local URIs are not host filesystem paths: preserve them
+                # verbatim rather than collapsing ``://`` through Path().
+                return raw
             candidate = unquote(parsed.path or "")
         p = Path(candidate)
         if base_dir is not None:
