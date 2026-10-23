@@ -58,6 +58,7 @@ class HandoffHydrateResult:
     invalid: int = 0
     already_applied: bool = False
     brief_identifier: str | None = None
+    brief_accessible: bool = True
     embedding_reused: int = 0
     embedding_rebuilt: int = 0
     embedding_missing: int = 0
@@ -160,12 +161,21 @@ def hydrate_handoff(
                 f"package {package_id[:12]} already applied at {ledger['applied_at']}",
                 detail={"package_id": package_id},
             )
+            applied_ns: str | None = None
+            try:
+                ledger_counts = json.loads(ledger.get("counts_json") or "{}")
+                if isinstance(ledger_counts, dict) and "namespace" in ledger_counts:
+                    applied_ns = str(ledger_counts.get("namespace") or "")
+            except (json.JSONDecodeError, TypeError):
+                applied_ns = None
+            brief_accessible = target_namespace is None or applied_ns == target_namespace
             return HandoffHydrateResult(
                 handoff_id=handoff_id,
                 package_id=package_id,
                 mode=mode,
                 already_applied=True,
-                brief_identifier=brief_identifier_for(manifest),
+                brief_identifier=(brief_identifier_for(manifest) if brief_accessible else None),
+                brief_accessible=brief_accessible,
             )
 
         counters = {
@@ -237,6 +247,7 @@ def hydrate_handoff(
                         "loaded": counters["loaded"],
                         "skipped": counters["skipped"],
                         "invalid": counters["invalid"],
+                        "namespace": target_namespace if target_namespace is not None else "",
                     },
                     sort_keys=True,
                 ),

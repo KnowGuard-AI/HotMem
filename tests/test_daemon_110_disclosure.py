@@ -2040,3 +2040,70 @@ def test_mvt110_2e_list_files_does_not_probe_out_of_base_paths(tmp_path: Path):
         assert entry["source_uri"] == ""
         assert entry["exists"] is False
         assert str(tmp_path) not in files.text
+
+
+def test_mvt110_3c_handoff_ledger_does_not_advertise_foreign_brief(tmp_path: Path):
+    """A package applied in another namespace must not expose that namespace's brief."""
+    import json as _json
+
+    base_dir = tmp_path / "workspace"
+    base_dir.mkdir()
+    codex = base_dir / "codex_src"
+    codex.mkdir()
+    (codex / "export.json").write_text(
+        _json.dumps({"format": "codex-export-v1", "session": {"id": "s-led", "label": "l"}}),
+        encoding="utf-8",
+    )
+    (codex / "session.jsonl").write_text(
+        _json.dumps({"id": "e1", "seq": 1, "type": "decision", "text": "ledger decision"}) + "\n",
+        encoding="utf-8",
+    )
+
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token=f"tok-{name}",
+                caller_id=name,
+                store_id="store-110",
+                namespaces=(f"{name}/priv",),
+                operations=("read", "write", "export", "hydrate"),
+            )
+            for name in ("b", "c")
+        ],
+    )
+    app = create_app(db_path=base_dir / "mvt110_3c.sqlite", base_dir=base_dir, policy=policy)
+    with TestClient(app) as client:
+        prepared = client.post(
+            "/v1/handoff/prepare",
+            headers=_hdr("tok-b", ns="b/priv"),
+            json={
+                "source": "codex_src",
+                "output": "pkg_ledger",
+                "mode": "resume",
+                "consent": "approved",
+            },
+        )
+        assert prepared.status_code == 200, prepared.text
+
+        first = client.post(
+            "/v1/handoff/hydrate",
+            headers=_hdr("tok-b", ns="b/priv"),
+            json={"package": "pkg_ledger"},
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["loaded"] >= 1
+        assert first.json()["brief_accessible"] is True
+
+        second = client.post(
+            "/v1/handoff/hydrate",
+            headers=_hdr("tok-c", ns="c/priv"),
+            json={"package": "pkg_ledger"},
+        )
+        assert second.status_code == 200, second.text
+        body = second.json()
+        assert body["already_applied"] is True
+        assert body["loaded"] == 0
+        assert body["brief_accessible"] is False
+        assert body["brief"] is None

@@ -1372,6 +1372,7 @@ class HotMemRuntime:
             "invalid": result.invalid,
             "already_applied": result.already_applied,
             "brief": result.brief_identifier,
+            "brief_accessible": result.brief_accessible,
             **result.disposition(),
         }
 
