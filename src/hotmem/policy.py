@@ -106,8 +106,8 @@ class DisclosureReport:
     redacted_count: int = 0
     redacted_records: int = 0
     omitted_count: int = 0
-    redactions: list[dict[str, Any]] = field(default_factory=list)
-    omissions: list[dict[str, Any]] = field(default_factory=list)
+    _reasons: set[str] = field(default_factory=set, repr=False)
+    _patterns: set[str] = field(default_factory=set, repr=False)
 
     def record_redaction(
         self,
@@ -117,15 +117,9 @@ class DisclosureReport:
         pattern: str,
         count: int,
     ) -> None:
+        del memory_id, field_name  # aggregates only; identifiers stay unexposed
         self.redacted_count += count
-        self.redactions.append(
-            {
-                "memory_id": memory_id,
-                "field": field_name,
-                "pattern": pattern,
-                "count": count,
-            }
-        )
+        self._patterns.add(pattern)
 
     def record_omission(
         self,
@@ -135,25 +129,19 @@ class DisclosureReport:
         reason: str,
         patterns: list[str] | None = None,
     ) -> None:
+        del memory_id, identifier  # aggregates only; identifiers stay unexposed
         self.omitted_count += 1
-        entry: dict[str, Any] = {
-            "memory_id": memory_id,
-            "identifier": identifier,
-            "reason": reason,
-        }
+        self._reasons.add(reason)
         if patterns:
-            entry["patterns"] = list(patterns)
-        self.omissions.append(entry)
+            self._patterns.update(patterns)
 
     def to_dict(self) -> dict[str, Any]:
-        reasons = sorted({str(o["reason"]) for o in self.omissions})
-        patterns = sorted({str(r["pattern"]) for r in self.redactions})
         return {
             "redacted_count": self.redacted_count,
             "redacted_records": self.redacted_records,
             "omitted_count": self.omitted_count,
-            "reasons": reasons,
-            "patterns": patterns,
+            "reasons": sorted(self._reasons),
+            "patterns": sorted(self._patterns),
         }
 
 
