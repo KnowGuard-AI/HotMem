@@ -1487,3 +1487,85 @@ def test_mvt110_4b_unportable_file_refs_are_omitted_not_dangling(tmp_path: Path)
         assert hydrated.loaded == 0
         assert hydrated.invalid == 0
         restored.close()
+
+
+def test_mvt110_2d_binary_hydration_fails_closed_instead_of_corrupting(tmp_path: Path):
+    """Non-UTF-8 file-backed content must never be decoded/redacted destructively."""
+    from hotmem.db import MemoryDB
+    from hotmem.embed import DEFAULT_EMBEDDER
+    from hotmem.memory import FileRef, add_file_backed
+
+    base_dir = tmp_path / "workspace"
+    base_dir.mkdir()
+    blob = base_dir / "blob.parquet"
+    secret = b"sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"
+    blob.write_bytes(b"\x89PNG\r\n\x1a\n\xff\xfe " + secret + b" \x00\x01")
+
+    db_path = base_dir / "mvt110_2d.sqlite"
+    db = MemoryDB(db_path)
+    memory_id, _ = add_file_backed(
+        db,
+        "ops/binary",
+        FileRef(
+            source_uri=str(blob),
+            byte_offset=0,
+            byte_length=blob.stat().st_size,
+            source_format="application/octet-stream",
+        ),
+        summary="binary blob",
+        namespace="shared/ops",
+        embedder=DEFAULT_EMBEDDER,
+    )
+    db.close()
+
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-redact",
+                caller_id="redactor",
+                store_id="store-110",
+                namespaces=("redactor/private",),
+                operations=("read",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-bin-redact",
+                        namespace="shared/ops",
+                        audience=("redactor",),
+                        operations=("read",),
+                        secret_action="redact",
+                        private_classification_action="omit",
+                    ),
+                ),
+            ),
+            CallerCredential.from_token(
+                token="tok-allow",
+                caller_id="allower",
+                store_id="store-110",
+                namespaces=("allower/private",),
+                operations=("read",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-bin-allow",
+                        namespace="shared/ops",
+                        audience=("allower",),
+                        operations=("read",),
+                        secret_action="allow",
+                        private_classification_action="allow",
+                    ),
+                ),
+            ),
+        ],
+    )
+    app = create_app(db_path=db_path, base_dir=base_dir, policy=policy)
+    with TestClient(app) as client:
+        blocked = client.post(f"/v1/memory/{memory_id}/hydrate", headers=_hdr("tok-redact"))
+        assert blocked.status_code == 403
+        assert blocked.json()["error"] == "policy_disclosure_blocked"
+        assert blocked.json()["reason"] == "non_text_payload"
+        assert secret.decode() not in blocked.text
+
+        allowed = client.post(f"/v1/memory/{memory_id}/hydrate", headers=_hdr("tok-allow"))
+        assert allowed.status_code == 200
+        assert allowed.content == blob.read_bytes()

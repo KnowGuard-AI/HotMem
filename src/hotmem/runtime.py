@@ -806,7 +806,15 @@ class HotMemRuntime:
         if isinstance(content_val, str) and content_val:
             if out.get("content_encoding") == "base64":
                 raw_bytes = base64.b64decode(content_val)
-                text_val = raw_bytes.decode("utf-8", errors="replace")
+                try:
+                    text_val = raw_bytes.decode("utf-8")
+                except UnicodeDecodeError as err:
+                    raise PolicyError(
+                        403,
+                        "policy_disclosure_blocked",
+                        f"policy cannot redact non-text payload for memory {row_id!r}",
+                        detail={"reason": "non_text_payload", "memory_id": row_id},
+                    ) from err
                 redacted_text, hits = scan_and_redact_text(text_val)
                 if hits:
                     out["content"] = base64.b64encode(redacted_text.encode("utf-8")).decode("ascii")
@@ -984,7 +992,15 @@ class HotMemRuntime:
         if ctx.policy_enforced:
             secret_action, _ = ctx.effective_disclosure_actions(record, operation="read")
             if secret_action != "allow":
-                text = payload.decode("utf-8", errors="replace")
+                try:
+                    text = payload.decode("utf-8")
+                except UnicodeDecodeError as err:
+                    raise PolicyError(
+                        403,
+                        "policy_disclosure_blocked",
+                        f"policy cannot redact non-text payload for memory {memory_id!r}",
+                        detail={"reason": "non_text_payload", "memory_id": memory_id},
+                    ) from err
                 redacted_text, hits = scan_and_redact_text(text)
                 if hits:
                     matched_patterns = sorted({pat for pat, _ in hits})
