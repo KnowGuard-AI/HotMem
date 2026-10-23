@@ -1760,3 +1760,100 @@ def test_mvt110_5b_operation_paths_are_not_disclosed(tmp_path: Path):
         assert inspected.status_code == 200
         assert inspected.json()["path"] == "handoff_pkg"
         assert str(base_dir) not in inspected.text
+
+
+def test_mvt110_1d_ann_window_does_not_starve_after_disclosure_omission(tmp_path: Path):
+    """Disclosure omissions must trigger an exact fallback when ANN candidates are exhausted."""
+    import json as _json
+    import uuid as _uuid
+
+    from test_vector_index import FakeVectorIndex
+
+    from hotmem.db import MemoryDB
+    from hotmem.embed import DEFAULT_EMBEDDER, pack_embedding
+
+    class SmallPoolIndex(FakeVectorIndex):
+        def oversample(self) -> int:
+            return 10
+
+    db_path = tmp_path / "mvt110_1d.sqlite"
+    db = MemoryDB(db_path)
+    for idx in range(11):
+        text = "payments incident mitigation"
+        db.insert(
+            id=_uuid.uuid4().hex,
+            identifier=f"ops/classified-{idx}",
+            fact_text=text,
+            embedding=pack_embedding(DEFAULT_EMBEDDER.embed(text)),
+            embedding_dim=DEFAULT_EMBEDDER.descriptor.dimension,
+            embedding_model=DEFAULT_EMBEDDER.descriptor.key,
+            source="seed",
+            importance=0.99,
+            metadata_json=_json.dumps({"classification": "private"}),
+            content_hash=f"cls-{idx}",
+            ttl_seconds=None,
+            namespace="shared/ops",
+        )
+    clean_text = "gateway runbook"
+    clean_id = _uuid.uuid4().hex
+    db.insert(
+        id=clean_id,
+        identifier="ops/clean-runbook",
+        fact_text=clean_text,
+        embedding=pack_embedding(DEFAULT_EMBEDDER.embed(clean_text)),
+        embedding_dim=DEFAULT_EMBEDDER.descriptor.dimension,
+        embedding_model=DEFAULT_EMBEDDER.descriptor.key,
+        source="seed",
+        importance=0.1,
+        metadata_json=_json.dumps({}),
+        content_hash="clean-hash",
+        ttl_seconds=None,
+        namespace="shared/ops",
+    )
+    db.close()
+
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-mgmt",
+                caller_id="mgmt",
+                store_id="store-110",
+                namespaces=("*",),
+                operations=("read", "write", "export", "hydrate", "promote", "manage"),
+                is_management=True,
+            ),
+            CallerCredential.from_token(
+                token="tok-reader",
+                caller_id="reader",
+                store_id="store-110",
+                namespaces=("reader/private",),
+                operations=("read",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-ann",
+                        namespace="shared/ops",
+                        audience=("reader",),
+                        operations=("read",),
+                        secret_action="redact",
+                        private_classification_action="omit",
+                    ),
+                ),
+            ),
+        ],
+    )
+    index = SmallPoolIndex()
+    app = create_app(db_path=db_path, base_dir=tmp_path, policy=policy, vector_index=index)
+    with TestClient(app) as client:
+        rebuilt = client.post("/v1/vector-index/rebuild", headers=_hdr("tok-mgmt"))
+        assert rebuilt.status_code == 200, rebuilt.text
+
+        result = client.post(
+            "/v1/search",
+            headers=_hdr("tok-reader"),
+            json={"query": "payments incident mitigation", "top_k": 1},
+        )
+        assert result.status_code == 200
+        assert result.json()["count"] == 1
+        assert result.json()["memories"][0]["memory_id"] == clean_id

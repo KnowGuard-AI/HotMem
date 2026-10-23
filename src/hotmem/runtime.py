@@ -736,24 +736,39 @@ class HotMemRuntime:
             if (ctx.policy_enforced or ctx.namespace is not None)
             else None
         )
-        report = DisclosureReport() if ctx.policy_enforced else None
-        row_transform = (
-            (lambda row: ctx.apply_disclosure_to_row(row, report=report, operation="read"))
-            if ctx.policy_enforced
-            else None
-        )
-        with self._read_db() as db, Timer() as t:
-            messages = search_memories(
-                db,
-                query=query,
-                top_k=top_k,
-                max_chars=max_chars,
-                vector_index=self.vector_index,
-                embedder=self.embedder,
-                reranker=self.reranker,
-                row_filter=row_filter,
-                row_transform=row_transform,
+
+        def _run_search(vector_index):
+            run_report = DisclosureReport() if ctx.policy_enforced else None
+            run_transform = (
+                (lambda row: ctx.apply_disclosure_to_row(row, report=run_report, operation="read"))
+                if ctx.policy_enforced
+                else None
             )
+            with self._read_db() as db, Timer() as run_timer:
+                run_messages = search_memories(
+                    db,
+                    query=query,
+                    top_k=top_k,
+                    max_chars=max_chars,
+                    vector_index=vector_index,
+                    embedder=self.embedder,
+                    reranker=self.reranker,
+                    row_filter=row_filter,
+                    row_transform=run_transform,
+                )
+            return run_messages, run_report, run_timer
+
+        messages, report, t = _run_search(self.vector_index)
+        if (
+            ctx.policy_enforced
+            and len(messages) < top_k
+            and self.vector_index is not None
+            and not isinstance(self.vector_index, NullVectorIndex)
+        ):
+            # Disclosure omissions can consume the whole ANN oversample
+            # window. Re-run the exact scoped scan so eligible rows outside
+            # that window are never starved.
+            messages, report, t = _run_search(None)
         result: dict[str, Any] = {
             "memories": messages,
             "count": len(messages),
