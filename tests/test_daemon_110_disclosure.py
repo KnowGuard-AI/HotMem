@@ -1947,3 +1947,40 @@ def test_mvt110_3b_unscoped_hydrate_binds_to_caller_namespace(tmp_path: Path):
             "/v1/memories", headers=_hdr("tok-q"), params={"identifier": "ops/legacy"}
         )
         assert other.json()["count"] == 0
+
+
+def test_mvt110_5c_health_liveness_and_policy_fields(tmp_path: Path):
+    """Health must expose a leak-free liveness probe and policy revision metadata."""
+    policy = PolicyConfig(
+        store_id="store-110",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-health",
+                caller_id="health",
+                store_id="store-110",
+                namespaces=("health/private",),
+                operations=("read",),
+            )
+        ],
+    )
+    app = create_app(db_path=tmp_path / "mvt110_5c.sqlite", base_dir=tmp_path, policy=policy)
+    with TestClient(app) as client:
+        live = client.get("/v1/health")
+        assert live.status_code == 200
+        body = live.json()
+        assert body["status"] == "ok"
+        assert body["policy_enforced"] is True
+        assert body["policy_revision"] == policy.revision
+        assert body["store_id"] == "store-110"
+        assert "memory_count" not in body
+        assert "db_path" not in body
+
+        unauthorized = client.get("/v1/health", headers={"Authorization": "Bearer nope"})
+        assert unauthorized.status_code == 401
+
+        authenticated = client.get("/v1/health", headers=_hdr("tok-health"))
+        assert authenticated.status_code == 200
+        assert authenticated.json()["memory_count"] == 0
+        assert authenticated.json()["policy_enforced"] is True
+        assert authenticated.json()["policy_revision"] == policy.revision

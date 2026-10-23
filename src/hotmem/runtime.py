@@ -487,6 +487,7 @@ class HotMemRuntime:
                     "db_path": self.db_path,
                     "uptime_s": round(time.time() - self.start_time, 1),
                     "embedding": {"model": descriptor.key, "dim": descriptor.dimension},
+                    "policy_enforced": False,
                 }
 
             visible_rows = ctx.filter_rows(db.all_rows(include_embedding=False), operation="read")
@@ -520,6 +521,19 @@ class HotMemRuntime:
                 total_count if ctx.credential is not None and ctx.credential.is_management else 0
             ),
             "runtime_generation": self.runtime_generation,
+            "policy_enforced": True,
+            "policy_revision": self.policy.revision,
+        }
+
+    def health_liveness(self) -> dict[str, Any]:
+        """Unauthenticated liveness probe: no counts, paths, or store contents."""
+        return {
+            "status": "ok",
+            "policy_enforced": True,
+            "policy_revision": self.policy.revision,
+            "store_id": self.store_id,
+            "runtime_generation": self.runtime_generation,
+            "uptime_s": round(time.time() - self.start_time, 1),
         }
 
     def add(
