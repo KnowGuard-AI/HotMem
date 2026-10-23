@@ -82,8 +82,8 @@ For native Windows and MCP setup, see the
 # Start with a mount directory (portable memory)
 hotmem serve --mount ./hotmem
 
-# Or just start (uses temp DB)
-hotmem serve
+# Or use an explicit database (a store is always required)
+hotmem serve --db ./my.sqlite
 ```
 
 ## CLI

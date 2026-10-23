@@ -24,6 +24,8 @@ Extension: add reranking, decay weighting, or MMR diversity here.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from hotmem.db import MemoryDB
@@ -188,6 +190,7 @@ def search_memories(
     vector_index: VectorIndex | None = None,
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
+    row_filter: Callable[[dict[str, Any]], bool] | None = None,
 ) -> list[dict[str, Any]]:
     """Search memories and return ranked, LLM-ready message objects.
 
@@ -220,6 +223,8 @@ def search_memories(
 
         # One FTS pass serves both candidate unioning and BM25 scoring (#92).
         fts_rows = db.fts_search(query, include_archived=include_archived)
+        if row_filter is not None:
+            fts_rows = [r for r in fts_rows if row_filter(r)]
         candidates = _fetch_candidates(
             db,
             query_vec,
@@ -230,6 +235,8 @@ def search_memories(
             embedding_model=active.descriptor.key,
             embedding_dim=active.descriptor.dimension,
         )
+        if row_filter is not None:
+            candidates = [r for r in candidates if row_filter(r)]
         fts_scores = _normalize_bm25(fts_rows)
 
         # Apply hybrid scoring
@@ -270,16 +277,23 @@ def search_memories(
                 content = content[:char_budget]
                 char_budget -= len(content)
 
-            messages.append(
-                {
-                    "role": "system",
-                    "content": content,
-                    "memory_id": item["id"],
-                    "identifier": item["identifier"],
-                    "score": round(item["final_score"], 4),
-                    "created_at": item.get("created_at"),
-                }
-            )
+            msg: dict[str, Any] = {
+                "role": "system",
+                "content": content,
+                "memory_id": item["id"],
+                "identifier": item["identifier"],
+                "score": round(item["final_score"], 4),
+                "created_at": item.get("created_at"),
+            }
+            raw_prov = item.get("provenance_json")
+            if raw_prov:
+                try:
+                    parsed_prov = json.loads(raw_prov) if isinstance(raw_prov, str) else raw_prov
+                except (json.JSONDecodeError, TypeError):
+                    parsed_prov = None
+                if parsed_prov is not None:
+                    msg["provenance"] = parsed_prov
+            messages.append(msg)
 
     _trace.info(
         "rank",

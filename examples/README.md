@@ -12,7 +12,7 @@ Copy-paste-runnable examples showing HotMem with each framework and runtime.
 | [pydanticai_agent](pydanticai_agent) | Typed Pydantic AI agent with HotMem deps | Python | `python agent.py` |
 | [fastapi_backend](fastapi_backend) | Standalone FastAPI app using HotMem as a library | Python | `uvicorn app:app` |
 | [mcp_claude_desktop](mcp_claude_desktop) | `hotmem mcp` wired into Claude Desktop | Config | paste config + restart |
-| [typescript](typescript) | TS client add/search against `hotmem serve` | TypeScript | `npx tsx agent.ts` |
+| [typescript](typescript) | TS client add/search against `hotmem serve --db` | TypeScript | `npx tsx agent.ts` |
 | [company-brain-restore](company-brain-restore) | Reproducible wiki → JSONL → instance → package → clean-instance clone (#69) | Shell | `./restore.sh` |
 
 ## Prerequisites
@@ -21,7 +21,7 @@ The common setup for most examples (sidecar-based ones):
 
 ```sh
 pip install -e ".[dev,mcp]"          # HotMem itself + dev/test deps
-hotmem serve                          # http://127.0.0.1:8711
+hotmem serve --db ./hotmem.sqlite     # http://127.0.0.1:8711
 ```
 
 Per-example READMEs link here and only list their example-specific framework

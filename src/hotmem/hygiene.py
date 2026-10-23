@@ -25,6 +25,7 @@ Extension: add custom hygiene rules or enforcement policies here.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -86,6 +87,7 @@ def check_hygiene(
     db: MemoryDB,
     *,
     base_dir: str | None = None,
+    row_filter: Callable[[dict[str, Any]], bool] | None = None,
 ) -> HygieneReport:
     """Run advisory hygiene checks on the store. No mutations — advisory only.
 
@@ -104,6 +106,9 @@ def check_hygiene(
     with Timer() as t:
         rows = db.all_rows()
         file_backed = db.list_file_backed()
+        if row_filter is not None:
+            rows = [r for r in rows if row_filter(r)]
+            file_backed = [r for r in file_backed if row_filter(r)]
 
         inline_rows = [r for r in rows if r["memory_type"] != "file"]
         file_rows = file_backed

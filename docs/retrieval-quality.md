@@ -126,7 +126,7 @@ opt-in (`--reranker mmr`, default `none`).
 
 ```bash
 uv pip install -e ".[semantic]"
-hotmem serve --embedder local-semantic \
+hotmem serve --db ./hotmem.sqlite --embedder local-semantic \
   --embedder-model-path .models/potion-base-8M
 ```
 
@@ -156,7 +156,7 @@ are the only state that must survive.
 **Enable diversity re-ranking** where duplicates crowd the top-k:
 
 ```bash
-hotmem serve --embedder local-semantic \
+hotmem serve --db ./hotmem.sqlite --embedder local-semantic \
   --embedder-model-path .models/potion-base-8M \
   --reranker mmr --reranker-lambda 0.5
 ```

@@ -10,11 +10,11 @@ remain compatible as file-native behavior is added.
 ```bash
 hotmem serve --port 8711 --mount ./data/hotmem
 hotmem serve --db ./my.sqlite
-hotmem serve --host 0.0.0.0 --port 8711
+hotmem serve --db ./my.sqlite --host 0.0.0.0 --port 8711
 hotmem hydrate --file swap.jsonl --db ./my.sqlite
 hotmem snapshot --file swap.jsonl --db ./my.sqlite
 hotmem import --from okf --db ./company-wiki --target ./brain.sqlite --out ./wiki.jsonl
-hotmem status
+hotmem status --url http://127.0.0.1:8711
 hotmem openapi --output openapi.json
 hotmem openapi --output openapi.yaml --format yaml
 ```

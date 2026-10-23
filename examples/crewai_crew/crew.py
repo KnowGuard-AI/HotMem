@@ -3,7 +3,7 @@
 Researcher saves a finding; Writer recalls it via the same HotMem store,
 demonstrating cross-agent memory continuity without a hand-rolled bus.
 
-Run: hotmem serve  then  python crew.py
+Run: hotmem serve --db ./hotmem.sqlite  then  python crew.py
 """
 
 from __future__ import annotations

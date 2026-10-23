@@ -3,7 +3,7 @@
 A 3-turn loop: recall relevant memories, call the LLM, store any new facts.
 Uses HotMemRetriever (hybrid search) + HotMemChatMessageHistory (turn log).
 
-Run: hotmem serve  then  python agent.py
+Run: hotmem serve --db ./hotmem.sqlite  then  python agent.py
 """
 
 from __future__ import annotations

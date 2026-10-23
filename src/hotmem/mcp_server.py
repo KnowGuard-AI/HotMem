@@ -38,11 +38,11 @@ from mcp.types import CallToolResult, TextContent, Tool
 from hotmem.db import MemoryDB
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
 from hotmem.rerank import Reranker
+from hotmem.runtime import HotMemRuntime
 from hotmem.search import search_memories
 from hotmem.snapshot import hydrate as snapshot_hydrate
 from hotmem.snapshot import snapshot as snapshot_export
 from hotmem.swap import compute_content_hash
-from hotmem.swap import hydrate as swap_hydrate
 from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("mcp_server")
@@ -141,17 +141,24 @@ def create_server(
     *,
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
+    state: _ServerState | None = None,
 ) -> Server:
     """Create and configure the HotMem MCP server.
 
     ``embedder`` is the runtime-owned embedding implementation (issue #78);
     ``None`` means the hash default. ``reranker`` is the optional bounded
     second stage (issue #80); ``None`` preserves the first-stage ranking.
+
+    ``state`` is the explicit state container owned by the caller. Production
+    startup (`run`) passes a runtime-backed instance; the module-level
+    ``_state`` fallback exists only for direct handler tests and is never
+    used by the serving path.
     """
     db_path = str(db_path)
     swap_path = str(swap_path) if swap_path else None
-    _state.embedder = embedder if embedder is not None else DEFAULT_EMBEDDER
-    _state.reranker = reranker
+    active_state = state if state is not None else _state
+    active_state.embedder = embedder if embedder is not None else DEFAULT_EMBEDDER
+    active_state.reranker = reranker
 
     server = Server("hotmem")
 
@@ -224,23 +231,23 @@ def create_server(
 
         try:
             if name == "add_memory":
-                return _handle_add_memory(_state, arguments)
+                return _handle_add_memory(active_state, arguments)
             if name == "search_memories":
-                return _handle_search_memories(_state, arguments)
+                return _handle_search_memories(active_state, arguments)
             if name == "memory_health":
-                return _handle_memory_health(_state, arguments)
+                return _handle_memory_health(active_state, arguments)
             if name == "snapshot":
-                return _handle_snapshot(_state, arguments)
+                return _handle_snapshot(active_state, arguments)
             if name == "hydrate":
-                return _handle_hydrate(_state, arguments)
+                return _handle_hydrate(active_state, arguments)
             if name == "handoff_prepare":
-                return _handle_handoff_prepare(_state, arguments)
+                return _handle_handoff_prepare(active_state, arguments)
             if name == "handoff_inspect":
-                return _handle_handoff_inspect(_state, arguments)
+                return _handle_handoff_inspect(active_state, arguments)
             if name == "handoff_verify":
-                return _handle_handoff_verify(_state, arguments)
+                return _handle_handoff_verify(active_state, arguments)
             if name == "handoff_hydrate":
-                return _handle_handoff_hydrate(_state, arguments)
+                return _handle_handoff_hydrate(active_state, arguments)
         except KeyError as err:
             _trace.error("tool", f"missing required argument: {err}", detail={"tool": name})
             return _error(f"missing required argument: {err}")
@@ -260,23 +267,26 @@ async def run(
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
 ) -> None:
-    """Start the HotMem MCP server on stdio transport."""
+    """Start the HotMem MCP server on stdio transport (embedded compatibility mode)."""
     db_path = str(db_path)
     swap_path = str(swap_path) if swap_path else None
 
-    db = MemoryDB(db_path)
-    _ServerState.db = db
-    _ServerState.db_path = db_path
-    _ServerState.swap_path = swap_path
-    _ServerState.start_time = time.time()
-
-    if swap_path and Path(swap_path).exists():
-        result = swap_hydrate(db, swap_path, embedder=embedder)
-        _trace.info(
-            "startup",
-            f"auto-hydrated {result.loaded} memories",
-            detail={"swap_path": swap_path},
-        )
+    # Embedded mode still owns exactly one runtime: this acquires the
+    # exclusive store lock, runs the same startup hydration, and is the only
+    # writer for the life of the stdio session (#109).
+    runtime = HotMemRuntime(
+        db_path=db_path,
+        swap_path=swap_path,
+        embedder=embedder,
+        reranker=reranker,
+    ).open()
+    state = _ServerState()
+    state.db = runtime.db  # type: ignore[assignment]
+    state.db_path = db_path
+    state.swap_path = swap_path
+    state.start_time = runtime.start_time
+    state.embedder = runtime.embedder
+    state.reranker = runtime.reranker
 
     _trace.info(
         "startup",
@@ -284,7 +294,13 @@ async def run(
         detail={"db_path": db_path, "swap_path": swap_path},
     )
 
-    server = create_server(db_path, swap_path, embedder=embedder, reranker=reranker)
+    server = create_server(
+        db_path,
+        swap_path,
+        embedder=embedder,
+        reranker=reranker,
+        state=state,
+    )
 
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -294,8 +310,268 @@ async def run(
                 server.create_initialization_options(),
             )
     finally:
-        db.close()
+        runtime.close()
         _trace.info("shutdown", "mcp server closed", detail={"db_path": db_path})
+
+
+def _build_tool_list() -> list[Tool]:
+    """Return the canonical MCP tool list shared by embedded and daemon relay servers."""
+    return [
+        Tool(
+            name="add_memory",
+            description="Store a fact in HotMem memory.",
+            inputSchema=_TOOL_SCHEMAS["add_memory"],
+        ),
+        Tool(
+            name="search_memories",
+            description="Search HotMem and return ranked, LLM-ready message objects.",
+            inputSchema=_TOOL_SCHEMAS["search_memories"],
+        ),
+        Tool(
+            name="memory_health",
+            description="Return HotMem status: memory count, uptime, and database path.",
+            inputSchema=_TOOL_SCHEMAS["memory_health"],
+        ),
+        Tool(
+            name="snapshot",
+            description="Export all memories to a JSONL swap file.",
+            inputSchema=_TOOL_SCHEMAS["snapshot"],
+        ),
+        Tool(
+            name="hydrate",
+            description="Load memories from a JSONL swap file into HotMem.",
+            inputSchema=_TOOL_SCHEMAS["hydrate"],
+        ),
+        Tool(
+            name="handoff_prepare",
+            description=(
+                "Prepare a hotmem-handoff-v1 package from a source export "
+                "(#101). Requires explicit consent; capture is never implicit."
+            ),
+            inputSchema=_TOOL_SCHEMAS["handoff_prepare"],
+        ),
+        Tool(
+            name="handoff_inspect",
+            description=(
+                "Read-only inspection of a handoff package: identity, counts, "
+                "coverage, omissions, redactions, or the failure reason."
+            ),
+            inputSchema=_TOOL_SCHEMAS["handoff_inspect"],
+        ),
+        Tool(
+            name="handoff_verify",
+            description="Fail-closed verification of a handoff package.",
+            inputSchema=_TOOL_SCHEMAS["handoff_verify"],
+        ),
+        Tool(
+            name="handoff_hydrate",
+            description=(
+                "Hydrate a verified handoff package into this HotMem instance (atomic, idempotent)."
+            ),
+            inputSchema=_TOOL_SCHEMAS["handoff_hydrate"],
+        ),
+    ]
+
+
+def _format_http_error(err: Exception) -> str:
+    """Format an httpx transport or status error into an actionable MCP error string."""
+    import httpx
+
+    if isinstance(err, httpx.HTTPStatusError):
+        resp = err.response
+        try:
+            body = resp.json()
+            if isinstance(body, dict):
+                code = body.get("error") or f"http_{resp.status_code}"
+                msg = body.get("message") or body.get("detail") or resp.text
+                reason = body.get("reason")
+                if reason:
+                    return f"{code} ({reason}): {msg}"
+                return f"{code}: {msg}"
+        except Exception:
+            pass
+        return f"HTTP {resp.status_code}: {resp.text}"
+    if isinstance(err, httpx.RequestError):
+        return f"daemon_unreachable: {err}"
+    return str(err)
+
+
+def create_relay_server(
+    base_url: str = "http://127.0.0.1:8711",
+    *,
+    token: str | None = None,
+    session_id: str | None = None,
+    source: str | None = None,
+    namespace: str | None = None,
+    expected_store_id: str | None = None,
+    client: Any | None = None,
+) -> tuple[Server, Any]:
+    """Create a thin MCP stdio-to-daemon relay server (#109).
+
+    Uses a persistent `AsyncHotMemClient` so connections are pooled across tool
+    invocations and never opens a local or temporary SQLite database.
+    Returns `(server, async_client)`.
+    """
+    from hotmem.client import AsyncHotMemClient
+
+    owned_client = (
+        client
+        if client is not None
+        else AsyncHotMemClient(
+            base_url=base_url,
+            token=token,
+            session_id=session_id,
+            source=source or "mcp",
+            namespace=namespace,
+            expected_store_id=expected_store_id,
+        )
+    )
+    server = Server("hotmem")
+
+    @server.list_tools()
+    async def list_tools() -> list[Tool]:
+        return _build_tool_list()
+
+    @server.call_tool()
+    async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
+        arguments = arguments or {}
+        try:
+            if name == "add_memory":
+                identifier = str(arguments["identifier"])
+                fact = str(arguments["fact"])
+                importance = float(arguments.get("importance", 0.5))
+                ttl_seconds = arguments.get("ttl_seconds")
+                if ttl_seconds is not None:
+                    ttl_seconds = int(ttl_seconds)
+                res = await owned_client.add(
+                    identifier,
+                    fact,
+                    source=source or "mcp",
+                    importance=importance,
+                    ttl_seconds=ttl_seconds,
+                )
+                return _ok(res)
+
+            if name == "search_memories":
+                query = str(arguments["query"])
+                top_k = int(arguments.get("top_k", 5))
+                max_chars = arguments.get("max_chars")
+                if max_chars is not None:
+                    max_chars = int(max_chars)
+                payload: dict[str, Any] = {"query": query, "top_k": top_k}
+                if max_chars is not None:
+                    payload["max_chars"] = max_chars
+                resp = await owned_client._client.post("/v1/search", json=payload)
+                resp.raise_for_status()
+                return _ok(resp.json())
+
+            if name == "memory_health":
+                res = await owned_client.health()
+                return _ok(res)
+
+            if name == "snapshot":
+                res = await owned_client.snapshot(arguments.get("file"))
+                return _ok(res)
+
+            if name == "hydrate":
+                res = await owned_client.hydrate(arguments.get("file"))
+                # Keep MCP hydrate output shape consistent with embedded handler
+                out = dict(res)
+                out.pop("path", None)
+                return _ok(out)
+
+            if name == "handoff_prepare":
+                consent = arguments.get("consent")
+                if not isinstance(consent, str) or not consent.strip():
+                    return _error(
+                        "explicit consent is required before any session content is read; "
+                        "pass a non-empty consent string"
+                    )
+                src = arguments.get("source")
+                output = arguments.get("output")
+                for field_name, val in (("source", src), ("output", output)):
+                    if not isinstance(val, str) or not val.strip():
+                        return _error(f"{field_name} must be a non-empty path string")
+                res = await owned_client.handoff_prepare(
+                    src,
+                    output,
+                    consent=consent,
+                    mode=str(arguments.get("mode") or "resume"),
+                    session=arguments.get("session"),
+                )
+                cov = res.get("coverage") or {}
+                timings = res.get("timings_ms") or {}
+                return _ok(
+                    {
+                        "handoff_id": res["handoff_id"],
+                        "package_id": res["package_id"],
+                        "mode": res["mode"],
+                        "entries": res["entries"],
+                        "memories": res["memories"],
+                        "omissions": cov.get("omitted_count", 0),
+                        "redactions": cov.get("redacted_count", 0),
+                        "path": res["path"],
+                        "total_ms": timings.get("total_ms", 0.0),
+                    }
+                )
+
+            if name == "handoff_inspect":
+                res = await owned_client.handoff_inspect(str(arguments["package"]))
+                return _ok(res)
+
+            if name == "handoff_verify":
+                res = await owned_client.handoff_verify(str(arguments["package"]))
+                return _ok(res)
+
+            if name == "handoff_hydrate":
+                res = await owned_client.handoff_hydrate(str(arguments["package"]))
+                return _ok(res)
+
+        except KeyError as err:
+            return _error(f"missing required argument: {err}")
+        except ValueError as err:
+            return _error(f"invalid argument: {err}")
+        except Exception as err:
+            return _error(_format_http_error(err))
+
+        return _error(f"unknown tool: {name}")
+
+    return server, owned_client
+
+
+async def run_relay(
+    base_url: str = "http://127.0.0.1:8711",
+    *,
+    token: str | None = None,
+    session_id: str | None = None,
+    source: str | None = None,
+    namespace: str | None = None,
+    expected_store_id: str | None = None,
+) -> None:
+    """Start the thin MCP stdio relay connected to a running HotMem daemon."""
+    server, client = create_relay_server(
+        base_url=base_url,
+        token=token,
+        session_id=session_id,
+        source=source,
+        namespace=namespace,
+        expected_store_id=expected_store_id,
+    )
+    _trace.info(
+        "startup",
+        "mcp relay ready",
+        detail={"url": base_url, "expected_store_id": expected_store_id},
+    )
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options(),
+            )
+    finally:
+        await client.close()
+        _trace.info("shutdown", "mcp relay closed", detail={"url": base_url})
 
 
 def _handle_add_memory(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:

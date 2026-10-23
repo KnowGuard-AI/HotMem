@@ -76,9 +76,9 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     Embeddings are base64-encoded so the jsonl is text-portable and can be
     rehydrated without re-embedding (stored-embedding variant, #25).
 
-    The full canonical field set is emitted (issue #67): ttl_seconds,
-    namespace, tier, and tags now round-trip instead of being dropped by
-    the writer while the readers learned to preserve them.
+    The full canonical field set is emitted (issues #67, #99): ttl_seconds,
+    namespace, tier, tags, updated_at, snapshot_id, parent_memory, and
+    related_memories round-trip intact.
     """
     embedding_blob: bytes | None = row.get("embedding")
     embedding_b64 = base64.b64encode(embedding_blob).decode() if embedding_blob else None
@@ -100,6 +100,8 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "namespace": row["namespace"],
         "tier": row["tier"],
         "tags": _parse_json_field(row["tags"]) or [],
+        "related_memories": _parse_json_field(row.get("related_memories")) or [],
+        "parent_memory": row.get("parent_memory"),
         "source_uri": row["source_uri"],
         "byte_offset": row["byte_offset"],
         "byte_length": row["byte_length"],
@@ -107,6 +109,8 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "source_format": row["source_format"],
         "provenance": _parse_json_field(row["provenance_json"]),
         "created_at": row["created_at"],
+        "updated_at": row.get("updated_at"),
+        "snapshot_id": row.get("snapshot_id"),
         "promotion_state": row["promotion_state"],
         "promotion_candidate": row["promotion_candidate"],
     }
@@ -119,6 +123,9 @@ def write_snapshot_v2(
     copy_attachments: bool = False,
     base_dir: str | Path | None = None,
     attach_threshold: int = ATTACH_THRESHOLD,
+    row_filter: Any | None = None,
+    redact_host_paths: bool = False,
+    export_scope: dict[str, Any] | None = None,
 ) -> SnapshotResult:
     """Write the full v2 snapshot directory.
 
@@ -160,6 +167,8 @@ def write_snapshot_v2(
         memories_path = out_dir / MEMORIES_NAME
         with open(memories_path, "wb") as f:
             for row in db.iter_rows(include_embedding=True):
+                if row_filter is not None and not row_filter(row):
+                    continue
                 rec = _row_to_record(row)
                 memory_count += 1
 
@@ -202,13 +211,16 @@ def write_snapshot_v2(
         meta = MetadataInfo(
             hotmem_version=__version__,
             created_at=_utc_now_iso(),
-            host=socket.gethostname(),
-            db_path=str(db.db_path),
+            host="" if redact_host_paths else socket.gethostname(),
+            db_path="" if redact_host_paths else str(db.db_path),
             counts={"inline": inline_count, "file": file_backed_count, "total": memory_count},
         )
         metadata_path = out_dir / METADATA_NAME
+        meta_dict = meta.to_dict()
+        if export_scope is not None:
+            meta_dict["scope"] = export_scope
         metadata_path.write_text(
-            json.dumps(meta.to_dict(), sort_keys=True, indent=2) + "\n",
+            json.dumps(meta_dict, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
             newline="\n",
         )
@@ -252,6 +264,7 @@ def write_snapshot_v2(
             overall_sha256=overall,
             file_backed_references=file_references,
             attachments=attachment_entries,
+            scope=export_scope,
         )
 
         # Write manifest.json with stable key ordering.

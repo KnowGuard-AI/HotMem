@@ -107,8 +107,10 @@ def add_file_backed(
     importance: float = 0.5,
     metadata: dict[str, Any] | None = None,
     source: str = "",
+    namespace: str = "",
     provenance: dict[str, Any] | None = None,
     embedder: Embedder | None = None,
+    _commit: bool = True,
 ) -> tuple[str, str]:
     """Add a file-backed memory with zero bytes copied.
 
@@ -158,7 +160,9 @@ def add_file_backed(
             importance=importance,
             metadata_json=json.dumps(metadata or {}),
             content_hash=content_hash,
+            namespace=namespace,
             provenance_json=json.dumps(provenance) if provenance else None,
+            _commit=_commit,
         )
 
     _trace.info(

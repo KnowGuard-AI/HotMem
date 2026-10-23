@@ -115,4 +115,39 @@ describe("HotMemClient", () => {
     const c = new HotMemClient();
     await expect(c.health()).rejects.toBeInstanceOf(HotMemError);
   });
+
+  it("propagates daemon auth, store, session, source, namespace, and idempotency headers (#109)", async () => {
+    const calls = mockFetch(() => ({
+      status: 200,
+      body: { memory_id: "m-daemon", content_hash: "h-daemon", trace_ms: 0.4 },
+    }));
+    const c = new HotMemClient("http://127.0.0.1:8711", {
+      token: "tok-a",
+      expectedStoreId: "store-incident-01",
+      sessionId: "sess-a-1",
+      source: "agent://ts-sdk",
+      namespace: "ops/shared",
+    });
+    await c.add("ops/demo-17", "rollback decision", { idempotencyKey: "op-key-1" });
+    const headers = calls[0].init.headers as Record<string, string>;
+    expect(headers["authorization"]).toBe("Bearer tok-a");
+    expect(headers["x-hotmem-store-id"]).toBe("store-incident-01");
+    expect(headers["x-hotmem-session-id"]).toBe("sess-a-1");
+    expect(headers["x-hotmem-source"]).toBe("agent://ts-sdk");
+    expect(headers["x-hotmem-namespace"]).toBe("ops/shared");
+    expect(headers["x-hotmem-idempotency-key"]).toBe("op-key-1");
+  });
+
+  it("formats structured daemon policy errors into HotMemError", async () => {
+    mockFetch(() => ({
+      status: 403,
+      body: { error: "scope_denied", message: "caller cannot read namespace ops/private" },
+    }));
+    const c = new HotMemClient("http://127.0.0.1:8711", { token: "tok-b" });
+    await expect(c.getMemory("priv-1")).rejects.toMatchObject({
+      name: "HotMemError",
+      status: 403,
+      message: "scope_denied: caller cannot read namespace ops/private",
+    });
+  });
 });

@@ -1,24 +1,18 @@
-"""HotMem server - FastAPI app with traced endpoints.
+"""HotMem server - FastAPI app with traced endpoints and instance-owned runtime (#109).
 
 Purpose:
-    HTTP sidecar serving memory operations on a single port.
-    5 endpoints under /v1: health, add, search, hydrate, snapshot.
+    HTTP daemon/sidecar serving memory operations on a single port.
     Every response includes X-HotMem-Trace-Id header and trace_ms timing.
+    All routes delegate to an instance-owned `HotMemRuntime` (`app.state.runtime`)
+    rather than module-global state, enforcing policy (#110) and session
+    attribution (#111) uniformly.
 
 Interface:
-    create_app(db_path, swap_path?) -> FastAPI
-    The app is created with a lifespan that opens the DB and optionally hydrates.
-
-Deps: fastapi, hotmem.db, hotmem.embed, hotmem.search, hotmem.swap, hotmem.trace
-Extension: add middleware, CORS, rate limiting, or new endpoint groups here.
+    create_app(db_path, swap_path?, ..., policy?, runtime?) -> FastAPI
 """
 
 from __future__ import annotations
 
-import contextlib
-import json
-import time
-import uuid
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
@@ -29,43 +23,21 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
 
-from hotmem.annotations import AnnotationValidationError, validate_metadata
-from hotmem.db import MemoryDB
-from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
-from hotmem.events import EventType, append_event, emit_import_event, query_events
+from hotmem.annotations import AnnotationValidationError
+from hotmem.embed import Embedder
 from hotmem.handoff.codex_source import SourceError
-from hotmem.handoff.hydrate import hydrate_handoff
-from hotmem.handoff.package import prepare_handoff
-from hotmem.handoff.verify import HandoffError, inspect_handoff, verify_handoff
-from hotmem.hygiene import check_hygiene
+from hotmem.handoff.verify import HandoffError
 from hotmem.interchange.hydrate import PackageError
-from hotmem.lifecycle import (
-    InvalidTransitionError,
-    list_by_state,
-    list_candidates,
-    mark_candidate,
-    states_model,
-    transition,
-)
-from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
-from hotmem.profiles import HydrationProfile, hydrate_with_profile
+from hotmem.lifecycle import InvalidTransitionError
+from hotmem.policy import CallerContext, PolicyConfig, PolicyError
+from hotmem.profiles import HydrationProfile
 from hotmem.provenance import ProvenanceError
 from hotmem.rerank import Reranker
-from hotmem.search import search_memories
+from hotmem.runtime import HotMemRuntime
 from hotmem.snapshot import SnapshotChecksumError
-from hotmem.snapshot import hydrate as snapshot_hydrate
-from hotmem.snapshot import snapshot as snapshot_write
 from hotmem.storage import UnsupportedSchemeError
-from hotmem.swap import compute_content_hash
 from hotmem.trace import Timer, get_tracer, new_trace_id
-from hotmem.vector_index import (
-    VALID_BACKENDS,
-    NullVectorIndex,
-    VectorIndex,
-    VectorIndexConfig,
-    get_vector_index,
-    rebuild_vector_index,
-)
+from hotmem.vector_index import VectorIndex
 
 _trace = get_tracer("server")
 
@@ -78,32 +50,45 @@ except PackageNotFoundError:
         _VERSION = "0.0.0+unknown"
 
 
-def _safe_json(value: str | None, default: Any) -> Any:
-    """Decode a JSON column defensively; return ``default`` on failure/None."""
-    if value is None:
-        return default
-    try:
-        return json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return default
-
-
-# ── App state (set during lifespan) ──────────────────────────────────────────
-
-_state: dict[str, Any] = {}
+# Exposed daemon route inventory (#109): every supported HTTP route is declared
+# here and backed by HotMemRuntime.
+DAEMON_ROUTE_INVENTORY: tuple[tuple[str, str, str], ...] = (
+    ("GET", "/v1/health", "read"),
+    ("POST", "/v1/add", "write"),
+    ("POST", "/v1/search", "read"),
+    ("GET", "/v1/memories", "read"),
+    ("GET", "/v1/memory/{memory_id}", "read"),
+    ("POST", "/v1/memory/{memory_id}/hydrate", "read"),
+    ("POST", "/v1/memory/hydrate-batch", "read"),
+    ("POST", "/v1/hydrate", "hydrate"),
+    ("POST", "/v1/snapshot", "export"),
+    ("POST", "/v1/handoff/prepare", "export"),
+    ("POST", "/v1/handoff/verify", "read"),
+    ("GET", "/v1/handoff/inspect", "read"),
+    ("POST", "/v1/handoff/hydrate", "hydrate"),
+    ("GET", "/v1/files", "read"),
+    ("GET", "/v1/bundles", "read"),
+    ("POST", "/v1/discover", "write"),
+    ("GET", "/v1/hygiene", "read"),
+    ("GET", "/v1/events", "read"),
+    ("POST", "/v1/memory/{memory_id}/promote", "promote"),
+    ("POST", "/v1/memory/{memory_id}/candidate", "promote"),
+    ("GET", "/v1/promotion/candidates", "read"),
+    ("GET", "/v1/promotion/states", "read"),
+    ("GET", "/v1/promotion/by-state", "read"),
+    ("POST", "/v1/vector-index/rebuild", "write"),
+    ("GET", "/v1/vector-index/status", "read"),
+    ("DELETE", "/v1/vector-index", "write"),
+    ("POST", "/v1/policy/revoke", "manage"),
+    ("POST", "/v1/policy/reload", "manage"),
+)
 
 
 # ── Request / Response models ────────────────────────────────────────────────
 
 
 class AddRequest(BaseModel):
-    """Add an inline fact OR a file reference.
-
-    Exactly one of ``fact`` (inline) or ``file_uri`` (file-backed) must be
-    provided. Existing inline payloads using ``identifier`` + ``fact`` are
-    unchanged. When ``file_uri`` is present, the memory stores a reference
-    to the byte range — zero bytes copied into SQLite.
-    """
+    """Add an inline fact OR a file reference."""
 
     identifier: str
     fact: str | None = None
@@ -202,11 +187,7 @@ class HandoffPackageRequest(BaseModel):
 
 
 class HydrateOneRequest(BaseModel):
-    """Optional body for POST /v1/memory/{id}/hydrate — profile + verify params.
-
-    When absent (no body), the endpoint returns raw bytes (backward-compatible).
-    When present, returns a JSON ProfiledHydration dict.
-    """
+    """Optional body for POST /v1/memory/{id}/hydrate — profile + verify params."""
 
     profile: HydrationProfile = Field(default="agent", description="agent|compact|audit|full")
     verify: bool = Field(default=True, description="Verify source_checksum if present")
@@ -228,12 +209,7 @@ class DiscoverRequest(BaseModel):
 
 
 class PromoteRequest(BaseModel):
-    """Body for POST /v1/memory/{id}/promote — apply one lifecycle transition.
-
-    HotMem stores state and emits signals; policy remains outside the runtime.
-    Only forward-only transitions in HOT -> READY -> PROMOTED -> ARCHIVED are accepted; any other
-    transition returns 409 invalid_transition without mutating state.
-    """
+    """Body for POST /v1/memory/{id}/promote — apply one lifecycle transition."""
 
     to_state: str = Field(..., description="HOT | READY | PROMOTED | ARCHIVED")
     reason: str | None = None
@@ -247,56 +223,36 @@ class CandidateRequest(BaseModel):
     reason: str | None = None
 
 
-# ── Lifespan ─────────────────────────────────────────────────────────────────
+class PolicyRevokeRequest(BaseModel):
+    """Body for POST /v1/policy/revoke — revoke a caller and/or share approval."""
+
+    caller_id: str | None = None
+    approval_id: str | None = None
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Open DB, optionally hydrate from swap, yield, then close."""
-    db_path = _state["db_path"]
-    swap_path = _state.get("swap_path")
+def _extract_token(request: Request) -> str | None:
+    auth = request.headers.get("authorization")
+    if auth:
+        parts = auth.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            return parts[1].strip()
+        return auth.strip()
+    token_hdr = request.headers.get("x-hotmem-token")
+    if token_hdr:
+        return token_hdr.strip()
+    return None
 
-    db = MemoryDB(db_path)
-    _state["db"] = db
-    _state["start_time"] = time.time()
 
-    # Optional derived vector index (#49): disposable acceleration only —
-    # constructed after the DB, closed before it. Never canonical.
-    if _state.get("vector_index_injected") is None:
-        _state["vector_index"] = get_vector_index(
-            VectorIndexConfig(backend=_state.get("vector_backend", "none")),
-            base_dir=_state.get("base_dir"),
-        )
-    else:
-        _state["vector_index"] = _state["vector_index_injected"]
-
-    # Auto-hydrate if swap file exists (issue #78: under the runtime embedder)
-    if swap_path and Path(swap_path).exists():
-        result = snapshot_hydrate(db, swap_path, embedder=_state["embedder"])
-        emit_import_event(
-            db,
-            path=str(swap_path),
-            loaded=result.loaded,
-            skipped_dupes=result.skipped_dupes,
-            invalid=result.invalid,
-        )
-        _trace.info(
-            "startup",
-            f"auto-hydrated {result.loaded} memories",
-            detail={"swap_path": str(swap_path)},
-        )
-
-    _trace.info(
-        "startup",
-        "server ready",
-        detail={"db_path": str(db_path), "port": _state.get("port", 8711)},
+def _resolve_caller(runtime: HotMemRuntime, request: Request) -> CallerContext:
+    return runtime.resolve_caller(
+        token=_extract_token(request),
+        requested_store_id=request.headers.get("x-hotmem-store-id"),
+        session_id=request.headers.get("x-hotmem-session-id"),
+        source=request.headers.get("x-hotmem-source"),
+        namespace=request.headers.get("x-hotmem-namespace") or None,
+        actor=request.headers.get("x-hotmem-actor"),
+        idempotency_key=request.headers.get("x-hotmem-idempotency-key"),
     )
-    yield
-    _state["vector_index"].close()
-    db.close()
-
-
-# ── App factory ──────────────────────────────────────────────────────────────
 
 
 def create_app(
@@ -308,43 +264,42 @@ def create_app(
     vector_index: VectorIndex | None = None,
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
+    policy: PolicyConfig | None = None,
+    store_id: str | None = None,
+    runtime: HotMemRuntime | None = None,
+    policy_path: str | None = None,
 ) -> FastAPI:
-    """Create and configure the FastAPI application.
-
-    ``base_dir`` resolves relative file_ref URIs. Defaults to the parent
-    directory of ``db_path`` (i.e. the mount dir).
-
-    ``vector_backend`` selects the optional derived vector index (#49):
-    "none" (default — zero vector dependencies) or "chroma" (requires the
-    optional ``hotmem[vector]`` extra; degrades to none with a warning when
-    chromadb is not installed). The index is disposable and rebuildable —
-    SQLite/files/bundles remain canonical storage.
-
-    ``vector_index`` injects a prebuilt index instance (test seam); it takes
-    precedence over ``vector_backend``.
-
-    ``embedder`` is the runtime-owned embedding implementation (issue #78):
-    ``None`` means the hash default. It owns every write, search, hydration,
-    and reindex embedding in this process; rows stored under other
-    descriptors stay retrievable via FTS/importance (mixed-space safety).
-
-    ``reranker`` is the optional bounded second stage (issue #80):
-    ``None`` preserves the exact first-stage ranking (zero extra work).
-    """
-    if vector_backend not in VALID_BACKENDS:
+    """Create and configure the FastAPI application with an instance-owned HotMemRuntime."""
+    if runtime is not None and str(runtime.db_path) != str(db_path):
         raise ValueError(
-            f"unknown vector_backend {vector_backend!r}; expected one of {VALID_BACKENDS}"
+            f"runtime store {runtime.db_path!r} does not match db_path {str(db_path)!r}"
         )
-    _state["db_path"] = str(db_path)
-    _state["swap_path"] = str(swap_path) if swap_path else None
-    _state["port"] = port
-    _state["vector_backend"] = vector_backend
-    _state["vector_index_injected"] = vector_index
-    _state["embedder"] = embedder if embedder is not None else DEFAULT_EMBEDDER
-    _state["reranker"] = reranker
-    if base_dir is None:
-        base_dir = str(Path(db_path).resolve().parent)
-    _state["base_dir"] = str(base_dir)
+    owned_runtime = (
+        runtime
+        if runtime is not None
+        else HotMemRuntime(
+            db_path=db_path,
+            swap_path=swap_path,
+            port=port,
+            base_dir=base_dir,
+            vector_backend=vector_backend,
+            vector_index=vector_index,
+            embedder=embedder,
+            reranker=reranker,
+            policy=policy,
+            store_id=store_id,
+            policy_path=policy_path,
+        )
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        owned_runtime.open()
+        app.state.runtime = owned_runtime
+        try:
+            yield
+        finally:
+            owned_runtime.close()
 
     app = FastAPI(
         title="HotMem",
@@ -352,8 +307,11 @@ def create_app(
         version=_VERSION,
         lifespan=lifespan,
     )
+    app.state.runtime = owned_runtime
 
-    # ── Trace middleware ─────────────────────────────────────────────────
+    @app.exception_handler(PolicyError)
+    async def policy_error_handler(request: Request, exc: PolicyError):
+        return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
 
     @app.middleware("http")
     async def trace_middleware(request: Request, call_next):
@@ -372,247 +330,119 @@ def create_app(
     # ── Endpoints ────────────────────────────────────────────────────────
 
     @app.get("/v1/health")
-    async def health():
-        db: MemoryDB = _state["db"]
-        embedder: Embedder = _state["embedder"]
-        descriptor = embedder.descriptor
-        return {
-            "status": "ok",
-            "memory_count": db.count(),
-            "db_path": _state["db_path"],
-            "uptime_s": round(time.time() - _state["start_time"], 1),
-            # Sanitized active embedding descriptor (issue #78; additive) —
-            # the key/dimension only, never paths or provider secrets.
-            "embedding": {"model": descriptor.key, "dim": descriptor.dimension},
-        }
+    async def health(request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(owned_runtime.health, ctx)
 
     @app.post("/v1/add")
-    async def add_memory(req: AddRequest):
-        db: MemoryDB = _state["db"]
-        base_dir: str = _state["base_dir"]
-        embedder: Embedder = _state["embedder"]
-        # #79: the reserved annotations envelope is validated at ingestion
-        # with an actionable error — never silently stored malformed.
+    async def add_memory(req: AddRequest, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
         try:
-            validate_metadata(req.metadata)
+            return await asyncio.to_thread(
+                owned_runtime.add,
+                ctx,
+                identifier=req.identifier,
+                fact=req.fact,
+                file_uri=req.file_uri,
+                byte_offset=req.byte_offset,
+                byte_length=req.byte_length,
+                source_format=req.source_format,
+                source_checksum=req.source_checksum,
+                summary=req.summary,
+                source=req.source,
+                importance=req.importance,
+                metadata=req.metadata,
+                ttl_seconds=req.ttl_seconds,
+            )
         except AnnotationValidationError as err:
             return JSONResponse(
                 status_code=400,
                 content={"error": "invalid_annotations", "message": str(err)},
             )
-        with Timer() as t:
-            if req.file_uri is not None:
-                # File-backed path: store a reference, zero bytes copied.
-                ref = FileRef(
-                    source_uri=req.file_uri,
-                    byte_offset=req.byte_offset or 0,
-                    byte_length=req.byte_length or 0,
-                    source_format=req.source_format or "",
-                    source_checksum=req.source_checksum,
-                )
-                try:
-                    memory_id, content_hash = add_file_backed(
-                        db,
-                        identifier=req.identifier,
-                        file_ref=ref,
-                        base_dir=base_dir,
-                        summary=req.summary,
-                        importance=req.importance,
-                        metadata=req.metadata,
-                        source=req.source,
-                        embedder=embedder,
-                    )
-                except UnsupportedSchemeError as err:
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "error": "unsupported_scheme",
-                            "scheme": err.args[0] if err.args else "unknown",
-                            "message": (
-                                "only local schemes are supported (file://, "
-                                "absolute, relative); remote schemes are not supported"
-                            ),
-                        },
-                    )
-                except FileNotFoundError as err:
-                    return JSONResponse(
-                        status_code=400,
-                        content={
-                            "error": "backing_file_not_found",
-                            "source_uri": req.file_uri,
-                            "message": str(err),
-                        },
-                    )
-                # Emit event in the same transaction (atomic with the memory write).
-                from hotmem.events import _build_memory_created_payload
-
-                record = db.get_memory(memory_id) or {}
-                append_event(
-                    db,
-                    event_type=EventType.MEMORY_CREATED,
-                    memory_id=memory_id,
-                    payload=_build_memory_created_payload(record),
-                    _commit=True,
-                )
-            else:
-                # Inline path — canonical add under the runtime embedder (#78).
-                active = embedder
-                memory_id = uuid.uuid4().hex
-                content_hash = compute_content_hash(req.identifier, req.fact or "")
-                vec = active.embed(req.fact or "")
-                blob = pack_embedding(vec)
-
-                db.insert(
-                    id=memory_id,
-                    identifier=req.identifier,
-                    fact_text=req.fact or "",
-                    embedding=blob,
-                    embedding_dim=active.descriptor.dimension,
-                    embedding_model=active.descriptor.key,
-                    source=req.source,
-                    importance=req.importance,
-                    metadata_json=json.dumps(req.metadata),
-                    content_hash=content_hash,
-                    ttl_seconds=req.ttl_seconds,
-                )
-                # Emit event in the same transaction (atomic with the memory write).
-                from hotmem.events import _build_memory_created_payload
-
-                record = db.get_memory(memory_id) or {}
-                append_event(
-                    db,
-                    event_type=EventType.MEMORY_CREATED,
-                    memory_id=memory_id,
-                    payload=_build_memory_created_payload(record),
-                    _commit=True,
-                )
-        return {
-            "memory_id": memory_id,
-            "content_hash": content_hash,
-            "trace_ms": round(t.ms, 2),
-        }
+        except UnsupportedSchemeError as err:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "unsupported_scheme",
+                    "scheme": err.args[0] if err.args else "unknown",
+                    "message": (
+                        "only local schemes are supported (file://, "
+                        "absolute, relative); remote schemes are not supported"
+                    ),
+                },
+            )
+        except FileNotFoundError as err:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "backing_file_not_found",
+                    "source_uri": req.file_uri,
+                    "message": str(err),
+                },
+            )
 
     @app.post("/v1/search")
-    async def search(req: SearchRequest):
-        db: MemoryDB = _state["db"]
-        vector_index: VectorIndex = _state["vector_index"]
-        with Timer() as t:
-            messages = search_memories(
-                db,
-                query=req.query,
-                top_k=req.top_k,
-                max_chars=req.max_chars,
-                vector_index=vector_index,
-                embedder=_state["embedder"],
-                reranker=_state.get("reranker"),
-            )
-        return {
-            "memories": messages,
-            "count": len(messages),
-            "trace_ms": round(t.ms, 2),
-        }
+    async def search(req: SearchRequest, request: Request):
+        ctx = _resolve_caller(owned_runtime, request)
+        return owned_runtime.search(
+            ctx,
+            query=req.query,
+            top_k=req.top_k,
+            max_chars=req.max_chars,
+        )
 
     @app.get("/v1/memories")
     async def list_memories(
+        request: Request,
         identifier: str,
         order: str = "asc",
         limit: int = 100,
     ):
-        """Return memories for an identifier in created_at order."""
-        db: MemoryDB = _state["db"]
+        ctx = _resolve_caller(owned_runtime, request)
         if order not in ("asc", "desc"):
             raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'")
         if limit < 1 or limit > 1000:
             raise HTTPException(status_code=400, detail="limit must be 1..1000")
-        with Timer() as t:
-            rows = db.list_by_identifier(identifier, order=order, limit=limit)
-        return {
-            "memories": rows,
-            "count": len(rows),
-            "trace_ms": round(t.ms, 2),
-        }
+        return owned_runtime.list_memories(
+            ctx,
+            identifier=identifier,
+            order=order,
+            limit=limit,
+        )
 
     @app.get("/v1/memory/{memory_id}")
-    async def get_memory(memory_id: str):
-        """Return memory metadata WITHOUT touching the backing file (lazy)."""
-        db: MemoryDB = _state["db"]
-        record = get_memory_metadata(db, memory_id)
-        if record is None:
+    async def get_memory(memory_id: str, request: Request):
+        ctx = _resolve_caller(owned_runtime, request)
+        meta = owned_runtime.get_memory(ctx, memory_id)
+        if meta is None:
             return JSONResponse(
                 status_code=404,
                 content={"error": "not_found", "memory_id": memory_id},
             )
-        meta = {
-            "id": record["id"],
-            "identifier": record["identifier"],
-            "memory_type": record["memory_type"],
-            "fact_text": record["fact_text"],
-            "fact_summary": record.get("fact_summary"),
-            "embedding_dim": record["embedding_dim"],
-            "embedding_model": record["embedding_model"],
-            "source": record["source"],
-            "importance": record["importance"],
-            "metadata": _safe_json(record["metadata_json"], {}),
-            "content_hash": record["content_hash"],
-            "source_uri": record["source_uri"],
-            "byte_offset": record["byte_offset"],
-            "byte_length": record["byte_length"],
-            "source_checksum": record["source_checksum"],
-            "source_format": record["source_format"],
-            "provenance": _safe_json(record.get("provenance_json"), None),
-            "created_at": record["created_at"],
-        }
         return meta
 
     @app.post("/v1/memory/{memory_id}/hydrate")
-    async def hydrate_one(memory_id: str, req: HydrateOneRequest | None = None):
-        """Materialize a memory's payload on demand (lazy hydration).
+    async def hydrate_one(
+        memory_id: str,
+        request: Request,
+        req: HydrateOneRequest | None = None,
+    ):
+        import asyncio
 
-        When no body is sent, returns raw bytes (backward-compatible).
-        When a body with ``profile`` is sent, returns a JSON ProfiledHydration.
-        """
-        db: MemoryDB = _state["db"]
-        base_dir: str = _state["base_dir"]
-
+        ctx = _resolve_caller(owned_runtime, request)
         if req is not None:
-            with Timer() as t:
-                try:
-                    ph = hydrate_with_profile(
-                        db,
-                        memory_id,
-                        profile=req.profile,
-                        base_dir=base_dir,
-                        verify=req.verify,
-                    )
-                except KeyError:
-                    return JSONResponse(
-                        status_code=404,
-                        content={"error": "not_found", "memory_id": memory_id},
-                    )
-                except ProvenanceError as err:
-                    return JSONResponse(
-                        status_code=409,
-                        content={
-                            "error": "provenance_mismatch",
-                            "reason": err.reason,
-                            "expected": err.expected,
-                            "actual": err.actual,
-                            "source_uri": err.source_uri,
-                            "message": str(err),
-                        },
-                    )
-                except ValueError as err:
-                    return JSONResponse(
-                        status_code=400,
-                        content={"error": "invalid_profile", "message": str(err)},
-                    )
-            d = ph.to_dict()
-            d["trace_ms"] = round(t.ms, 2)
-            return d
-
-        with Timer() as t:
             try:
-                payload = hydrate_memory(db, memory_id, base_dir=base_dir)
+                return await asyncio.to_thread(
+                    owned_runtime.hydrate_one_profiled,
+                    ctx,
+                    memory_id,
+                    profile=req.profile,
+                    verify=req.verify,
+                )
             except KeyError:
                 return JSONResponse(
                     status_code=404,
@@ -630,29 +460,48 @@ def create_app(
                         "message": str(err),
                     },
                 )
-            except UnsupportedSchemeError as err:
+            except ValueError as err:
                 return JSONResponse(
                     status_code=400,
-                    content={"error": "unsupported_scheme", "message": str(err)},
+                    content={"error": "invalid_profile", "message": str(err)},
                 )
 
-            record = get_memory_metadata(db, memory_id)
-            verified = record is not None and bool(record["source_checksum"])
-            source_format = record.get("source_format", "") if record else ""
-
-        headers = {
-            "X-HotMem-Source-Format": source_format or "",
-            "X-HotMem-Provenance": "verified" if verified else "unverified",
-            "X-HotMem-Trace-Ms": str(round(t.ms, 2)),
-        }
+        try:
+            payload, headers = await asyncio.to_thread(
+                owned_runtime.hydrate_one_raw, ctx, memory_id
+            )
+        except KeyError:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "not_found", "memory_id": memory_id},
+            )
+        except ProvenanceError as err:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "provenance_mismatch",
+                    "reason": err.reason,
+                    "expected": err.expected,
+                    "actual": err.actual,
+                    "source_uri": err.source_uri,
+                    "message": str(err),
+                },
+            )
+        except UnsupportedSchemeError as err:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "unsupported_scheme", "message": str(err)},
+            )
         return Response(content=payload, media_type="application/octet-stream", headers=headers)
 
     @app.post("/v1/hydrate")
-    async def hydrate(req: HydrateRequest):
-        db: MemoryDB = _state["db"]
-        target = req.path or req.file or _state.get("swap_path") or "swap.jsonl"
+    async def hydrate(req: HydrateRequest, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        target = req.path or req.__dict__.get("file")
         try:
-            result = snapshot_hydrate(db, target, embedder=_state["embedder"])
+            return await asyncio.to_thread(owned_runtime.hydrate_snapshot, ctx, target=target)
         except SnapshotChecksumError as err:
             return JSONResponse(
                 status_code=409,
@@ -679,97 +528,52 @@ def create_app(
             )
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
-        # Record import event (deduplicated via emit_import_event helper).
-        emit_import_event(
-            db,
-            path=target,
-            loaded=result.loaded,
-            skipped_dupes=result.skipped_dupes,
-            invalid=result.invalid,
-        )
-        return {
-            "loaded": result.loaded,
-            "skipped_dupes": result.skipped_dupes,
-            "invalid": result.invalid,
-            "path": target,
-            # Embedding + annotation dispositions (issues #78/#79; additive
-            # response fields) — one shared definition with MCP and CLI.
-            **result.disposition(),
-        }
 
     @app.post("/v1/snapshot")
-    async def snapshot(req: SnapshotRequest):
-        db: MemoryDB = _state["db"]
-        base_dir: str = _state["base_dir"]
-        target = req.path or req.file or _state.get("swap_path") or "swap.jsonl"
+    async def snapshot(req: SnapshotRequest, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        target = req.path or req.__dict__.get("file")
         try:
-            result = snapshot_write(
-                db,
-                target,
+            return await asyncio.to_thread(
+                owned_runtime.snapshot,
+                ctx,
+                target=target,
                 copy_attachments=req.copy_attachments,
-                base_dir=base_dir,
                 package=req.package,
                 gz=req.gz,
             )
-        except SnapshotChecksumError as err:
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "error": "snapshot_checksum_mismatch",
-                    "reason": err.reason,
-                    "file": err.file,
-                    "expected": err.expected,
-                    "actual": err.actual,
-                    "message": str(err),
-                },
-            )
         except ValueError as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
-        return {
-            "exported": result.exported,
-            "path": result.path,
-        }
 
     # ── Session handoff endpoints (#101) ───────────────────────────────
 
     @app.post("/v1/handoff/prepare")
-    async def handoff_prepare(req: HandoffPrepareRequest):
-        """Prepare a hotmem-handoff-v1 package from a source export.
+    async def handoff_prepare(req: HandoffPrepareRequest, request: Request):
+        import asyncio
 
-        Consent is required and checked before any session content is
-        read; an HTTP client can never capture a session implicitly.
-        """
+        ctx = _resolve_caller(owned_runtime, request)
         try:
-            result = prepare_handoff(
-                req.source,
-                req.output,
+            return await asyncio.to_thread(
+                owned_runtime.handoff_prepare,
+                ctx,
+                source=req.source,
+                output=req.output,
                 mode=req.mode,
                 consent=req.consent,
-                session_id=req.session,
+                session=req.session,
             )
         except (SourceError, ValueError) as err:
             raise HTTPException(status_code=400, detail=str(err)) from err
-        counts = result.manifest["counts"]
-        return {
-            "handoff_id": result.handoff_id,
-            "package_id": result.package_id,
-            "mode": result.manifest["mode"],
-            "entries": counts["entries"],
-            "memories": counts["memories"],
-            "coverage": {
-                "omitted_count": result.coverage["omitted_count"],
-                "redacted_count": result.coverage["redacted_count"],
-                "recoverable_count": result.coverage["recoverable_count"],
-            },
-            "path": result.path,
-            "timings_ms": result.timings_ms,
-        }
 
     @app.post("/v1/handoff/verify")
-    async def handoff_verify(req: HandoffPackageRequest):
-        """Fail-closed verification: 409 with structured diagnostics when invalid."""
+    async def handoff_verify(req: HandoffPackageRequest, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
         try:
-            verified = verify_handoff(req.package)
+            return await asyncio.to_thread(owned_runtime.handoff_verify, ctx, package=req.package)
         except HandoffError as err:
             return JSONResponse(
                 status_code=409,
@@ -782,26 +586,21 @@ def create_app(
                     "message": str(err),
                 },
             )
-        return {
-            "valid": True,
-            "package_id": verified.manifest["package_id"],
-            "mode": verified.manifest["mode"],
-            "entries": verified.entry_count,
-            "memories": verified.memory_count,
-        }
 
     @app.get("/v1/handoff/inspect")
-    async def handoff_inspect(package: str):
-        """Read-only inspection; reports failures as data (criterion 11)."""
-        return inspect_handoff(package)
+    async def handoff_inspect(package: str, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(owned_runtime.handoff_inspect, ctx, package=package)
 
     @app.post("/v1/handoff/hydrate")
-    async def handoff_hydrate(req: HandoffPackageRequest):
-        """Hydrate a verified package into this sidecar's database (atomic)."""
-        db: MemoryDB = _state["db"]
-        embedder: Embedder = _state["embedder"]
+    async def handoff_hydrate(req: HandoffPackageRequest, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
         try:
-            result = hydrate_handoff(db, req.package, embedder=embedder)
+            return await asyncio.to_thread(owned_runtime.handoff_hydrate, ctx, package=req.package)
         except HandoffError as err:
             return JSONResponse(
                 status_code=409,
@@ -814,186 +613,63 @@ def create_app(
                     "message": str(err),
                 },
             )
-        return {
-            "handoff_id": result.handoff_id,
-            "package_id": result.package_id,
-            "loaded": result.loaded,
-            "skipped": result.skipped_dupes,
-            "invalid": result.invalid,
-            "already_applied": result.already_applied,
-            "brief": result.brief_identifier,
-            **result.disposition(),
-        }
 
     # ── Filesystem awareness endpoints (#43) ────────────────────────────
 
     @app.get("/v1/files")
-    async def list_files(identifier: str | None = None):
-        """List file-backed memory references (metadata only, no file reads)."""
-        db: MemoryDB = _state["db"]
-        with Timer() as t:
-            rows = db.list_file_backed()
-            if identifier:
-                rows = [r for r in rows if r["identifier"] == identifier]
-            from pathlib import Path as _P
-
-            from hotmem.storage import get_adapter
-
-            files = []
-            for row in rows:
-                source_uri = row.get("source_uri") or ""
-                exists = False
-                size = row.get("byte_length") or 0
-                if source_uri:
-                    resolved = source_uri
-                    if "://" not in source_uri and not _P(source_uri).is_absolute():
-                        resolved = str(_P(_state["base_dir"]) / source_uri)
-                    try:
-                        adapter = get_adapter(resolved)
-                        exists = adapter.exists(resolved)
-                        if exists:
-                            meta = adapter.metadata(resolved)
-                            size = meta["size"]
-                    except Exception:
-                        pass
-                files.append(
-                    {
-                        "memory_id": row["id"],
-                        "identifier": row["identifier"],
-                        "source_uri": source_uri,
-                        "byte_offset": row.get("byte_offset") or 0,
-                        "byte_length": row.get("byte_length") or 0,
-                        "source_format": row.get("source_format") or "",
-                        "source_checksum": row.get("source_checksum") or None,
-                        "exists": exists,
-                        "size": size,
-                    }
-                )
-        return {"files": files, "count": len(files), "trace_ms": round(t.ms, 2)}
-
-    @app.get("/v1/bundles")
-    async def list_bundles():
-        """List discovered bundle index entries from the DB."""
-        db: MemoryDB = _state["db"]
-        with Timer() as t:
-            rows = db.list_bundle_index()
-        return {"bundles": rows, "count": len(rows), "trace_ms": round(t.ms, 2)}
-
-    @app.post("/v1/discover")
-    async def discover(req: DiscoverRequest):
-        """Trigger bundle discovery under a root directory."""
+    async def list_files(request: Request, identifier: str | None = None):
         import asyncio
 
-        from hotmem.bundle_index import index_bundles
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(owned_runtime.list_files, ctx, identifier=identifier)
 
-        db: MemoryDB = _state["db"]
-        with Timer() as t:
-            try:
-                result = await asyncio.to_thread(
-                    index_bundles, db, req.root, max_depth=req.max_depth
-                )
-            except FileNotFoundError as err:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": "root_not_found", "message": str(err)},
-                )
-        append_event(
-            db,
-            event_type=EventType.BUNDLE_DISCOVERED,
-            payload={
-                "root": req.root,
-                "discovered": result.discovered,
-                "indexed": result.indexed,
-                "warnings": len(result.warnings),
-            },
-        )
-        return {
-            "discovered": result.discovered,
-            "indexed": result.indexed,
-            "warnings": len(result.warnings),
-            "trace_ms": round(t.ms, 2),
-        }
+    @app.get("/v1/bundles")
+    async def list_bundles(request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(owned_runtime.list_bundles, ctx)
+
+    @app.post("/v1/discover")
+    async def discover(req: DiscoverRequest, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        try:
+            return await asyncio.to_thread(
+                owned_runtime.discover, ctx, root=req.root, max_depth=req.max_depth
+            )
+        except FileNotFoundError as err:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "root_not_found", "message": str(err)},
+            )
 
     @app.post("/v1/memory/hydrate-batch")
-    async def hydrate_batch(req: HydrateBatchRequest):
-        """Batch hydrate multiple memories with a profile."""
-        db: MemoryDB = _state["db"]
-        base_dir: str = _state["base_dir"]
-        with Timer() as t:
-            results = []
-            for mid in req.memory_ids:
-                try:
-                    ph = hydrate_with_profile(
-                        db,
-                        mid,
-                        profile=req.profile,
-                        base_dir=base_dir,
-                        verify=req.verify,
-                    )
-                    results.append(ph.to_dict())
-                except KeyError:
-                    results.append({"memory_id": mid, "error": "not_found"})
-                except ProvenanceError as err:
-                    results.append(
-                        {
-                            "memory_id": mid,
-                            "error": "provenance_mismatch",
-                            "reason": err.reason,
-                            "source_uri": err.source_uri,
-                        }
-                    )
-                except ValueError as err:
-                    results.append(
-                        {"memory_id": mid, "error": "invalid_profile", "message": str(err)}
-                    )
-        return {"results": results, "count": len(results), "trace_ms": round(t.ms, 2)}
+    async def hydrate_batch(req: HydrateBatchRequest, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(
+            owned_runtime.hydrate_batch,
+            ctx,
+            req.memory_ids,
+            profile=req.profile,
+            verify=req.verify,
+        )
 
     # ── Hygiene endpoint (#51) ─────────────────────────────────────────
 
     @app.get("/v1/hygiene")
-    async def hygiene():
-        """Run advisory hygiene checks on the store."""
+    async def hygiene(request: Request):
         import asyncio
 
-        db: MemoryDB = _state["db"]
-        report = await asyncio.to_thread(check_hygiene, db, base_dir=_state.get("base_dir"))
-        # Record a summary event plus one event per error-severity warning so
-        # Consumers can detect store decay from the log without polling
-        # /v1/hygiene.
-        counts = {
-            "warning_count": len(report.warnings),
-            "error_count": sum(1 for w in report.warnings if w.severity == "error"),
-            "warn_count": sum(1 for w in report.warnings if w.severity == "warn"),
-            "info_count": sum(1 for w in report.warnings if w.severity == "info"),
-        }
-        append_event(
-            db,
-            event_type=EventType.HYGIENE_CHECKED,
-            payload=counts,
-        )
-        for w in report.warnings:
-            if w.severity != "error":
-                continue
-            append_event(
-                db,
-                event_type=EventType.HYGIENE_WARNING,
-                memory_id=w.detail.get("memory_id"),
-                payload={
-                    "category": w.category,
-                    "severity": w.severity,
-                    "message": w.message,
-                    "source_uri": w.detail.get("source_uri"),
-                    "identifier": w.detail.get("identifier"),
-                },
-            )
-        # Retention: cap event log at 10K entries on each hygiene check.
-        _MAX_EVENT_ROWS = 10_000
-        with contextlib.suppress(Exception):
-            db.trim_events_by_count(_MAX_EVENT_ROWS)
-        return report.to_dict()
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(owned_runtime.hygiene, ctx)
 
     @app.get("/v1/events")
     async def list_events(
+        request: Request,
         memory_id: str | None = None,
         namespace: str | None = None,
         event_type: str | None = None,
@@ -1004,233 +680,145 @@ def create_app(
         limit: int = 100,
         order: str = "asc",
     ):
-        """List local lifecycle events with filtering and deterministic pagination.
-
-        Events are append-only local metadata — this endpoint never triggers
-        file hydration. Ordering is deterministic via the monotonic ``seq``
-        column. Use ``after_seq`` / ``before_seq`` for cursor-based pagination.
-        """
-        db: MemoryDB = _state["db"]
+        ctx = _resolve_caller(owned_runtime, request)
         if order not in ("asc", "desc"):
             raise HTTPException(status_code=400, detail="order must be 'asc' or 'desc'")
         if limit < 1 or limit > 1000:
             raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
-        with Timer() as t:
-            listing = query_events(
-                db,
-                memory_id=memory_id,
-                namespace=namespace,
-                event_type=event_type,
-                since=since,
-                until=until,
-                after_seq=after_seq,
-                before_seq=before_seq,
-                limit=limit,
-                ascending=(order == "asc"),
-            )
-        return {
-            "events": listing["events"],
-            "count": listing["count"],
-            "next_seq": listing["next_seq"],
-            "trace_ms": round(t.ms, 2),
-        }
+        return owned_runtime.list_events(
+            ctx,
+            memory_id=memory_id,
+            namespace=namespace,
+            event_type=event_type,
+            since=since,
+            until=until,
+            after_seq=after_seq,
+            before_seq=before_seq,
+            limit=limit,
+            order=order,
+        )
 
     # ── Promotion lifecycle endpoints (#42, signal only) ────────────────
 
     @app.post("/v1/memory/{memory_id}/promote")
-    async def promote_memory(memory_id: str, req: PromoteRequest):
-        """Apply one forward-only promotion transition.
+    async def promote_memory(memory_id: str, req: PromoteRequest, request: Request):
+        import asyncio
 
-        HotMem stores state and emits a ``memory.promotion`` event; policy is
-        external to the runtime. Returns 409 ``invalid_transition`` (without mutating state) for
-        any transition not in HOT -> READY -> PROMOTED -> ARCHIVED.
-        """
-        db: MemoryDB = _state["db"]
-        with Timer() as t:
-            try:
-                result = transition(
-                    db,
-                    memory_id,
-                    req.to_state,
-                    reason=req.reason,
-                    actor=req.actor,
-                )
-            except KeyError:
-                return JSONResponse(
-                    status_code=404,
-                    content={"error": "not_found", "memory_id": memory_id},
-                )
-            except InvalidTransitionError as err:
-                return JSONResponse(status_code=409, content=err.to_dict())
-        result["trace_ms"] = round(t.ms, 2)
-        return result
+        ctx = _resolve_caller(owned_runtime, request)
+        try:
+            return await asyncio.to_thread(
+                owned_runtime.promote_memory,
+                ctx,
+                memory_id,
+                to_state=req.to_state,
+                reason=req.reason,
+                actor=req.actor,
+            )
+        except KeyError:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "not_found", "memory_id": memory_id},
+            )
+        except InvalidTransitionError as err:
+            return JSONResponse(status_code=409, content=err.to_dict())
 
     @app.post("/v1/memory/{memory_id}/candidate")
-    async def set_candidate(memory_id: str, req: CandidateRequest):
-        """Set the ``promotion_candidate`` flag on a memory (independent of state)."""
-        db: MemoryDB = _state["db"]
-        with Timer() as t:
-            try:
-                result = mark_candidate(
-                    db,
-                    memory_id,
-                    req.candidate,
-                    reason=req.reason,
-                )
-            except KeyError:
-                return JSONResponse(
-                    status_code=404,
-                    content={"error": "not_found", "memory_id": memory_id},
-                )
-        result["trace_ms"] = round(t.ms, 2)
-        return result
+    async def set_candidate(memory_id: str, req: CandidateRequest, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        try:
+            return await asyncio.to_thread(
+                owned_runtime.set_candidate,
+                ctx,
+                memory_id,
+                candidate=req.candidate,
+                reason=req.reason,
+            )
+        except KeyError:
+            return JSONResponse(
+                status_code=404,
+                content={"error": "not_found", "memory_id": memory_id},
+            )
 
     @app.get("/v1/promotion/candidates")
     async def promotion_candidates(
+        request: Request,
         namespace: str | None = None,
         state: str | None = None,
     ):
-        """List memories flagged as promotion candidates (pure DB read)."""
-        db: MemoryDB = _state["db"]
-        with Timer() as t:
-            rows = list_candidates(db, namespace=namespace, state=state)
-        candidates = [
-            {
-                "memory_id": r["id"],
-                "identifier": r["identifier"],
-                "namespace": r.get("namespace") or "",
-                "promotion_state": r.get("promotion_state") or "HOT",
-                "memory_type": r.get("memory_type") or "fact",
-                "created_at": r.get("created_at"),
-            }
-            for r in rows
-        ]
-        return {
-            "candidates": candidates,
-            "count": len(candidates),
-            "trace_ms": round(t.ms, 2),
-        }
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(
+            owned_runtime.promotion_candidates, ctx, namespace=namespace, state=state
+        )
 
     @app.get("/v1/promotion/states")
-    async def promotion_states():
-        """Return the static lifecycle model: states and valid transitions."""
-        return states_model()
+    async def promotion_states(request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(owned_runtime.promotion_states, ctx)
 
     @app.get("/v1/promotion/by-state")
     async def promotion_by_state(
+        request: Request,
         state: str,
         namespace: str | None = None,
     ):
-        """List memories in a given promotion_state (pure DB read)."""
-        db: MemoryDB = _state["db"]
-        with Timer() as t:
-            rows = list_by_state(db, state, namespace=namespace)
-        summaries = [
-            {
-                "memory_id": r["id"],
-                "identifier": r["identifier"],
-                "namespace": r.get("namespace") or "",
-                "promotion_state": r.get("promotion_state") or "HOT",
-                "promotion_candidate": bool(r.get("promotion_candidate") or 0),
-                "memory_type": r.get("memory_type") or "fact",
-                "created_at": r.get("created_at"),
-                "updated_at": r.get("updated_at"),
-            }
-            for r in rows
-        ]
-        return {
-            "memories": summaries,
-            "count": len(summaries),
-            "trace_ms": round(t.ms, 2),
-        }
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(
+            owned_runtime.promotion_by_state, ctx, state=state, namespace=namespace
+        )
 
     # ── Vector index endpoints (#49 — optional, derived, disposable) ────
 
     @app.post("/v1/vector-index/rebuild")
-    async def rebuild_index():
-        """Full rebuild of the derived vector index from canonical storage.
-
-        Reads only SQLite rows (metadata + embeddings) — never touches a
-        backing file. Returns 400 ``vector_index_disabled`` when no backend
-        is configured (the default). This is an admin operation, never on
-        the search hot path; stale indexes fall back to the SQLite scan.
-        """
+    async def rebuild_index(request: Request):
         import asyncio
 
-        db: MemoryDB = _state["db"]
-        vector_index: VectorIndex = _state["vector_index"]
-        if isinstance(vector_index, NullVectorIndex):
-            if vector_index.requested_backend == "none":
-                error = {
-                    "error": "vector_index_disabled",
-                    "message": (
-                        "no vector index backend is configured; start with "
-                        "--vector-index chroma to enable the derived index"
-                    ),
-                }
-            else:
-                error = {
-                    "error": "vector_dependency_missing",
-                    "requested_backend": vector_index.requested_backend,
-                    "message": (
-                        f"backend {vector_index.requested_backend!r} was requested but its "
-                        "package is not installed; install with: "
-                        "uv pip install 'hotmem[vector]'"
-                    ),
-                }
-            return JSONResponse(status_code=400, content=error)
-        result = await asyncio.to_thread(
-            rebuild_vector_index,
-            db,
-            vector_index,
-            # Stamp the ACTIVE descriptor (#78): the marker must prove which
-            # embedding space the index serves, so model switches read stale.
-            embedding_model=_state["embedder"].descriptor.key,
-            embedding_dim=_state["embedder"].descriptor.dimension,
-        )
-        append_event(
-            db,
-            event_type=EventType.INDEX_REBUILT,
-            payload={
-                "backend": vector_index.status(db)["backend"],
-                "indexed_count": result["indexed_count"],
-                "db_count": result["db_count"],
-                "skipped_no_embedding": result["skipped_no_embedding"],
-            },
-        )
-        return result
+        ctx = _resolve_caller(owned_runtime, request)
+        status_code, payload = await asyncio.to_thread(owned_runtime.vector_index_rebuild, ctx)
+        if status_code != 200:
+            return JSONResponse(status_code=status_code, content=payload)
+        return payload
 
     @app.get("/v1/vector-index/status")
-    async def vector_index_status():
-        """Observability for the derived index: backend, counts, staleness.
+    async def vector_index_status(request: Request):
+        import asyncio
 
-        ``stale: true`` means search is currently served by the deterministic
-        SQLite fallback (the index is never required for correctness).
-        """
-        db: MemoryDB = _state["db"]
-        vector_index: VectorIndex = _state["vector_index"]
-        with Timer() as t:
-            status = vector_index.status(db)
-        status["trace_ms"] = round(t.ms, 2)
-        return status
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(owned_runtime.vector_index_status, ctx)
 
     @app.delete("/v1/vector-index")
-    async def clear_index():
-        """Clear the derived index (entries + rebuild marker).
+    async def clear_index(request: Request):
+        import asyncio
 
-        The index is disposable: clearing it never loses memory — canonical
-        storage is untouched and search falls back to the SQLite scan until
-        the next rebuild.
-        """
-        db: MemoryDB = _state["db"]
-        vector_index: VectorIndex = _state["vector_index"]
-        with Timer() as t:
-            vector_index.clear()
-            cleared_count = db.count()  # canonical store is the survivor
-        return {
-            "cleared": True,
-            "db_count": cleared_count,
-            "trace_ms": round(t.ms, 2),
-        }
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(owned_runtime.vector_index_clear, ctx)
+
+    # ── Policy management (#110: immediate revocation) ─────────────────
+
+    @app.post("/v1/policy/revoke")
+    async def policy_revoke(req: PolicyRevokeRequest, request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(
+            owned_runtime.revoke_policy,
+            ctx,
+            caller_id=req.caller_id,
+            approval_id=req.approval_id,
+        )
+
+    @app.post("/v1/policy/reload")
+    async def policy_reload(request: Request):
+        import asyncio
+
+        ctx = _resolve_caller(owned_runtime, request)
+        return await asyncio.to_thread(owned_runtime.reload_policy, ctx)
 
     return app

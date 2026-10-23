@@ -4,7 +4,7 @@ Uses HotMemDeps as the agent's dependency container and recall_system_prompt
 to inject ranked memories into the system prompt each turn. A `remember`
 tool persists new facts.
 
-Run: hotmem serve  then  python agent.py
+Run: hotmem serve --db ./hotmem.sqlite  then  python agent.py
 """
 
 from __future__ import annotations

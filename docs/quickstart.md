@@ -24,8 +24,8 @@ support boundary, see [Windows qualification](#windows-qualification).
 # Start with a mount directory (portable memory)
 hotmem serve --mount ./hotmem
 
-# Or just start (uses temp DB)
-hotmem serve
+# Or start with an explicit SQLite database path
+hotmem serve --db ./hotmem.sqlite
 ```
 
 ## 4. Add and Search Memories

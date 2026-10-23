@@ -423,10 +423,10 @@ def merge_duplicate_annotations(
     if not incoming_with_annotations:
         return
 
-    hashes = [r["content_hash"] for r in incoming_with_annotations]
-    existing_rows = db.fetch_metadata_by_hashes(hashes)
+    pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in incoming_with_annotations]
+    existing_rows = db.fetch_metadata_by_namespace_hashes(pairs)
     for rec in incoming_with_annotations:
-        target_row = existing_rows.get(rec["content_hash"])
+        target_row = existing_rows.get((str(rec.get("namespace") or ""), rec["content_hash"]))
         if not target_row:
             continue
         target_meta = target_row.get("metadata")

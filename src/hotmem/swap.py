@@ -170,7 +170,7 @@ def record_to_memory_record(
         parent_memory=rec["parent_memory"],
         related_memories=json.dumps(rec["related_memories"]),
         tags=json.dumps(rec["tags"]),
-        schema_version=rec["schema_version"],
+        schema_version=rec.get("record_schema_version") or rec["schema_version"],
         fact_summary=rec["fact_summary"],
         provenance_json=json.dumps(rec["provenance"]) if rec["provenance"] else None,
     )
@@ -193,13 +193,16 @@ def _flush_batch(
     Annotation-only changes on content-hash duplicates merge in-batch (#79):
     disjoint items combine, conflicts are retained — never last-write-wins.
     """
-    existing = db.batch_existing_hashes([r["content_hash"] for r in pending])
-    todo = [r for r in pending if r["content_hash"] not in existing]
+    pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in pending]
+    existing = db.batch_existing_namespace_hashes(pairs)
+    todo = [
+        r for r in pending if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
+    ]
     counters["skipped"] += len(pending) - len(todo)
 
     merge_duplicate_annotations(
         db,
-        [r for r in pending if r["content_hash"] in existing],
+        [r for r in pending if (str(r.get("namespace") or ""), r["content_hash"]) in existing],
         counters,
         # Per-batch autocommit path: no later commit exists to carry an
         # all-duplicate batch's merge (durability, #79 review).
@@ -264,7 +267,7 @@ def hydrate(
             "annotation_conflicts": 0,
         }
         pending: list[dict] = []
-        batch_seen: set[str] = set()
+        batch_seen: set[tuple[str, str]] = set()
 
         def flush() -> None:
             if pending:
@@ -304,11 +307,11 @@ def hydrate(
                         counters["invalid"] += 1
                         continue
 
-                    content_hash = rec["content_hash"]
-                    if content_hash in batch_seen:
+                    dedup_key = (str(rec.get("namespace") or ""), rec["content_hash"])
+                    if dedup_key in batch_seen:
                         counters["skipped"] += 1
                         continue
-                    batch_seen.add(content_hash)
+                    batch_seen.add(dedup_key)
                     pending.append(rec)
                     if len(pending) >= HYDRATE_BATCH:
                         flush()
@@ -401,8 +404,9 @@ def snapshot(
     *,
     include_embeddings: bool = True,
     on_progress: Callable[[int], None] | None = None,
+    row_filter: Callable[[dict], bool] | None = None,
 ) -> SnapshotResult:
-    """Export all memories from the database to a JSONL or JSONL.GZ swap file.
+    """Export memories from the database to a JSONL or JSONL.GZ swap file.
 
     Streams rows in id order (fetchmany batches) so memory stays O(batch)
     for large stores (interchange #67). on_progress, if given, is invoked
@@ -414,6 +418,8 @@ def snapshot(
         exported = 0
         with _open_swap_write(swap_path) as f:
             for row in db.iter_rows(include_embedding=include_embeddings):
+                if row_filter is not None and not row_filter(row):
+                    continue
                 embedding = row.pop("embedding", None)
                 if embedding is not None:
                     row["embedding_b64"] = base64.b64encode(embedding).decode("ascii")

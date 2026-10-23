@@ -51,6 +51,10 @@ export time (`created_at`) and `hotmem_version`, which are informational.
 
 - `format`: always `"hotmem-snapshot-v2"`.
 - `schema_version`: `2`. Bumped for future incompatible changes.
+- `scope` (optional, informational): present on scoped daemon exports;
+  records `caller_id`, `session_id`, `source`, `namespace`,
+  `permitted_namespaces`, `share_approvals`, `exported_count`,
+  `omitted_count`, and `store_id`. It is never part of `overall_sha256`.
 - `snapshot_id`: `SHA-256` of the sorted `content_hash` list. Deterministic
   for identical DB contents regardless of insert order.
 - `created_at` / `hotmem_version`: informational provenance of the export.
@@ -106,9 +110,15 @@ same DB differ only in `created_at` (and `host`).
   "created_at": "2026-07-08T14:00:00+00:00",
   "host": "<hostname>",
   "db_path": "...",
-  "counts": {"inline": 39, "file": 3, "total": 42}
+  "counts": {"inline": 39, "file": 3, "total": 42},
+  "scope": {"caller_id": "caller-a", "exported_count": 39,
+            "omitted_count": 3, "...": "..."}
 }
 ```
+
+`host` and `db_path` are empty strings on scoped daemon exports (no path
+disclosure). `scope` is present only for scoped exports; it is informational
+and never checksummed.
 
 ## `attachments/`
 

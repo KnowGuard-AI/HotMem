@@ -338,7 +338,7 @@ def hydrate_package(
             "annotation_conflicts": 0,
         }
         pending: list[dict] = []
-        batch_seen: set[str] = set()
+        batch_seen: set[tuple[str, str]] = set()
 
         package_ids, referenced_ids, has_annotations = _scan_annotation_context(verified.stream())
         known_ids: set[str] | None = None
@@ -351,13 +351,23 @@ def hydrate_package(
         def flush() -> None:
             if not pending:
                 return
-            hashes = [r["content_hash"] for r in pending]
-            existing = db.batch_existing_hashes(hashes)
-            todo = [r for r in pending if r["content_hash"] not in existing]
+            pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in pending]
+            existing = db.batch_existing_namespace_hashes(pairs)
+            todo = [
+                r
+                for r in pending
+                if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
+            ]
             counters["skipped"] += len(pending) - len(todo)
 
             merge_duplicate_annotations(
-                db, [r for r in pending if r["content_hash"] in existing], counters
+                db,
+                [
+                    r
+                    for r in pending
+                    if (str(r.get("namespace") or ""), r["content_hash"]) in existing
+                ],
+                counters,
             )
 
             records = []
@@ -417,11 +427,11 @@ def hydrate_package(
                         detail={"id": rec["id"], "issues": issues},
                     )
                     continue
-                content_hash = rec["content_hash"]
-                if content_hash in batch_seen:
+                dedup_key = (str(rec.get("namespace") or ""), rec["content_hash"])
+                if dedup_key in batch_seen:
                     counters["skipped"] += 1
                     continue
-                batch_seen.add(content_hash)
+                batch_seen.add(dedup_key)
                 pending.append(rec)
                 if len(pending) >= HYDRATE_BATCH:
                     flush()

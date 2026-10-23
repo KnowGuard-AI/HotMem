@@ -2,6 +2,7 @@ import type {
   AddOptions,
   AddResponse,
   HealthResponse,
+  HotMemClientOptions,
   HydrateResponse,
   Memory,
   SearchOptions,
@@ -13,23 +14,42 @@ const DEFAULT_BASE_URL = "http://127.0.0.1:8711";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
- * Typed TypeScript client for the HotMem HTTP API.
+ * Typed TypeScript client for the HotMem daemon/sidecar HTTP API (#109, #110, #111).
  *
  * Uses the global `fetch` — zero dependencies. Works in Node.js 18+,
  * Deno, Bun, and edge runtimes (Cloudflare Workers).
- *
- * @example
- * const client = new HotMemClient("http://127.0.0.1:8711");
- * await client.add("vendor_x", "Invoice total $5000", { importance: 0.8 });
- * const memories = await client.search("duplicate invoice risk", { topK: 5 });
  */
 export class HotMemClient {
   readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly contextHeaders: Record<string, string>;
 
-  constructor(baseUrl: string = DEFAULT_BASE_URL, timeoutMs: number = DEFAULT_TIMEOUT_MS) {
+  constructor(
+    baseUrl: string = DEFAULT_BASE_URL,
+    optionsOrTimeout: number | HotMemClientOptions = DEFAULT_TIMEOUT_MS,
+  ) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
-    this.timeoutMs = timeoutMs;
+    this.contextHeaders = {};
+    if (typeof optionsOrTimeout === "number") {
+      this.timeoutMs = optionsOrTimeout;
+    } else {
+      this.timeoutMs = optionsOrTimeout.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      if (optionsOrTimeout.token) {
+        this.contextHeaders["authorization"] = `Bearer ${optionsOrTimeout.token}`;
+      }
+      if (optionsOrTimeout.expectedStoreId) {
+        this.contextHeaders["x-hotmem-store-id"] = optionsOrTimeout.expectedStoreId;
+      }
+      if (optionsOrTimeout.sessionId) {
+        this.contextHeaders["x-hotmem-session-id"] = optionsOrTimeout.sessionId;
+      }
+      if (optionsOrTimeout.source) {
+        this.contextHeaders["x-hotmem-source"] = optionsOrTimeout.source;
+      }
+      if (optionsOrTimeout.namespace !== undefined && optionsOrTimeout.namespace !== "") {
+        this.contextHeaders["x-hotmem-namespace"] = optionsOrTimeout.namespace;
+      }
+    }
   }
 
   /** Check server health. */
@@ -56,7 +76,10 @@ export class HotMemClient {
     if (options.ttlSeconds !== undefined) {
       payload.ttl_seconds = options.ttlSeconds;
     }
-    return this.request<AddResponse>("POST", "/v1/add", payload);
+    const extraHeaders: Record<string, string> | undefined = options.idempotencyKey
+      ? { "x-hotmem-idempotency-key": options.idempotencyKey }
+      : undefined;
+    return this.request<AddResponse>("POST", "/v1/add", payload, extraHeaders);
   }
 
   /**
@@ -73,6 +96,14 @@ export class HotMemClient {
     }
     const res = await this.request<{ memories: Memory[] }>("POST", "/v1/search", payload);
     return res.memories;
+  }
+
+  /** Fetch metadata for one memory by ID without reading backing files. */
+  async getMemory(memoryId: string): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>(
+      "GET",
+      `/v1/memory/${encodeURIComponent(memoryId)}`,
+    );
   }
 
   /** Trigger swap file hydration. */
@@ -109,11 +140,17 @@ export class HotMemClient {
     method: string,
     path: string,
     body?: Record<string, unknown>,
+    extraHeaders?: Record<string, string>,
   ): Promise<T> {
     const url = `${this.baseUrl}${path}`;
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+      ...this.contextHeaders,
+      ...(extraHeaders ?? {}),
+    };
     const init: RequestInit = {
       method,
-      headers: { "content-type": "application/json" },
+      headers,
       signal: AbortSignal.timeout(this.timeoutMs),
     };
     if (body !== undefined) {
@@ -124,7 +161,11 @@ export class HotMemClient {
     try {
       resp = await fetch(url, init);
     } catch (err) {
-      throw new HotMemError(`request failed: ${err instanceof Error ? err.message : String(err)}`, 0, err);
+      throw new HotMemError(
+        `request failed: ${err instanceof Error ? err.message : String(err)}`,
+        0,
+        err,
+      );
     }
 
     let json: unknown = undefined;
@@ -138,9 +179,17 @@ export class HotMemClient {
     }
 
     if (!resp.ok) {
-      const message = typeof json === "object" && json && "detail" in json
-        ? String((json as Record<string, unknown>).detail)
-        : `HTTP ${resp.status}`;
+      let message = `HTTP ${resp.status}`;
+      if (typeof json === "object" && json) {
+        const obj = json as Record<string, unknown>;
+        if ("detail" in obj) {
+          message = String(obj.detail);
+        } else if ("error" in obj && "message" in obj) {
+          message = `${String(obj.error)}: ${String(obj.message)}`;
+        } else if ("message" in obj) {
+          message = String(obj.message);
+        }
+      }
       throw new HotMemError(message, resp.status, json);
     }
 

@@ -1,10 +1,20 @@
-/** Request/response types for the HotMem HTTP API. */
+/** Request/response types for the HotMem HTTP API (#109, #110, #111). */
+
+export interface HotMemClientOptions {
+  timeoutMs?: number;
+  token?: string;
+  sessionId?: string;
+  source?: string;
+  namespace?: string;
+  expectedStoreId?: string;
+}
 
 export interface AddOptions {
   source?: string;
   importance?: number;
   metadata?: Record<string, unknown>;
   ttlSeconds?: number;
+  idempotencyKey?: string;
 }
 
 export interface AddRequest {
@@ -40,6 +50,8 @@ export interface Memory {
   memory_id: string;
   identifier: string;
   score: number;
+  created_at?: string;
+  provenance?: Record<string, unknown>;
 }
 
 export interface SearchResponse {
@@ -53,6 +65,10 @@ export interface HealthResponse {
   memory_count: number;
   db_path: string;
   uptime_s: number;
+  store_id?: string;
+  store_state?: string;
+  runtime_generation?: string;
+  embedding?: { model: string; dim: number };
 }
 
 export interface HydrateRequest {

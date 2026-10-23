@@ -26,7 +26,7 @@ One JSON object per line. Fields are **required**, **conditionally required**,
 | --- | --- |
 | Required | `schema_version`, `id`, `identifier`, `content_hash`, `memory_type` |
 | Conditionally required | `fact_text` — non-inline records without a usable `fact_summary`; `source_uri`, `byte_offset`, `byte_length` — `memory_type: "file"` records |
-| Optional | `fact_summary`, `source`, `importance`, `metadata`, `ttl_seconds`, `created_at`, `namespace`, `tier`, `tags`, `source_format`, `source_checksum`, `provenance`, `embedding` (b64), `embedding_dim`, `embedding_model`, `promotion_state`, `promotion_candidate` |
+| Optional | `fact_summary`, `source`, `importance`, `metadata`, `ttl_seconds`, `created_at`, `namespace`, `tier`, `tags`, `source_format`, `source_checksum`, `provenance`, `embedding` (b64), `embedding_dim`, `embedding_model`, `promotion_state`, `promotion_candidate`, `record_schema_version` |
 | Forward-compatible | any other top-level key |
 
 ### 1.1 Field semantics
@@ -55,6 +55,10 @@ One JSON object per line. Fields are **required**, **conditionally required**,
 - `source_uri`, `source_format`, `source_checksum`, `byte_offset`,
   `byte_length`: file-backed reference metadata. External references are
   **never** dereferenced, fetched, or verified during export or hydration.
+- `record_schema_version` (additive): the stored row's HotMem schema version
+  when it differs from the interchange record schema (`1`). It preserves the
+  row version (#99) without changing this contract's `schema_version`.
+  Readers that do not understand it keep it as a forward-compatible field.
 
 ### 1.2 Forward compatibility
 
@@ -189,6 +193,11 @@ Normative fields (readers MUST understand these):
 - `source.kind` ∈ `hotmem-dump | okf-import | wiki-import`.
 - `created_at` and `hotmem_version`, when present, are **informational** and
   excluded from logical identity (§3).
+- `scope`, when present, is an **informational** block describing a scoped
+  export: `caller_id`, `session_id`, `source`, `namespace`,
+  `permitted_namespaces`, `share_approvals`, `exported_count`,
+  `omitted_count`, and `store_id`. It is excluded from logical identity and
+  digests; readers ignore it if unknown.
 
 ### 6.1 Proposed fields (NOT emitted — pending contract review per ADR-003)
 

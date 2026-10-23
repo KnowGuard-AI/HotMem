@@ -4,7 +4,7 @@ Three conversable agents share a HotMemMemoryPlugin. Before each turn the
 plugin recalls relevant context; after each turn the utterance is persisted,
 so later agents inherit earlier ones' context.
 
-Run: hotmem serve  then  python chat.py
+Run: hotmem serve --db ./hotmem.sqlite  then  python chat.py
 """
 
 from __future__ import annotations

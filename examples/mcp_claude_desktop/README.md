@@ -30,6 +30,26 @@ Copy the snippet below into your Claude Desktop config:
 }
 ```
 
+Or connect as a thin stdio-to-daemon relay to a shared running `hotmem serve` daemon (#109):
+
+```json
+{
+  "mcpServers": {
+    "hotmem": {
+      "command": "hotmem",
+      "args": [
+        "mcp",
+        "--url", "http://127.0.0.1:8711",
+        "--token", "your-caller-token",
+        "--session", "claude-desktop-session",
+        "--source", "mcp://claude-desktop",
+        "--store-id", "store-incident-01"
+      ]
+    }
+  }
+}
+```
+
 Restart Claude Desktop. The HotMem tools (`add_memory`, `search_memories`,
 `memory_health`, `snapshot`, `hydrate`) are now available.
 
