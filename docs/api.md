@@ -32,12 +32,32 @@ unauthenticated embedded server and are intentional for multi-caller use:
   (identical to a missing id); list/search/event results are filtered before
   ranking/output.
 - `GET /v1/health` requires the `read` operation, omits `db_path`, and reports
-  `store_state` as `verified_empty`, `ready`, or `empty_scope`.
+  `store_state` as `verified_empty`, `ready`, or `empty_scope`. Authenticated
+  responses include `policy_enforced: true` and `policy_revision`;
+  `total_memory_count` is non-zero only for management callers.
 - `GET /v1/bundles` and `POST /v1/discover` require management authority.
 - `GET /v1/hygiene` reports only the caller's visible rows and does not write
   audit events for read-only callers.
-- `POST /v1/snapshot` records the caller's scope and omissions in the
-  manifest/metadata and redacts host/database paths.
+- `POST /v1/snapshot` records `scope` (`exported_count`,
+  `scope_omitted_count`, `disclosure_omitted_count`, `omitted_count`,
+  `redacted_count`) in the manifest/metadata and redacts host/database paths.
+  File-backed records with no portable reference are omitted.
+- Retrieval and export routes apply `secret_action`
+  (`allow`/`redact`/`omit`/`fail_closed`) and
+  `private_classification_action` (`allow`/`omit`/`fail_closed`) over text,
+  summaries, metadata, provenance, tags, identifiers, and hydrated content.
+  Responses include a `disclosure` object:
+  `{redacted_count, redacted_records, omitted_count, reasons, patterns}`.
+  `fail_closed` raises `403 policy_disclosure_blocked` with a `reason`
+  (`secret_detected`, `private_classification`, or `non_text_payload`) and
+  matched pattern names — never the matched values.
+- `copy_attachments=true` requires `allow_attachments` (management callers are
+  allowed) and returns `403 attachments_not_permitted` otherwise.
+- `/v1/vector-index/rebuild` and `DELETE /v1/vector-index` require `manage`
+  under policy; `/v1/vector-index/status` scopes counts and omits the index
+  path for non-management callers.
+- Operation responses (`snapshot`, `hydrate`, `handoff prepare/inspect`) return
+  paths relative to the daemon base directory when `redact_host_paths` is on.
 - Filesystem paths supplied to `snapshot`, `hydrate`, `handoff *`, and
   `discover` must resolve inside the daemon base directory
   (`403 path_not_permitted`).
@@ -50,7 +70,9 @@ unauthenticated embedded server and are intentional for multi-caller use:
 GET /v1/health
 ```
 
-Returns server status, memory count, DB path, and uptime.
+Returns server status, memory count, DB path, and uptime (embedded mode), or
+scoped counts, `store_state`, `policy_enforced`, `policy_revision`, and no DB
+path (policy mode). Requires authentication in policy mode.
 
 ## 4. Add Memory
 

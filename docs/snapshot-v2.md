@@ -112,7 +112,8 @@ same DB differ only in `created_at` (and `host`).
   "db_path": "...",
   "counts": {"inline": 39, "file": 3, "total": 42},
   "scope": {"caller_id": "caller-a", "exported_count": 39,
-            "omitted_count": 3, "...": "..."}
+            "scope_omitted_count": 1, "disclosure_omitted_count": 2,
+            "omitted_count": 3, "redacted_count": 0, "...": "..."}
 }
 ```
 
