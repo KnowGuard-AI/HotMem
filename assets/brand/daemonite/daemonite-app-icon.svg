@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">HotMem Daemonite app icon</title>
+  <desc id="desc">The Daemonite M on a deep KnowGuard background.</desc>
+  <rect width="256" height="256" rx="42" fill="#020617"/>
+  <rect x="2" y="2" width="252" height="252" rx="40" fill="none" stroke="#0A1628" stroke-width="4"/>
+  <g transform="translate(12 10) scale(.91)" fill="#2ECC71" stroke-linejoin="miter">
+    <path d="M24 30H232L206 60H50Z"/>
+    <path d="M44 54L68 80V202L47 224L27 202V74Z"/>
+    <path d="M212 54L188 80V202L209 224L229 202V74Z"/>
+    <path d="M94 60H162V138L128 172L94 138Z"/>
+  </g>
+  <g transform="translate(12 10) scale(.91)" fill="#10B981">
+    <path d="M31 75L44 62L62 81V96Z"/>
+    <path d="M225 75L212 62L194 81V96Z"/>
+    <path d="M99 65H111V135L99 123Z"/>
+  </g>
+  <g transform="translate(12 10) scale(.91)">
+    <path d="M120 143H136V161L128 169L120 161Z" fill="#8B5CF6"/>
+  </g>
+</svg>
