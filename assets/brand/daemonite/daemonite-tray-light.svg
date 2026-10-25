@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">HotMem Daemonite light tray mark</title>
+  <desc id="desc">A single-color M silhouette for dark tray surfaces.</desc>
+  <g fill="#F8FAFC" stroke-linejoin="miter">
+    <path d="M24 30H232L206 60H50Z"/>
+    <path d="M44 54L68 80V202L47 224L27 202V74Z"/>
+    <path d="M212 54L188 80V202L209 224L229 202V74Z"/>
+    <path d="M94 60H162V138L128 172L94 138Z"/>
+  </g>
+</svg>
