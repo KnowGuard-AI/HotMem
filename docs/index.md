@@ -77,12 +77,13 @@ curl -X POST http://127.0.0.1:8711/v1/search \
 ## Documentation map
 
 - [Vision & Canon](vision-and-canon.md)
-- [Daemon, JSONL Cassette & LSD Relay — Developer Guide](daemon-and-lsd-relay.md)
+- [Daemon, JSONL Cassette & Management UI — Developer Guide](daemon-and-management-ui.md)
 - [Brand Guidelines](brand-guidelines.md)
 - [Agent Memory Portability](agent-memory-portability.md)
 - [Quickstart](quickstart.md)
 - [Architecture Overview](architecture.md)
 - [Release and Versioning Policy](release-and-versioning.md)
+- [Daemonite Desktop Direction](daemonite-desktop.md)
 - [API Reference](api.md)
 - [CLI](cli.md)
 - [Snapshot v2 Format](snapshot-v2.md)

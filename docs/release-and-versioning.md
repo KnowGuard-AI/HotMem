@@ -69,9 +69,11 @@ publish a release, or prove those additional checks exist.
 ## Daemonite integration boundary
 
 Daemonite is HotMem's planned desktop interface: a persistent system tray entry
-and Docker-inspired click-to-open mini pop-up. LSD Mini Player is the project
-selected to render that interface. HotMem owns daemon lifecycle, store identity,
-permissions, execution, and durable memory; the renderer returns typed actions.
+and Docker-inspired click-to-open mini pop-up. HotMem owns its interface,
+KnowGuard-inspired theme, tray integration, daemon lifecycle, store identity,
+permissions, execution, and durable memory. The [desktop direction](daemonite-desktop.md)
+records the Tauri 2/Rust shell, static TypeScript UI and Python packaging baseline.
+The interface returns typed actions to the authenticated daemon boundary.
 
 The first slice installs/starts or connects to HotMem, opens the tray pop-up,
 shows the selected store and observed client state, performs one permitted
@@ -86,7 +88,6 @@ and cross-device synchronization have distinct contracts. A tray control does
 not establish all of them. Existing v0.2.7 acceptance remains in its own release.
 
 Product docs, issues, packages, and release notes use HotMem/KnowGuard ownership
-and dependency-role language. Private organizational provenance stays out of
-those surfaces. Describe the renderer as open source and link its repository
-only after public availability is verified; retain the required dependency
-license and packaging information for the actual distribution.
+and product language. Private organizational provenance stays out of those
+surfaces. Record actual shipping dependencies and their license obligations.
+The core remains headless and independent of the desktop interface.

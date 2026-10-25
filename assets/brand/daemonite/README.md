@@ -60,7 +60,7 @@ retained in `references/` above so this kit remains self-contained.
 These are HotMem's documented KnowGuard identity colors, applied to this
 HotMem profile mark. Mark color carries identity only; the planned Daemonite
 interface communicates live daemon, memory, and connection state separately.
-LSD Mini Player is the project selected to render that interface.
+Daemonite owns its interface and KnowGuard-inspired theme in the HotMem repository.
 
 ## Use
 

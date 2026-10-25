@@ -55,7 +55,8 @@ nav:
   - Brand Guidelines: brand-guidelines.md
   - Vision & Canon: vision-and-canon.md
   - Release & Versioning: release-and-versioning.md
-  - Daemon & LSD Relay: daemon-and-lsd-relay.md
+  - Daemonite Desktop: daemonite-desktop.md
+  - Daemon & Management UI: daemon-and-management-ui.md
   - Agent Memory Portability: agent-memory-portability.md
   - Quickstart: quickstart.md
   - Architecture Overview: architecture.md

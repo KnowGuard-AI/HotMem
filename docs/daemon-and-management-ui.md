@@ -1,4 +1,4 @@
-# Shared Daemon, MCP Relay, and LSD Management Contract (#109, #110, #111, #112)
+# Shared Daemon, MCP Relay, and Management UI Contract (#109, #110, #111, #112)
 
 ## 1. Architecture Overview
 
@@ -7,11 +7,11 @@ In **daemon mode**, HotMem runs as an explicitly started, single-owner local ser
 - Warm runtime resources (`Embedder`, optional `Reranker`, optional `VectorIndex`).
 - The shared `HotMemRuntime` operation and policy boundary (`src/hotmem/runtime.py`, `src/hotmem/policy.py`).
 
-All daemon-mode clients—MCP (`hotmem mcp --url ...`), CLI (`hotmem <cmd> --url ...`), Python SDK (`HotMemClient` / `AsyncHotMemClient`), TypeScript SDK (`HotMemClient`), and the detachable LSD management client (#112)—route through the same `HotMemRuntime` boundary rather than opening independent or temporary SQLite databases.
+All daemon-mode clients—MCP (`hotmem mcp --url ...`), CLI (`hotmem <cmd> --url ...`), Python SDK (`HotMemClient` / `AsyncHotMemClient`), TypeScript SDK (`HotMemClient`), and the detachable management client (#112)—route through the same `HotMemRuntime` boundary rather than opening independent or temporary SQLite databases.
 
 ```
 ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────────┐
-│ MCP Host (stdio) │   │ CLI / Py / TS SDK│   │ Detachable LSD UI    │
+│ MCP Host (stdio) │   │ CLI / Py / TS SDK│   │ Detachable UI    │
 │ hotmem mcp --url │   │ --url / Client   │   │ (management client)  │
 └────────┬─────────┘   └────────┬─────────┘   └──────────┬───────────┘
          │                      │                        │
@@ -325,14 +325,14 @@ from that decision, with its evidence and permissions intact.
 
 This is the experience HotMem is being built to deliver: a working brain that
 belongs to its owner and can travel between compatible tools. **JSONL is the
-memory cassette. HotMem is the recorder and player. LSD is the detachable
+memory cassette. HotMem is the recorder and player. The management UI is the detachable
 interface that keeps the recorder in view.**
 
 For a developer, the job is concrete. Keep memory durable. Give each client the
 right view. Make the service survive a disconnected agent, a closed window, and
 a restart. Then show two people and their agents continuing useful work.
 
-The sections below preserve the original v0.2.7 design narrative for the shared daemon, memory cassette, and LSD management surface (#112). The runbook above is the implemented operator contract.
+The sections below preserve the original v0.2.7 design narrative for the shared daemon, memory cassette, and management surface (#112). The runbook above is the implemented operator contract.
 
 ## The cassette: knowledge you can carry
 
@@ -404,7 +404,7 @@ A CLI command, an MCP call, and an action in the management window reach the
 same memory operations under the same rules.
 
 ```text
-agents / MCP relay     CLI / SDK     management UI / detachable LSD
+agents / MCP relay     CLI / SDK     management UI / detachable view
            \              |                     /
                  configured daemon endpoint
                             |
@@ -475,7 +475,7 @@ and whether the handoff is moving. The default management view should answer
 those questions directly: service health, cassette/store identity, client
 permissions, pending privileged actions, and recent authorised activity.
 
-LSD carries that view into a detachable player. Keep it beside the incident
+The detachable management UI carries that view into a detachable player. Keep it beside the incident
 channel, open the relevant stream, and return to full management when needed.
 Both views use the daemon. Closing either window leaves the recording and
 other clients running.
@@ -626,9 +626,10 @@ not evidence from running Flats.
 
 ## Implementation map
 
-HotMem is a formal KnowGuard product. The Daemonite interface is planned to use
-the LSD Mini Player project for rendering; HotMem owns daemon/store operations
-and authorization. The [Vision and Canon](vision-and-canon.md) defines the enduring
+HotMem is a formal KnowGuard product. Daemonite is its planned desktop console;
+HotMem owns its interface, theme, tray integration, daemon/store operations
+and authorization. The approved [desktop direction](daemonite-desktop.md) defines
+the v0.3.0 shell and packaging baseline. The [Vision and Canon](vision-and-canon.md) defines the enduring
 product commitments. [#112](https://github.com/KnowGuard-AI/HotMem/issues/112)
 holds this guide's v0.2.7 daemon/relay direction and implementation evidence.
 Grok remains excluded from the integration/showcase programme.
