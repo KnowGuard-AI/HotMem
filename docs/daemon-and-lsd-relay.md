@@ -626,8 +626,9 @@ not evidence from running Flats.
 
 ## Implementation map
 
-HotMem is a formal KnowGuard product; KnowB is a shadow brand and no required
-runtime service. The [Vision and Canon](vision-and-canon.md) defines the enduring
+HotMem is a formal KnowGuard product. The Daemonite interface is planned to use
+the LSD Mini Player project for rendering; HotMem owns daemon/store operations
+and authorization. The [Vision and Canon](vision-and-canon.md) defines the enduring
 product commitments. [#112](https://github.com/KnowGuard-AI/HotMem/issues/112)
 holds this guide's v0.2.7 daemon/relay direction and implementation evidence.
 Grok remains excluded from the integration/showcase programme.
