@@ -58,9 +58,9 @@ retained in `references/` above so this kit remains self-contained.
 | Slate-400 | `#94A3B8` | Secondary lockup label |
 
 These are HotMem's documented KnowGuard identity colors, applied to this
-HotMem profile mark. The shared KnowledgeHQ palette canon remains Autumn and
-Gold. Mark color carries identity only; the LSD surface communicates live
-daemon, memory, and connection state separately.
+HotMem profile mark. Mark color carries identity only; the planned Daemonite
+interface communicates live daemon, memory, and connection state separately.
+Daemonite owns its interface and KnowGuard-inspired theme in the HotMem repository.
 
 ## Use
 
