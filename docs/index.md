@@ -82,6 +82,7 @@ curl -X POST http://127.0.0.1:8711/v1/search \
 - [Agent Memory Portability](agent-memory-portability.md)
 - [Quickstart](quickstart.md)
 - [Architecture Overview](architecture.md)
+- [Release and Versioning Policy](release-and-versioning.md)
 - [API Reference](api.md)
 - [CLI](cli.md)
 - [Snapshot v2 Format](snapshot-v2.md)
