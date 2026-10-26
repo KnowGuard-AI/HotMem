@@ -29,6 +29,10 @@ from hotmem.handoff.redact import DEFAULT_ENGINE as HANDOFF_ENGINE
 from hotmem.handoff.redact import RedactionEngine
 
 SESSION_ENVELOPE_VERSION = "hotmem-session-v1"
+SUPPORTED_SESSION_ENVELOPE_VERSIONS: frozenset[str] = frozenset({SESSION_ENVELOPE_VERSION})
+_MAX_CONTEXT_FIELD_LEN = 256
+_MAX_TAGS_COUNT = 128
+_MAX_TAG_LEN = 256
 
 VALID_SECRET_ACTIONS: frozenset[str] = frozenset({"allow", "redact", "omit", "fail_closed"})
 VALID_CLASSIFICATION_ACTIONS: frozenset[str] = frozenset({"allow", "omit", "fail_closed"})
@@ -230,11 +234,121 @@ def _is_private_classified(meta: dict[str, Any], tags: list[Any]) -> bool:
         return True
     for tag in tags:
         t = str(tag).strip().lower()
-        if t in PRIVATE_CLASSIFICATIONS or t in {
-            f"classification:{c}" for c in PRIVATE_CLASSIFICATIONS
-        }:
+        if t in PRIVATE_CLASSIFICATIONS:
             return True
+        if ":" in t:
+            t_key, _, t_val = t.partition(":")
+            if (
+                t_key.strip() in {"classification", "visibility", "sensitivity", "access", "scope"}
+                and t_val.strip() in PRIVATE_CLASSIFICATIONS
+            ):
+                return True
     return False
+
+
+def validate_context_field(
+    name: str,
+    value: Any,
+    *,
+    allow_empty: bool = True,
+) -> str:
+    """Validate an explicit session/harness/source context field (#111)."""
+    if value is None:
+        if not allow_empty:
+            raise PolicyError(
+                400,
+                "invalid_session_context",
+                f"{name} must be a non-empty string when supplied",
+            )
+        return ""
+    if not isinstance(value, str):
+        raise PolicyError(
+            400,
+            "invalid_session_context",
+            f"{name} must be a string",
+        )
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise PolicyError(
+            400,
+            "invalid_session_context",
+            f"{name} must not contain control characters",
+        )
+    stripped = value.strip()
+    if len(stripped) > _MAX_CONTEXT_FIELD_LEN:
+        raise PolicyError(
+            400,
+            "invalid_session_context",
+            f"{name} exceeds maximum length ({_MAX_CONTEXT_FIELD_LEN})",
+        )
+    if not allow_empty and not stripped:
+        raise PolicyError(
+            400,
+            "invalid_session_context",
+            f"{name} must be a non-empty string when supplied",
+        )
+    return stripped
+
+
+def validate_envelope_version(value: Any) -> str:
+    """Validate optional session envelope version (#111)."""
+    if value is None:
+        return SESSION_ENVELOPE_VERSION
+    ver = validate_context_field("envelope_version", value, allow_empty=False)
+    if ver not in SUPPORTED_SESSION_ENVELOPE_VERSIONS:
+        raise PolicyError(
+            400,
+            "unsupported_envelope_version",
+            f"unsupported session envelope version {ver!r}; "
+            f"supported: {sorted(SUPPORTED_SESSION_ENVELOPE_VERSIONS)}",
+        )
+    return ver
+
+
+def validate_request_tags(value: Any) -> list[str]:
+    """Validate canonical record tags supplied at write boundaries (#111)."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise PolicyError(
+            400,
+            "invalid_tags",
+            "tags must be a JSON array of non-empty strings",
+        )
+    if len(value) > _MAX_TAGS_COUNT:
+        raise PolicyError(
+            400,
+            "invalid_tags",
+            f"tags exceeds maximum count ({_MAX_TAGS_COUNT})",
+        )
+    cleaned: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise PolicyError(
+                400,
+                "invalid_tags",
+                "each tag must be a non-empty string",
+            )
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in item):
+            raise PolicyError(
+                400,
+                "invalid_tags",
+                "tags must not contain control characters",
+            )
+        s = item.strip()
+        if not s:
+            raise PolicyError(
+                400,
+                "invalid_tags",
+                "each tag must be a non-empty string",
+            )
+        if len(s) > _MAX_TAG_LEN:
+            raise PolicyError(
+                400,
+                "invalid_tags",
+                f"tag exceeds maximum length ({_MAX_TAG_LEN})",
+            )
+        cleaned.append(s)
+    return cleaned
 
 
 @dataclass(frozen=True)
@@ -331,6 +445,7 @@ class CallerCredential:
     operations: tuple[str, ...] = ("read", "write", "export", "hydrate", "promote")
     allowed_sessions: tuple[str, ...] = ()
     allowed_sources: tuple[str, ...] = ()
+    allowed_harnesses: tuple[str, ...] = ()
     share_approvals: tuple[ShareApproval, ...] = ()
     is_management: bool = False
     revoked: bool = False
@@ -356,6 +471,7 @@ class CallerCredential:
         operations: Iterable[str] = ("read", "write", "export", "hydrate", "promote"),
         allowed_sessions: Iterable[str] = (),
         allowed_sources: Iterable[str] = (),
+        allowed_harnesses: Iterable[str] = (),
         share_approvals: Iterable[ShareApproval] = (),
         is_management: bool = False,
         revoked: bool = False,
@@ -364,6 +480,7 @@ class CallerCredential:
         allow_attachments: bool = False,
         redact_host_paths: bool = True,
     ) -> CallerCredential:
+        is_mgmt = bool(is_management)
         return cls(
             token_hash=hash_token(token),
             caller_id=caller_id,
@@ -372,8 +489,9 @@ class CallerCredential:
             operations=tuple(operations),
             allowed_sessions=tuple(allowed_sessions),
             allowed_sources=tuple(allowed_sources),
+            allowed_harnesses=tuple(allowed_harnesses),
             share_approvals=tuple(share_approvals),
-            is_management=is_management,
+            is_management=is_mgmt,
             revoked=revoked,
             secret_action=secret_action,
             private_classification_action=private_classification_action,
@@ -393,6 +511,7 @@ class CallerCredential:
             "operations": list(self.operations),
             "allowed_sessions": list(self.allowed_sessions),
             "allowed_sources": list(self.allowed_sources),
+            "allowed_harnesses": list(self.allowed_harnesses),
             "share_approvals": [s.to_dict() for s in self.share_approvals],
             "is_management": self.is_management,
             "revoked": self.revoked,
@@ -429,6 +548,7 @@ class CallerCredential:
             ),
             allowed_sessions=tuple(data.get("allowed_sessions", ())),
             allowed_sources=tuple(data.get("allowed_sources", ())),
+            allowed_harnesses=tuple(data.get("allowed_harnesses", ())),
             share_approvals=tuple(
                 ShareApproval.from_dict(s) for s in data.get("share_approvals", ())
             ),
@@ -450,6 +570,7 @@ class SessionEnvelope:
     source: str
     namespace: str
     store_id: str
+    harness_id: str = ""
     envelope_version: str = SESSION_ENVELOPE_VERSION
 
     def to_provenance_dict(self, existing: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -458,6 +579,7 @@ class SessionEnvelope:
             {
                 "envelope_version": self.envelope_version,
                 "caller_id": self.caller_id,
+                "harness_id": self.harness_id,
                 "session_id": self.session_id,
                 "source": self.source,
                 "namespace": self.namespace,
@@ -476,10 +598,12 @@ class CallerContext:
     caller_id: str
     store_id: str
     session_id: str = ""
+    harness_id: str = ""
     source: str = ""
     namespace: str | None = None
     credential: CallerCredential | None = None
     idempotency_key: str | None = None
+    envelope_version: str = SESSION_ENVELOPE_VERSION
     policy_default_secret_action: str = "redact"
     policy_default_private_classification_action: str = "omit"
 
@@ -852,17 +976,38 @@ class CallerContext:
         return [r for r in rows if self.can_access_row(r, operation=operation)]
 
     def build_session_envelope(
-        self, *, namespace: str, request_source: str = ""
+        self,
+        *,
+        namespace: str,
+        request_source: str = "",
+        request_harness_id: str | None = None,
+        request_session_id: str | None = None,
+        request_envelope_version: str | None = None,
     ) -> SessionEnvelope | None:
         effective_source = self.source or request_source
-        if not self.policy_enforced and not self.session_id:
+        effective_harness = (
+            request_harness_id if request_harness_id is not None else self.harness_id
+        )
+        effective_session = (
+            request_session_id if request_session_id is not None else self.session_id
+        )
+        effective_version = request_envelope_version or self.envelope_version
+        if not (
+            self.policy_enforced
+            or self.authenticated
+            or effective_session
+            or effective_harness
+            or namespace
+        ):
             return None
         return SessionEnvelope(
             caller_id=self.caller_id or "anonymous",
-            session_id=self.session_id,
+            harness_id=effective_harness,
+            session_id=effective_session,
             source=effective_source,
             namespace=namespace,
             store_id=self.store_id,
+            envelope_version=effective_version,
         )
 
 
@@ -957,17 +1102,35 @@ class PolicyConfig:
                 out.update(c.allowed_sources)
         return out
 
+    def _claimed_harnesses_of_others(self, caller_id: str) -> set[str]:
+        out: set[str] = set()
+        for c in self.credentials:
+            if c.caller_id != caller_id:
+                out.update(c.allowed_harnesses)
+        return out
+
     def validate_write_source(self, ctx: CallerContext, source: str | None) -> None:
         """Reject source attribution the credential is not entitled to claim (#111)."""
-        if not source or not ctx.policy_enforced or ctx.credential is None:
+        if source is not None and source != "":
+            source = validate_context_field("source", source, allow_empty=False)
+        if not source:
             return
         if ctx.source and source != ctx.source:
+            if ctx.policy_enforced:
+                raise PolicyError(
+                    403,
+                    "session_impersonation_denied",
+                    f"request payload source {source!r} conflicts with "
+                    f"session header source {ctx.source!r}",
+                )
             raise PolicyError(
-                403,
-                "session_impersonation_denied",
+                400,
+                "context_conflict",
                 f"request payload source {source!r} conflicts with "
                 f"session header source {ctx.source!r}",
             )
+        if not ctx.policy_enforced or ctx.credential is None:
+            return
         cred = ctx.credential
         if cred.allowed_sources and source not in cred.allowed_sources:
             raise PolicyError(
@@ -982,6 +1145,94 @@ class PolicyConfig:
                 f"source {source!r} belongs to another caller",
             )
 
+    def validate_write_session_and_harness(
+        self,
+        ctx: CallerContext,
+        *,
+        session_id: str | None = None,
+        harness_id: str | None = None,
+        envelope_version: str | None = None,
+        caller_id_claim: str | None = None,
+    ) -> tuple[str, str, str]:
+        """Resolve and validate per-write session/harness/version overrides (#111)."""
+        if caller_id_claim is not None:
+            claimed = validate_context_field("caller_id", caller_id_claim, allow_empty=False)
+            if claimed != ctx.caller_id:
+                raise PolicyError(
+                    403,
+                    "session_impersonation_denied",
+                    f"caller {ctx.caller_id!r} cannot impersonate caller_id {claimed!r}",
+                )
+
+        effective_version = ctx.envelope_version
+        if envelope_version is not None:
+            body_version = validate_envelope_version(envelope_version)
+            if ctx.envelope_version and body_version != ctx.envelope_version:
+                raise PolicyError(
+                    400,
+                    "context_conflict",
+                    f"request payload envelope_version {body_version!r} conflicts with "
+                    f"header envelope_version {ctx.envelope_version!r}",
+                )
+            effective_version = body_version
+
+        effective_session = ctx.session_id
+        if session_id is not None:
+            body_session = validate_context_field("session_id", session_id, allow_empty=False)
+            if ctx.session_id and body_session != ctx.session_id:
+                raise PolicyError(
+                    400,
+                    "context_conflict",
+                    f"request payload session_id {body_session!r} conflicts with "
+                    f"header session_id {ctx.session_id!r}",
+                )
+            effective_session = body_session
+
+        effective_harness = ctx.harness_id
+        if harness_id is not None:
+            body_harness = validate_context_field("harness_id", harness_id, allow_empty=False)
+            if ctx.harness_id and body_harness != ctx.harness_id:
+                raise PolicyError(
+                    400,
+                    "context_conflict",
+                    f"request payload harness_id {body_harness!r} conflicts with "
+                    f"header harness_id {ctx.harness_id!r}",
+                )
+            effective_harness = body_harness
+
+        if ctx.policy_enforced and ctx.credential is not None:
+            cred = ctx.credential
+            if effective_session:
+                if cred.allowed_sessions and effective_session not in cred.allowed_sessions:
+                    raise PolicyError(
+                        403,
+                        "session_impersonation_denied",
+                        f"session {effective_session!r} is not permitted for "
+                        f"caller {ctx.caller_id!r}",
+                    )
+                if effective_session in self._claimed_sessions_of_others(ctx.caller_id):
+                    raise PolicyError(
+                        403,
+                        "session_impersonation_denied",
+                        f"session {effective_session!r} belongs to another caller",
+                    )
+            if effective_harness:
+                if cred.allowed_harnesses and effective_harness not in cred.allowed_harnesses:
+                    raise PolicyError(
+                        403,
+                        "session_impersonation_denied",
+                        f"harness {effective_harness!r} is not permitted for "
+                        f"caller {ctx.caller_id!r}",
+                    )
+                if effective_harness in self._claimed_harnesses_of_others(ctx.caller_id):
+                    raise PolicyError(
+                        403,
+                        "session_impersonation_denied",
+                        f"harness {effective_harness!r} belongs to another caller",
+                    )
+
+        return effective_session, effective_harness, effective_version
+
     def resolve_request(
         self,
         *,
@@ -989,14 +1240,46 @@ class PolicyConfig:
         token: str | None = None,
         requested_store_id: str | None = None,
         session_id: str | None = None,
+        harness_id: str | None = None,
         source: str | None = None,
         namespace: str | None = None,
         actor: str | None = None,
         idempotency_key: str | None = None,
+        envelope_version: str | None = None,
+        caller_id_claim: str | None = None,
     ) -> CallerContext:
         """Authenticate and authorize request metadata, returning a CallerContext."""
         active_store_id = self.store_id or runtime_store_id
-        namespace = namespace or None
+        resolved_version = validate_envelope_version(envelope_version)
+        clean_harness = (
+            validate_context_field("harness_id", harness_id, allow_empty=False)
+            if (harness_id is not None and harness_id != "")
+            else ""
+        )
+        clean_source = (
+            validate_context_field("source", source, allow_empty=False)
+            if (source is not None and source != "")
+            else ""
+        )
+        # Preserve session_required (400) for empty/whitespace X-HotMem-Session-Id on writes,
+        # while rejecting control chars or overlong strings immediately.
+        clean_session = validate_context_field("session_id", session_id, allow_empty=True)
+        clean_namespace = validate_context_field("namespace", namespace, allow_empty=True) or None
+        clean_actor = (
+            validate_context_field("actor", actor, allow_empty=False)
+            if (actor is not None and actor != "")
+            else None
+        )
+        clean_caller_claim = (
+            validate_context_field("caller_id", caller_id_claim, allow_empty=False)
+            if (caller_id_claim is not None and caller_id_claim != "")
+            else (
+                validate_context_field("caller_id", caller_id_claim, allow_empty=False)
+                if caller_id_claim is not None
+                else None
+            )
+        )
+        namespace = clean_namespace
 
         enforced = self.require_auth or bool(self.credentials) or (token is not None)
         if not enforced:
@@ -1016,16 +1299,25 @@ class PolicyConfig:
                         "actual_store_id": active_store_id,
                     },
                 )
+            effective_caller = clean_actor or "embedded"
+            if clean_caller_claim and clean_caller_claim not in (effective_caller, "anonymous"):
+                raise PolicyError(
+                    403,
+                    "session_impersonation_denied",
+                    f"unauthenticated request cannot claim caller_id {clean_caller_claim!r}",
+                )
             return CallerContext(
                 authenticated=False,
                 policy_enforced=False,
-                caller_id=actor or "embedded",
+                caller_id=effective_caller,
                 store_id=active_store_id,
-                session_id=session_id or "",
-                source=source or "",
+                session_id=clean_session,
+                harness_id=clean_harness,
+                source=clean_source,
                 namespace=namespace,
                 credential=None,
                 idempotency_key=idempotency_key,
+                envelope_version=resolved_version,
             )
 
         if not token:
@@ -1083,40 +1375,61 @@ class PolicyConfig:
                 msg,
             )
 
-        # Actor / session / source impersonation checks (#110 / #111)
-        if actor and actor != matched.caller_id:
+        # Actor / session / source / harness impersonation checks (#110 / #111)
+        if clean_actor and clean_actor != matched.caller_id:
             raise PolicyError(
                 403,
                 "session_impersonation_denied",
-                f"caller {matched.caller_id!r} cannot impersonate actor {actor!r}",
+                f"caller {matched.caller_id!r} cannot impersonate actor {clean_actor!r}",
             )
 
-        if session_id:
-            if matched.allowed_sessions and session_id not in matched.allowed_sessions:
+        if clean_caller_claim and clean_caller_claim != matched.caller_id:
+            raise PolicyError(
+                403,
+                "session_impersonation_denied",
+                f"caller {matched.caller_id!r} cannot impersonate caller_id {clean_caller_claim!r}",
+            )
+
+        if clean_session:
+            if matched.allowed_sessions and clean_session not in matched.allowed_sessions:
                 raise PolicyError(
                     403,
                     "session_impersonation_denied",
-                    f"session {session_id!r} is not permitted for caller {matched.caller_id!r}",
+                    f"session {clean_session!r} is not permitted for caller {matched.caller_id!r}",
                 )
-            if session_id in self._claimed_sessions_of_others(matched.caller_id):
+            if clean_session in self._claimed_sessions_of_others(matched.caller_id):
                 raise PolicyError(
                     403,
                     "session_impersonation_denied",
-                    f"session {session_id!r} belongs to another caller",
+                    f"session {clean_session!r} belongs to another caller",
                 )
 
-        if source:
-            if matched.allowed_sources and source not in matched.allowed_sources:
+        if clean_source:
+            if matched.allowed_sources and clean_source not in matched.allowed_sources:
                 raise PolicyError(
                     403,
                     "session_impersonation_denied",
-                    f"source {source!r} is not permitted for caller {matched.caller_id!r}",
+                    f"source {clean_source!r} is not permitted for caller {matched.caller_id!r}",
                 )
-            if source in self._claimed_sources_of_others(matched.caller_id):
+            if clean_source in self._claimed_sources_of_others(matched.caller_id):
                 raise PolicyError(
                     403,
                     "session_impersonation_denied",
-                    f"source {source!r} belongs to another caller",
+                    f"source {clean_source!r} belongs to another caller",
+                )
+
+        if clean_harness:
+            if matched.allowed_harnesses and clean_harness not in matched.allowed_harnesses:
+                raise PolicyError(
+                    403,
+                    "session_impersonation_denied",
+                    f"harness {clean_harness!r} is not permitted for caller {matched.caller_id!r}",
+                )
+            if clean_harness in self._claimed_harnesses_of_others(matched.caller_id):
+                raise PolicyError(
+                    403,
+                    "session_impersonation_denied",
+                    f"harness {clean_harness!r} belongs to another caller",
                 )
 
         return CallerContext(
@@ -1124,11 +1437,13 @@ class PolicyConfig:
             policy_enforced=True,
             caller_id=matched.caller_id,
             store_id=active_store_id,
-            session_id=session_id or "",
-            source=source or "",
+            session_id=clean_session,
+            harness_id=clean_harness,
+            source=clean_source,
             namespace=namespace,
             credential=matched,
             idempotency_key=idempotency_key,
+            envelope_version=resolved_version,
             policy_default_secret_action=self.default_secret_action,
             policy_default_private_classification_action=(
                 self.default_private_classification_action

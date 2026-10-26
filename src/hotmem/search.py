@@ -310,6 +310,7 @@ def search_memories(
                 "created_at": item.get("created_at"),
             }
             raw_prov = item.get("provenance_json")
+            parsed_prov = None
             if raw_prov:
                 try:
                     parsed_prov = json.loads(raw_prov) if isinstance(raw_prov, str) else raw_prov
@@ -317,6 +318,17 @@ def search_memories(
                     parsed_prov = None
                 if parsed_prov is not None:
                     msg["provenance"] = parsed_prov
+            raw_tags = item.get("tags")
+            parsed_tags: list[str] = []
+            if raw_tags:
+                try:
+                    loaded_tags = json.loads(raw_tags) if isinstance(raw_tags, str) else raw_tags
+                    if isinstance(loaded_tags, list):
+                        parsed_tags = [str(t) for t in loaded_tags]
+                except (json.JSONDecodeError, TypeError):
+                    parsed_tags = []
+            if parsed_tags or parsed_prov is not None:
+                msg["tags"] = parsed_tags
             messages.append(msg)
 
     _trace.info(

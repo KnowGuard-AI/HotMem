@@ -45,6 +45,7 @@ from hotmem.policy import (
     PolicyError,
     redact_structure,
     scan_and_redact_text,
+    validate_request_tags,
 )
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
@@ -403,10 +404,13 @@ class HotMemRuntime:
         token: str | None = None,
         requested_store_id: str | None = None,
         session_id: str | None = None,
+        harness_id: str | None = None,
         source: str | None = None,
         namespace: str | None = None,
         actor: str | None = None,
         idempotency_key: str | None = None,
+        envelope_version: str | None = None,
+        caller_id_claim: str | None = None,
     ) -> CallerContext:
         """Resolve and authenticate caller context against this runtime's policy."""
         return self.policy.resolve_request(
@@ -414,10 +418,13 @@ class HotMemRuntime:
             token=token,
             requested_store_id=requested_store_id,
             session_id=session_id,
+            harness_id=harness_id,
             source=source,
             namespace=namespace,
             actor=actor,
             idempotency_key=idempotency_key,
+            envelope_version=envelope_version,
+            caller_id_claim=caller_id_claim,
         )
 
     def revoke_policy(
@@ -540,12 +547,25 @@ class HotMemRuntime:
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
         ttl_seconds: int | None = None,
+        tags: Any = None,
+        harness_id: str | None = None,
+        session_id: str | None = None,
+        envelope_version: str | None = None,
+        caller_id: str | None = None,
     ) -> dict[str, Any]:
         self._require_db()
         ctx.require_operation("write")
         target_namespace = ctx.effective_write_namespace
-        effective_source = ctx.source or source
-        if ctx.policy_enforced and not ctx.session_id:
+        effective_session, effective_harness, effective_version = (
+            self.policy.validate_write_session_and_harness(
+                ctx,
+                session_id=session_id,
+                harness_id=harness_id,
+                envelope_version=envelope_version,
+                caller_id_claim=caller_id,
+            )
+        )
+        if ctx.policy_enforced and not effective_session:
             raise PolicyError(
                 400,
                 "session_required",
@@ -554,34 +574,54 @@ class HotMemRuntime:
             )
         # Reject source attribution the credential is not entitled to claim.
         self.policy.validate_write_source(ctx, source)
+        effective_source = ctx.source or (source.strip() if isinstance(source, str) else "")
 
+        if metadata is not None and not isinstance(metadata, dict):
+            raise PolicyError(
+                400,
+                "invalid_metadata",
+                "metadata must be a JSON object",
+            )
         meta_dict = metadata or {}
         validate_metadata(meta_dict)
+        tag_list = validate_request_tags(tags)
+        tags_json = json.dumps(tag_list)
 
         envelope = ctx.build_session_envelope(
-            namespace=target_namespace, request_source=effective_source
+            namespace=target_namespace,
+            request_source=effective_source,
+            request_harness_id=effective_harness,
+            request_session_id=effective_session,
+            request_envelope_version=effective_version,
         )
         provenance_dict = envelope.to_provenance_dict() if envelope is not None else None
         provenance_json = json.dumps(provenance_dict, sort_keys=True) if provenance_dict else None
 
         from hotmem.events import _build_memory_created_payload
 
+        req_canonical_dict: dict[str, Any] = {
+            "identifier": identifier,
+            "fact": fact,
+            "file_uri": file_uri,
+            "byte_offset": byte_offset,
+            "byte_length": byte_length,
+            "source_format": source_format,
+            "source_checksum": source_checksum,
+            "summary": summary,
+            "source": effective_source,
+            "importance": importance,
+            "metadata": meta_dict,
+            "ttl_seconds": ttl_seconds,
+            "namespace": target_namespace,
+        }
+        if tag_list or tags is not None:
+            req_canonical_dict["tags"] = tag_list
+        if effective_harness:
+            req_canonical_dict["harness_id"] = effective_harness
+        if session_id is not None:
+            req_canonical_dict["session_id"] = effective_session
         req_canonical = json.dumps(
-            {
-                "identifier": identifier,
-                "fact": fact,
-                "file_uri": file_uri,
-                "byte_offset": byte_offset,
-                "byte_length": byte_length,
-                "source_format": source_format,
-                "source_checksum": source_checksum,
-                "summary": summary,
-                "source": effective_source,
-                "importance": importance,
-                "metadata": meta_dict,
-                "ttl_seconds": ttl_seconds,
-                "namespace": target_namespace,
-            },
+            req_canonical_dict,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -627,6 +667,7 @@ class HotMemRuntime:
                     metadata=meta_dict,
                     source=effective_source,
                     namespace=target_namespace,
+                    tags=tag_list,
                     provenance=provenance_dict,
                     embedder=self.embedder,
                     _commit=False,
@@ -651,19 +692,26 @@ class HotMemRuntime:
                     # and tell the caller the write was deduplicated.
                     memory_id = str(existing_row["id"])
                     deduplicated = True
+                    dedup_payload: dict[str, Any] = {
+                        "id": memory_id,
+                        "identifier": identifier,
+                        "content_hash": content_hash,
+                        "caller_id": ctx.caller_id,
+                        "harness_id": effective_harness,
+                        "session_id": effective_session,
+                        "source": effective_source,
+                        "tags": tag_list,
+                    }
+                    if meta_dict:
+                        dedup_payload["metadata_json"] = json.dumps(meta_dict)
+                    if provenance_json:
+                        dedup_payload["provenance_json"] = provenance_json
                     append_event(
                         db,
                         event_type=EventType.MEMORY_DEDUPLICATED,
                         memory_id=memory_id,
                         namespace=target_namespace,
-                        payload={
-                            "id": memory_id,
-                            "identifier": identifier,
-                            "content_hash": content_hash,
-                            "caller_id": ctx.caller_id,
-                            "session_id": ctx.session_id,
-                            "source": effective_source,
-                        },
+                        payload=dedup_payload,
                         _commit=not bool(ctx.idempotency_key),
                     )
                 else:
@@ -684,6 +732,7 @@ class HotMemRuntime:
                         content_hash=content_hash,
                         ttl_seconds=ttl_seconds,
                         namespace=target_namespace,
+                        tags=tags_json,
                         provenance_json=provenance_json,
                         _commit=False,
                     )
@@ -932,6 +981,12 @@ class HotMemRuntime:
             if disclosed is None:
                 return None
             record = disclosed
+        raw_tags = record.get("tags")
+        parsed_tags = (
+            _safe_json(raw_tags, [])
+            if isinstance(raw_tags, str)
+            else ([str(t) for t in raw_tags] if isinstance(raw_tags, list) else [])
+        )
         out = {
             "id": record["id"],
             "identifier": record["identifier"],
@@ -943,6 +998,7 @@ class HotMemRuntime:
             "source": record["source"],
             "importance": record["importance"],
             "metadata": _safe_json(record["metadata_json"], {}),
+            "tags": parsed_tags,
             "content_hash": record["content_hash"],
             "source_uri": ctx.sanitize_source_uri(record.get("source_uri"), base_dir=self.base_dir),
             "byte_offset": record["byte_offset"],

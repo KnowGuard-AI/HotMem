@@ -108,6 +108,7 @@ def add_file_backed(
     metadata: dict[str, Any] | None = None,
     source: str = "",
     namespace: str = "",
+    tags: list[str] | None = None,
     provenance: dict[str, Any] | None = None,
     embedder: Embedder | None = None,
     _commit: bool = True,
@@ -161,6 +162,7 @@ def add_file_backed(
             metadata_json=json.dumps(metadata or {}),
             content_hash=content_hash,
             namespace=namespace,
+            tags=json.dumps(list(tags or ())),
             provenance_json=json.dumps(provenance) if provenance else None,
             _commit=_commit,
         )
