@@ -43,11 +43,17 @@ export class HotMemClient {
       if (optionsOrTimeout.sessionId) {
         this.contextHeaders["x-hotmem-session-id"] = optionsOrTimeout.sessionId;
       }
+      if (optionsOrTimeout.harnessId) {
+        this.contextHeaders["x-hotmem-harness-id"] = optionsOrTimeout.harnessId;
+      }
       if (optionsOrTimeout.source) {
         this.contextHeaders["x-hotmem-source"] = optionsOrTimeout.source;
       }
       if (optionsOrTimeout.namespace !== undefined && optionsOrTimeout.namespace !== "") {
         this.contextHeaders["x-hotmem-namespace"] = optionsOrTimeout.namespace;
+      }
+      if (optionsOrTimeout.envelopeVersion) {
+        this.contextHeaders["x-hotmem-envelope-version"] = optionsOrTimeout.envelopeVersion;
       }
     }
   }
@@ -76,10 +82,41 @@ export class HotMemClient {
     if (options.ttlSeconds !== undefined) {
       payload.ttl_seconds = options.ttlSeconds;
     }
-    const extraHeaders: Record<string, string> | undefined = options.idempotencyKey
-      ? { "x-hotmem-idempotency-key": options.idempotencyKey }
-      : undefined;
-    return this.request<AddResponse>("POST", "/v1/add", payload, extraHeaders);
+    if (options.tags !== undefined) {
+      payload.tags = options.tags;
+    }
+    const extraHeaders: Record<string, string> = {};
+    if (options.idempotencyKey) {
+      extraHeaders["x-hotmem-idempotency-key"] = options.idempotencyKey;
+    }
+    if (options.harnessId !== undefined) {
+      extraHeaders["x-hotmem-harness-id"] = options.harnessId;
+      payload.harness_id = options.harnessId;
+    }
+    if (options.sessionId !== undefined) {
+      extraHeaders["x-hotmem-session-id"] = options.sessionId;
+      payload.session_id = options.sessionId;
+    }
+    if (options.namespace !== undefined) {
+      extraHeaders["x-hotmem-namespace"] = options.namespace;
+    }
+    if (options.envelopeVersion !== undefined) {
+      extraHeaders["x-hotmem-envelope-version"] = options.envelopeVersion;
+      payload.envelope_version = options.envelopeVersion;
+    }
+    if (
+      options.source &&
+      this.contextHeaders["x-hotmem-source"] &&
+      options.source !== this.contextHeaders["x-hotmem-source"]
+    ) {
+      extraHeaders["x-hotmem-source"] = options.source;
+    }
+    return this.request<AddResponse>(
+      "POST",
+      "/v1/add",
+      payload,
+      Object.keys(extraHeaders).length > 0 ? extraHeaders : undefined,
+    );
   }
 
   /**

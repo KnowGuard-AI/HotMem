@@ -4,9 +4,11 @@ export interface HotMemClientOptions {
   timeoutMs?: number;
   token?: string;
   sessionId?: string;
+  harnessId?: string;
   source?: string;
   namespace?: string;
   expectedStoreId?: string;
+  envelopeVersion?: string;
 }
 
 export interface AddOptions {
@@ -14,6 +16,11 @@ export interface AddOptions {
   importance?: number;
   metadata?: Record<string, unknown>;
   ttlSeconds?: number;
+  tags?: string[];
+  harnessId?: string;
+  sessionId?: string;
+  namespace?: string;
+  envelopeVersion?: string;
   idempotencyKey?: string;
 }
 
@@ -24,6 +31,10 @@ export interface AddRequest {
   importance: number;
   metadata: Record<string, unknown>;
   ttl_seconds?: number;
+  tags?: string[];
+  harness_id?: string;
+  session_id?: string;
+  envelope_version?: string;
 }
 
 export interface AddResponse {
@@ -51,6 +62,7 @@ export interface Memory {
   identifier: string;
   score: number;
   created_at?: string;
+  tags?: string[];
   provenance?: Record<string, unknown>;
 }
 
