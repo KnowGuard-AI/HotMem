@@ -59,6 +59,211 @@ def test_add_memory_with_ttl_and_importance(state: _ServerState):
     assert state.db.count() == 1
 
 
+def test_mcp_add_memory_forwards_metadata_tags_and_context(tmp_path: Path):
+    """WP3 MVT: MCP add_memory advertises & forwards metadata, tags, harness_id, session_id."""
+    import httpx
+    from fastapi.testclient import TestClient
+    from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest
+
+    from hotmem.client import AsyncHotMemClient
+    from hotmem.mcp_server import create_relay_server
+    from hotmem.policy import CallerCredential, PolicyConfig, ShareApproval
+    from hotmem.server import create_app
+
+    # 1. Schema check
+    srv = create_server(":memory:")
+    tools_res = asyncio.run(
+        srv.request_handlers[ListToolsRequest](ListToolsRequest(method="tools/list"))
+    )
+    add_tool = next(t for t in tools_res.root.tools if t.name == "add_memory")
+    props = add_tool.inputSchema["properties"]
+    assert {
+        "identifier",
+        "fact",
+        "importance",
+        "ttl_seconds",
+        "metadata",
+        "tags",
+        "source",
+        "namespace",
+        "session_id",
+        "harness_id",
+        "idempotency_key",
+    } <= set(props)
+    assert add_tool.inputSchema["required"] == ["identifier", "fact"]
+
+    # 2. Embedded handler persists metadata, tags, and explicit session/harness context
+    emb_db = MemoryDB(tmp_path / "emb_111.sqlite")
+    emb_state = _ServerState()
+    emb_state.db = emb_db
+    emb_state.db_path = str(tmp_path / "emb_111.sqlite")
+    emb_state.swap_path = None
+    emb_state.start_time = time.time()
+    try:
+        emb_srv = create_server(emb_state.db_path, state=emb_state)
+        call_req = CallToolRequest(
+            method="tools/call",
+            params=CallToolRequestParams(
+                name="add_memory",
+                arguments={
+                    "identifier": "mcp/emb-111",
+                    "fact": "Embedded MCP fact with metadata and tags",
+                    "metadata": {"ticket": "111", "stage": "wp3"},
+                    "tags": ["model:claude-sonnet-4", "project:hotmem", "org:knowguard"],
+                    "harness_id": "claude-code",
+                    "session_id": "sess-emb-111",
+                    "source": "mcp://claude-embedded",
+                },
+            ),
+        )
+        call_res = asyncio.run(emb_srv.request_handlers[CallToolRequest](call_req))
+        assert not call_res.root.isError
+        emb_mid = _text(call_res.root)["memory_id"]
+        stored = emb_db.get_memory(emb_mid)
+        assert stored is not None
+        assert json.loads(stored["metadata_json"]) == {"ticket": "111", "stage": "wp3"}
+        assert json.loads(stored["tags"]) == [
+            "model:claude-sonnet-4",
+            "project:hotmem",
+            "org:knowguard",
+        ]
+        prov = json.loads(stored["provenance_json"])
+        assert prov["harness_id"] == "claude-code"
+        assert prov["session_id"] == "sess-emb-111"
+        assert prov["source"] == "mcp://claude-embedded"
+
+        # Malformed tags / metadata / context in embedded MCP fail cleanly with isError=True
+        for bad_args in (
+            {"identifier": "mcp/bad", "fact": "x", "tags": [""]},
+            {"identifier": "mcp/bad", "fact": "x", "metadata": "not-an-object"},
+            {"identifier": "mcp/bad", "fact": "x", "harness_id": "   "},
+        ):
+            bad_req = CallToolRequest(
+                method="tools/call",
+                params=CallToolRequestParams(name="add_memory", arguments=bad_args),
+            )
+            bad_res = asyncio.run(emb_srv.request_handlers[CallToolRequest](bad_req))
+            assert bad_res.root.isError
+    finally:
+        emb_db.close()
+
+    # 3. Daemon relay forwards metadata, tags, harness_id, session_id to daemon runtime
+    policy = PolicyConfig(
+        store_id="store-mcp-111",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-mcp-a",
+                caller_id="caller-mcp-a",
+                store_id="store-mcp-111",
+                namespaces=("team/shared",),
+                operations=("read", "write"),
+            ),
+            CallerCredential.from_token(
+                token="tok-mcp-b",
+                caller_id="caller-mcp-b",
+                store_id="store-mcp-111",
+                namespaces=("b/private",),
+                operations=("read", "write"),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-mcp-111",
+                        namespace="team/shared",
+                        audience=("caller-mcp-b",),
+                        operations=("read",),
+                    ),
+                ),
+            ),
+        ],
+    )
+    app = create_app(db_path=tmp_path / "daemon_mcp_111.sqlite", policy=policy)
+    with TestClient(app) as tc:
+
+        async def run_relay_check():
+            transport = httpx.ASGITransport(app=app)
+            relay_client = AsyncHotMemClient(
+                "http://testserver",
+                token="tok-mcp-a",
+                expected_store_id="store-mcp-111",
+                harness_id="codex",
+                session_id="sess-relay-1",
+                source="mcp://codex-relay",
+                namespace="team/shared",
+            )
+            orig_headers = dict(relay_client._client.headers)
+            await relay_client._client.aclose()
+            relay_client._client = httpx.AsyncClient(
+                base_url="http://testserver",
+                transport=transport,
+                headers=orig_headers,
+            )
+            relay_srv, _ = create_relay_server(
+                "http://testserver",
+                token="tok-mcp-a",
+                session_id="sess-relay-1",
+                harness_id="codex",
+                source="mcp://codex-relay",
+                namespace="team/shared",
+                expected_store_id="store-mcp-111",
+                client=relay_client,
+            )
+            try:
+                req = CallToolRequest(
+                    method="tools/call",
+                    params=CallToolRequestParams(
+                        name="add_memory",
+                        arguments={
+                            "identifier": "ops/mcp-relay-111",
+                            "fact": "Relay fact with metadata and tags",
+                            "metadata": {"component": "relay", "ticket": 111},
+                            "tags": ["model:gpt-5", "project:hotmem", "org:knowguard"],
+                        },
+                    ),
+                )
+                res = await relay_srv.request_handlers[CallToolRequest](req)
+                assert not res.root.isError, res.root.content[0].text
+                mid = _text(res.root)["memory_id"]
+
+                # Conflicting session_id in tool call vs relay startup session_id fails clearly
+                conflict_req = CallToolRequest(
+                    method="tools/call",
+                    params=CallToolRequestParams(
+                        name="add_memory",
+                        arguments={
+                            "identifier": "ops/mcp-relay-conflict",
+                            "fact": "Conflicting session id",
+                            "session_id": "sess-different",
+                        },
+                    ),
+                )
+                conflict_res = await relay_srv.request_handlers[CallToolRequest](conflict_req)
+                assert conflict_res.root.isError
+                assert "context_conflict" in conflict_res.root.content[0].text
+                return mid
+            finally:
+                await relay_client.close()
+
+        mid = asyncio.run(run_relay_check())
+
+        # Reader B verifies metadata, tags, harness_id, and session_id on the daemon
+        got = tc.get(
+            f"/v1/memory/{mid}",
+            headers={
+                "Authorization": "Bearer tok-mcp-b",
+                "X-HotMem-Store-Id": "store-mcp-111",
+                "X-HotMem-Session-Id": "sess-b-1",
+                "X-HotMem-Harness-Id": "claude-code",
+            },
+        )
+        assert got.status_code == 200
+        body = got.json()
+        assert body["metadata"] == {"component": "relay", "ticket": 111}
+        assert body["tags"] == ["model:gpt-5", "project:hotmem", "org:knowguard"]
+        assert body["provenance"]["harness_id"] == "codex"
+        assert body["provenance"]["session_id"] == "sess-relay-1"
+        assert body["provenance"]["caller_id"] == "caller-mcp-a"
+
+
 def test_add_memory_missing_required_argument_errors(state: _ServerState):
     with pytest.raises(KeyError):
         _handle_add_memory(state, {"identifier": "v"})

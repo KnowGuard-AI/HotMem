@@ -163,6 +163,7 @@ def _make_daemon_client(
     *,
     token: str | None = None,
     session_id: str | None = None,
+    harness_id: str | None = None,
     source: str | None = None,
     namespace: str | None = None,
     expected_store_id: str | None = None,
@@ -175,6 +176,8 @@ def _make_daemon_client(
         kwargs["token"] = token
     if session_id is not None:
         kwargs["session_id"] = session_id
+    if harness_id is not None:
+        kwargs["harness_id"] = harness_id
     if source is not None:
         kwargs["source"] = source
     if namespace is not None:
@@ -354,6 +357,14 @@ def serve(
     type=click.Path(),
     help="Explicit database path (embedded mode).",
 )
+@click.option(
+    "--harness",
+    "--harness-id",
+    "daemon_harness_id",
+    default=None,
+    envvar="HOTMEM_HARNESS_ID",
+    help="Explicit harness ID for MCP operation (#111).",
+)
 @_daemon_client_options
 @_embedder_options
 @_reranker_options
@@ -361,6 +372,7 @@ def mcp(
     url: str | None,
     mount: str | None,
     db_path: str | None,
+    daemon_harness_id: str | None,
     daemon_token: str | None,
     daemon_session_id: str | None,
     daemon_source: str | None,
@@ -406,6 +418,7 @@ def mcp(
                 base_url=url,
                 token=daemon_token,
                 session_id=daemon_session_id,
+                harness_id=daemon_harness_id,
                 source=daemon_source,
                 namespace=daemon_namespace,
                 expected_store_id=expected_store_id,
@@ -754,6 +767,21 @@ def status(
 @click.option("--url", default=None, help="Running daemon URL (e.g. http://127.0.0.1:8711).")
 @click.option("--importance", default=0.5, type=float, help="Importance score (0.0..1.0).")
 @click.option("--ttl", "ttl_seconds", default=None, type=int, help="Optional TTL in seconds.")
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    help="Canonical record tag (repeatable, e.g. --tag model:gpt-5 --tag project:hotmem).",
+)
+@click.option("--metadata", "metadata_raw", default=None, help="JSON object of record metadata.")
+@click.option(
+    "--harness",
+    "--harness-id",
+    "daemon_harness_id",
+    default=None,
+    envvar="HOTMEM_HARNESS_ID",
+    help="Explicit harness ID for write attribution (#111).",
+)
 @click.option("--idempotency-key", "idempotency_key", default=None, help="Operation retry key.")
 @click.option("--json", "as_json", is_flag=True, help="Emit raw JSON.")
 @_daemon_client_options
@@ -765,6 +793,9 @@ def add(
     url: str | None,
     importance: float,
     ttl_seconds: int | None,
+    tags: tuple[str, ...],
+    metadata_raw: str | None,
+    daemon_harness_id: str | None,
     idempotency_key: str | None,
     as_json: bool,
     daemon_token: str | None,
@@ -781,12 +812,24 @@ def add(
     if url is None and db_path is None:
         raise click.ClickException("add requires --db PATH or --url URL")
 
+    meta_dict: dict | None = None
+    if metadata_raw is not None:
+        try:
+            parsed_meta = json.loads(metadata_raw)
+        except json.JSONDecodeError as err:
+            raise click.ClickException(f"invalid --metadata JSON: {err}") from err
+        if not isinstance(parsed_meta, dict):
+            raise click.ClickException("--metadata must decode to a JSON object")
+        meta_dict = parsed_meta
+    tag_list = list(tags) if tags else None
+
     if url is not None:
         try:
             with _make_daemon_client(
                 url,
                 token=daemon_token,
                 session_id=daemon_session_id,
+                harness_id=daemon_harness_id,
                 source=daemon_source,
                 namespace=daemon_namespace,
                 expected_store_id=expected_store_id,
@@ -796,7 +839,9 @@ def add(
                     fact,
                     source=daemon_source or "",
                     importance=importance,
+                    metadata=meta_dict,
                     ttl_seconds=ttl_seconds,
+                    tags=tag_list,
                     idempotency_key=idempotency_key,
                 )
         except Exception as err:
@@ -813,6 +858,7 @@ def add(
 
     assert db_path is not None
     from hotmem.mount import StoreIdentityError, StoreOwnershipError
+    from hotmem.policy import PolicyError
     from hotmem.runtime import HotMemRuntime
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
@@ -823,6 +869,7 @@ def add(
     try:
         ctx = rt.resolve_caller(
             session_id=daemon_session_id,
+            harness_id=daemon_harness_id,
             source=daemon_source,
             namespace=daemon_namespace,
             idempotency_key=idempotency_key,
@@ -833,8 +880,12 @@ def add(
             fact=fact,
             source=daemon_source or "",
             importance=importance,
+            metadata=meta_dict,
             ttl_seconds=ttl_seconds,
+            tags=tag_list,
         )
+    except PolicyError as err:
+        raise click.ClickException(f"{err.error}: {err.message}") from err
     finally:
         rt.close()
     if as_json:
