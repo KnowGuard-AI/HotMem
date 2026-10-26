@@ -132,6 +132,49 @@ def test_mcp_add_memory_forwards_metadata_tags_and_context(tmp_path: Path):
         assert prov["session_id"] == "sess-emb-111"
         assert prov["source"] == "mcp://claude-embedded"
 
+        # Embedded MCP duplicate write preserves first writer attribution & tags,
+        # and idempotency_key conflict is detected in embedded mode.
+        dup_req = CallToolRequest(
+            method="tools/call",
+            params=CallToolRequestParams(
+                name="add_memory",
+                arguments={
+                    "identifier": "mcp/emb-111",
+                    "fact": "Embedded MCP fact with metadata and tags",
+                    "tags": ["model:other"],
+                    "harness_id": "codex",
+                    "session_id": "sess-emb-222",
+                    "idempotency_key": "emb-idem-1",
+                },
+            ),
+        )
+        dup_res = asyncio.run(emb_srv.request_handlers[CallToolRequest](dup_req))
+        assert not dup_res.root.isError
+        assert _text(dup_res.root)["memory_id"] == emb_mid
+        assert _text(dup_res.root)["deduplicated"] is True
+        stored_after = emb_db.get_memory(emb_mid)
+        assert json.loads(stored_after["tags"]) == [
+            "model:claude-sonnet-4",
+            "project:hotmem",
+            "org:knowguard",
+        ]
+        assert json.loads(stored_after["provenance_json"])["harness_id"] == "claude-code"
+
+        conflict_emb = CallToolRequest(
+            method="tools/call",
+            params=CallToolRequestParams(
+                name="add_memory",
+                arguments={
+                    "identifier": "mcp/emb-111",
+                    "fact": "Different fact under same embedded idempotency key",
+                    "idempotency_key": "emb-idem-1",
+                },
+            ),
+        )
+        conflict_emb_res = asyncio.run(emb_srv.request_handlers[CallToolRequest](conflict_emb))
+        assert conflict_emb_res.root.isError
+        assert "idempotency_key_conflict" in conflict_emb_res.root.content[0].text
+
         # Malformed tags / metadata / context in embedded MCP fail cleanly with isError=True
         for bad_args in (
             {"identifier": "mcp/bad", "fact": "x", "tags": [""]},

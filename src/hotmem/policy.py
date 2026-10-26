@@ -1157,7 +1157,10 @@ class PolicyConfig:
         """Resolve and validate per-write session/harness/version overrides (#111)."""
         if caller_id_claim is not None:
             claimed = validate_context_field("caller_id", caller_id_claim, allow_empty=False)
-            if claimed != ctx.caller_id:
+            allowed_claims = (
+                {ctx.caller_id} if ctx.policy_enforced else {ctx.caller_id, "anonymous"}
+            )
+            if claimed not in allowed_claims:
                 raise PolicyError(
                     403,
                     "session_impersonation_denied",
@@ -1272,12 +1275,8 @@ class PolicyConfig:
         )
         clean_caller_claim = (
             validate_context_field("caller_id", caller_id_claim, allow_empty=False)
-            if (caller_id_claim is not None and caller_id_claim != "")
-            else (
-                validate_context_field("caller_id", caller_id_claim, allow_empty=False)
-                if caller_id_claim is not None
-                else None
-            )
+            if caller_id_claim is not None
+            else None
         )
         namespace = clean_namespace
 

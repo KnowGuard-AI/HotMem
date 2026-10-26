@@ -541,7 +541,10 @@ def test_wp4_deduplication_preserves_writer_and_idempotency_conflicts(tmp_path: 
             ),
         ],
     )
-    app = create_app(db_path=tmp_path / "wp4.sqlite", policy=policy)
+    app = create_app(db_path=tmp_path / "wp4.sqlite", base_dir=tmp_path, policy=policy)
+    ref_file = tmp_path / "runbook.txt"
+    ref_bytes = b"Runbook file bytes for file-backed deduplication test.\n"
+    ref_file.write_bytes(ref_bytes)
     hdr_a = {
         "Authorization": "Bearer tok-a",
         "X-HotMem-Store-Id": "store-wp4",
@@ -677,6 +680,58 @@ def test_wp4_deduplication_preserves_writer_and_idempotency_conflicts(tmp_path: 
         assert dedup_evs[0]["payload"]["harness_id"] == "claude-code"
         assert dedup_evs[0]["payload"]["session_id"] == "sess-b-second"
         assert dedup_evs[0]["payload"]["tags"] == ["model:claude-sonnet-4", "project:hotmem"]
+
+        # 5. File-backed deduplication also preserves original writer attribution & tags
+        f_a = client.post(
+            "/v1/add",
+            headers=hdr_a,
+            json={
+                "identifier": "ops/file-dedup-111",
+                "file_uri": "runbook.txt",
+                "byte_offset": 0,
+                "byte_length": len(ref_bytes),
+                "source_format": "text/plain",
+                "tags": ["model:gpt-5", "project:hotmem"],
+            },
+        )
+        assert f_a.status_code == 200
+        f_mid = f_a.json()["memory_id"]
+
+        f_b = client.post(
+            "/v1/add",
+            headers=hdr_b,
+            json={
+                "identifier": "ops/file-dedup-111",
+                "file_uri": "runbook.txt",
+                "byte_offset": 0,
+                "byte_length": len(ref_bytes),
+                "source_format": "text/plain",
+                "tags": ["model:claude-sonnet-4", "project:overwrite-attempt"],
+            },
+        )
+        assert f_b.status_code == 200
+        assert f_b.json()["memory_id"] == f_mid
+        assert f_b.json()["deduplicated"] is True
+        f_got = client.get(f"/v1/memory/{f_mid}", headers=hdr_b).json()
+        assert f_got["tags"] == ["model:gpt-5", "project:hotmem"]
+        assert f_got["provenance"]["caller_id"] == "caller-a"
+        assert f_got["provenance"]["harness_id"] == "codex"
+        assert f_got["provenance"]["session_id"] == "sess-a-orig"
+
+        # 6. Omitted tags vs empty tags=[] under same idempotency key are treated as equivalent
+        idem_empty_1 = client.post(
+            "/v1/add",
+            headers={**hdr_a, "X-HotMem-Idempotency-Key": "idem-empty-tags"},
+            json={"identifier": "ops/empty-tags", "fact": "No tags fact"},
+        )
+        assert idem_empty_1.status_code == 200
+        idem_empty_2 = client.post(
+            "/v1/add",
+            headers={**hdr_a, "X-HotMem-Idempotency-Key": "idem-empty-tags"},
+            json={"identifier": "ops/empty-tags", "fact": "No tags fact", "tags": []},
+        )
+        assert idem_empty_2.status_code == 200
+        assert idem_empty_2.json()["memory_id"] == idem_empty_1.json()["memory_id"]
 
 
 def test_wp4_concurrent_sessions_without_context_contamination(tmp_path: Path):

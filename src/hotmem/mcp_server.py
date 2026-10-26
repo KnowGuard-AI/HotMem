@@ -25,6 +25,7 @@ Extension: add new tools (e.g. delete_memory, forget_identifier) here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -739,6 +740,10 @@ def _handle_add_memory(state: _ServerState, arguments: dict[str, Any]) -> CallTo
         arg_namespace = validate_context_field("namespace", arg_namespace, allow_empty=False)
     eff_namespace = arg_namespace or state_namespace
 
+    arg_idem = arguments.get("idempotency_key")
+    if arg_idem is not None:
+        arg_idem = validate_context_field("idempotency_key", arg_idem, allow_empty=False)
+
     provenance_json: str | None = None
     if eff_session or eff_harness or eff_namespace:
         env = SessionEnvelope(
@@ -751,35 +756,94 @@ def _handle_add_memory(state: _ServerState, arguments: dict[str, Any]) -> CallTo
         )
         provenance_json = json.dumps(env.to_provenance_dict(), sort_keys=True)
 
+    req_canonical_dict: dict[str, Any] = {
+        "identifier": identifier,
+        "fact": fact,
+        "source": eff_source,
+        "importance": importance,
+        "metadata": meta_dict,
+        "ttl_seconds": ttl_seconds,
+        "namespace": eff_namespace,
+    }
+    if tag_list:
+        req_canonical_dict["tags"] = tag_list
+    if eff_harness:
+        req_canonical_dict["harness_id"] = eff_harness
+    req_canonical = json.dumps(req_canonical_dict, sort_keys=True, separators=(",", ":"))
+    request_hash = hashlib.sha256(req_canonical.encode("utf-8")).hexdigest()
+
     with Timer() as t:
+        if arg_idem:
+            ledger_entry = state.db.get_operation_ledger("embedded", eff_namespace, arg_idem)
+            if ledger_entry is not None:
+                if ledger_entry["request_hash"] != request_hash:
+                    raise PolicyError(
+                        409,
+                        "idempotency_key_conflict",
+                        f"idempotency key {arg_idem!r} was already used "
+                        "with a different request payload",
+                    )
+                saved = json.loads(ledger_entry["response_json"])
+                return _ok(
+                    {
+                        "memory_id": saved["memory_id"],
+                        "content_hash": saved["content_hash"],
+                        "trace_ms": round(t.ms, 2),
+                    }
+                )
+
         active = state.embedder
-        memory_id = uuid.uuid4().hex
         content_hash = compute_content_hash(identifier, fact)
-        vec = active.embed(fact)
-        blob = pack_embedding(vec)
+        existing_row = state.db.find_by_namespace_and_hash(eff_namespace, content_hash)
+        deduplicated = False
+        if existing_row is not None:
+            memory_id = str(existing_row["id"])
+            deduplicated = True
+        else:
+            memory_id = uuid.uuid4().hex
+            vec = active.embed(fact)
+            blob = pack_embedding(vec)
 
-        state.db.insert(
-            id=memory_id,
-            identifier=identifier,
-            fact_text=fact,
-            embedding=blob,
-            embedding_dim=active.descriptor.dimension,
-            embedding_model=active.descriptor.key,
-            source=eff_source,
-            importance=importance,
-            metadata_json=json.dumps(meta_dict),
-            content_hash=content_hash,
-            ttl_seconds=ttl_seconds,
-            namespace=eff_namespace,
-            tags=json.dumps(tag_list),
-            provenance_json=provenance_json,
-        )
+            state.db.insert(
+                id=memory_id,
+                identifier=identifier,
+                fact_text=fact,
+                embedding=blob,
+                embedding_dim=active.descriptor.dimension,
+                embedding_model=active.descriptor.key,
+                source=eff_source,
+                importance=importance,
+                metadata_json=json.dumps(meta_dict),
+                content_hash=content_hash,
+                ttl_seconds=ttl_seconds,
+                namespace=eff_namespace,
+                tags=json.dumps(tag_list),
+                provenance_json=provenance_json,
+            )
 
-    payload = {
+        if arg_idem:
+            state.db.put_operation_ledger(
+                caller_id="embedded",
+                namespace=eff_namespace,
+                operation_key=arg_idem,
+                operation_name="add",
+                request_hash=request_hash,
+                memory_id=memory_id,
+                content_hash=content_hash,
+                response_json=json.dumps(
+                    {"memory_id": memory_id, "content_hash": content_hash},
+                    sort_keys=True,
+                ),
+                _commit=True,
+            )
+
+    payload: dict[str, Any] = {
         "memory_id": memory_id,
         "content_hash": content_hash,
         "trace_ms": round(t.ms, 2),
     }
+    if deduplicated:
+        payload["deduplicated"] = True
     _trace.info("tool", "added memory", detail={"memory_id": memory_id})
     return _ok(payload)
 

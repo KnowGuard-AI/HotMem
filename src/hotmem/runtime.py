@@ -36,7 +36,13 @@ from hotmem.lifecycle import (
     states_model,
     transition,
 )
-from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
+from hotmem.memory import (
+    FileRef,
+    _file_ref_content_hash,
+    add_file_backed,
+    get_memory_metadata,
+    hydrate_memory,
+)
 from hotmem.mount import StoreIdentityError, StoreLock
 from hotmem.policy import (
     CallerContext,
@@ -614,12 +620,10 @@ class HotMemRuntime:
             "ttl_seconds": ttl_seconds,
             "namespace": target_namespace,
         }
-        if tag_list or tags is not None:
+        if tag_list:
             req_canonical_dict["tags"] = tag_list
         if effective_harness:
             req_canonical_dict["harness_id"] = effective_harness
-        if session_id is not None:
-            req_canonical_dict["session_id"] = effective_session
         req_canonical = json.dumps(
             req_canonical_dict,
             sort_keys=True,
@@ -657,30 +661,58 @@ class HotMemRuntime:
                     source_format=source_format or "",
                     source_checksum=source_checksum,
                 )
-                memory_id, content_hash = add_file_backed(
-                    db,
-                    identifier=identifier,
-                    file_ref=ref,
-                    base_dir=self.base_dir,
-                    summary=summary,
-                    importance=importance,
-                    metadata=meta_dict,
-                    source=effective_source,
-                    namespace=target_namespace,
-                    tags=tag_list,
-                    provenance=provenance_dict,
-                    embedder=self.embedder,
-                    _commit=False,
-                )
-                record = db.get_memory(memory_id) or {}
-                append_event(
-                    db,
-                    event_type=EventType.MEMORY_CREATED,
-                    memory_id=memory_id,
-                    namespace=target_namespace,
-                    payload=_build_memory_created_payload(record),
-                    _commit=not bool(ctx.idempotency_key),
-                )
+                content_hash = _file_ref_content_hash(identifier, ref)
+                existing_row = db.find_by_namespace_and_hash(target_namespace, content_hash)
+                if existing_row is not None:
+                    memory_id = str(existing_row["id"])
+                    deduplicated = True
+                    dedup_payload: dict[str, Any] = {
+                        "id": memory_id,
+                        "identifier": identifier,
+                        "content_hash": content_hash,
+                        "caller_id": ctx.caller_id,
+                        "harness_id": effective_harness,
+                        "session_id": effective_session,
+                        "source": effective_source,
+                        "tags": tag_list,
+                    }
+                    if meta_dict:
+                        dedup_payload["metadata_json"] = json.dumps(meta_dict)
+                    if provenance_json:
+                        dedup_payload["provenance_json"] = provenance_json
+                    append_event(
+                        db,
+                        event_type=EventType.MEMORY_DEDUPLICATED,
+                        memory_id=memory_id,
+                        namespace=target_namespace,
+                        payload=dedup_payload,
+                        _commit=not bool(ctx.idempotency_key),
+                    )
+                else:
+                    memory_id, content_hash = add_file_backed(
+                        db,
+                        identifier=identifier,
+                        file_ref=ref,
+                        base_dir=self.base_dir,
+                        summary=summary,
+                        importance=importance,
+                        metadata=meta_dict,
+                        source=effective_source,
+                        namespace=target_namespace,
+                        tags=tag_list,
+                        provenance=provenance_dict,
+                        embedder=self.embedder,
+                        _commit=False,
+                    )
+                    record = db.get_memory(memory_id) or {}
+                    append_event(
+                        db,
+                        event_type=EventType.MEMORY_CREATED,
+                        memory_id=memory_id,
+                        namespace=target_namespace,
+                        payload=_build_memory_created_payload(record),
+                        _commit=not bool(ctx.idempotency_key),
+                    )
             else:
                 active = self.embedder
                 content_hash = compute_content_hash(identifier, fact or "")
