@@ -107,6 +107,7 @@ Configure your MCP host (e.g. Claude Desktop or Cursor) to launch `hotmem mcp` i
         "mcp",
         "--url", "http://127.0.0.1:8711",
         "--token", "tok-caller-a",
+        "--harness", "claude-code",
         "--session", "sess-a-investigation",
         "--source", "mcp://claude-a",
         "--namespace", "ops/shared",
@@ -233,6 +234,22 @@ rules** across retrieval (`search`, `list`, `get_memory`, `hydrate`,
 - **Event payloads obey the same disclosure action.** `metadata_json`,
   `provenance_json`, `tags`, `identifier`, and `fact_summary` are redacted,
   omitted, or fail closed before an event is returned.
+
+### Explicit Session & Harness Context, Generic Tags, and ID Lifetimes (#111)
+
+- **Versioned session provenance (`hotmem-session-v1`):** Contextual writes record
+  `{"envelope_version": "hotmem-session-v1", "caller_id": ..., "harness_id": ..., "session_id": ..., "source": ..., "namespace": ..., "store_id": ...}`
+  in `memories.provenance_json`. Unknown envelope versions fail closed (`400 unsupported_envelope_version`); conflicting header vs. payload context fails with `400 context_conflict`.
+- **Attribution vs. authentication:** `harness_id`, `session_id`, and `source` are writer attribution. Authentication and namespace/share access derive solely from the bearer token (`CallerCredential`). Credentials may optionally pin `allowed_sessions`, `allowed_sources`, and `allowed_harnesses`; claiming another caller's bound identity fails with `403 session_impersonation_denied`.
+- **Canonical generic `tags` (`memories.tags`):** Model, project, and organization labels use canonical record tags (for example `{"tags": ["model:gpt-5", "project:hotmem", "org:knowguard"]}`) across HTTP (`/v1/add`), Python `HotMemClient` / `AsyncHotMemClient`, TypeScript `HotMemClient`, MCP `add_memory` (alongside `metadata`), and CLI `hotmem add --tag ...`. No dedicated model/project/org columns or parallel copies in `metadata` or `provenance` are created. Missing labels are omitted, `[]` is valid, and `model:*` labels can change per write within the same session.
+- **Native vs. adapter-scoped session IDs:**
+  - When a client or harness exposes a native conversation/session ID, supply that ID per conversation or per write (`X-HotMem-Session-Id`, SDK `session_id`, or MCP `add_memory(session_id=...)`).
+  - Standard MCP stdio transport does **not** automatically expose a host's native conversation ID or automatic transcript capture. When `--session` / `HOTMEM_SESSION_ID` is passed to `hotmem mcp --url ...`, its lifetime is scoped to that relay process instance unless overridden per tool call. Do not assign one permanent static session ID across unrelated conversations; client-specific hook/adapter wiring belongs to #125.
+- **Writer preservation, retries, and observed activity:**
+  - Reader context on `/v1/search`, `/v1/memories`, `/v1/memory/{id}`, and `/v1/memory/{id}/hydrate` never mutates stored writer provenance or tags.
+  - Content-hash deduplication preserves the original writer's stored record and tags while recording subsequent attempts in scoped `memory.deduplicated` events.
+  - Idempotency-key retries (`X-HotMem-Idempotency-Key`) include `tags`, `harness_id`, `source`, `namespace`, and `metadata` in the request fingerprint; changed context or tags under a repeated key fail with `409 idempotency_key_conflict`.
+  - Activity (`GET /v1/events`) reports only genuine HotMem-observed, permission-scoped operations (`memory.created`, `memory.deduplicated`, `snapshot.imported`, `handoff.applied`, etc.) and reuses existing `ttl_seconds` and event retention mechanisms without client-presence polling.
 
 ## Store schema migration (v5 -> v6)
 
