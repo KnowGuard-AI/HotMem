@@ -34,6 +34,7 @@ class NormalizedSession:
     label: str
     time_range: dict[str, Any]
     codex_version: str | None
+    harness_id: str | None = None
     entries: list[dict[str, Any]] = field(default_factory=list)
     memory_records: list[dict[str, Any]] = field(default_factory=list)
     omissions: list[dict[str, Any]] = field(default_factory=list)

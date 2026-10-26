@@ -75,6 +75,7 @@ def test_mmvt5_scoped_daemon_export_verify_restore_and_record_v2_fidelity(
     hdr_a_shared = {
         "Authorization": "Bearer tok-a",
         "X-HotMem-Store-Id": "store-src",
+        "X-HotMem-Harness-Id": "codex",
         "X-HotMem-Session-Id": "sess-a-portability",
         "X-HotMem-Source": "agent://investigator-a",
         "X-HotMem-Namespace": "ops/shared",
@@ -86,9 +87,11 @@ def test_mmvt5_scoped_daemon_export_verify_restore_and_record_v2_fidelity(
     hdr_b_src = {
         "Authorization": "Bearer tok-b",
         "X-HotMem-Store-Id": "store-src",
+        "X-HotMem-Harness-Id": "claude-code",
         "X-HotMem-Session-Id": "sess-b-portability",
         "X-HotMem-Source": "agent://recovery-b",
     }
+    canonical_tags = ["model:gpt-5", "project:hotmem", "org:knowguard"]
 
     with TestClient(src_app) as src_client:
         # 1. A writes shared decision + private canary
@@ -99,6 +102,7 @@ def test_mmvt5_scoped_daemon_export_verify_restore_and_record_v2_fidelity(
                 "identifier": "ops/demo-17",
                 "fact": shared_decision,
                 "importance": 0.9,
+                "tags": canonical_tags,
             },
         ).json()
         shared_id = res_shared["memory_id"]
@@ -222,10 +226,13 @@ def test_mmvt5_scoped_daemon_export_verify_restore_and_record_v2_fidelity(
             memories = b_search.json()["memories"]
             assert len(memories) == 1
             assert memories[0]["memory_id"] == shared_id
+            assert memories[0]["tags"] == canonical_tags
             assert memories[0]["provenance"]["caller_id"] == "caller-a"
+            assert memories[0]["provenance"]["harness_id"] == "codex"
             assert memories[0]["provenance"]["session_id"] == "sess-a-portability"
             assert memories[0]["provenance"]["source"] == "agent://investigator-a"
             assert memories[0]["provenance"]["namespace"] == "ops/shared"
+            assert memories[0]["provenance"]["store_id"] == "store-src"
 
             # Verify Record v2 columns (#99) survived round-trip in SQLite
             restored_row = dst_app.state.runtime.db.get_memory(shared_id)
@@ -294,3 +301,188 @@ def test_mmvt5_corrupt_artifact_fails_before_mutating_daemon_store(tmp_path: Pat
         leg_resp = client.post("/v1/hydrate", headers=hdr_a, json={"path": str(legacy_jsonl)})
         assert leg_resp.status_code == 200
         assert leg_resp.json()["loaded"] == 1
+
+
+def test_mmvt5_handoff_source_context_vs_caller_authority_and_legacy_025_fixture(tmp_path: Path):
+    """WP5 (#111): Handoff preserves source session/harness/tags distinct from preparing and
+    importing callers, and existing 0.2.5 golden handoff packages hydrate cleanly.
+    """
+    import shutil
+
+    base_dir = tmp_path / "handoff_wp5"
+    base_dir.mkdir()
+    src_export = base_dir / "codex_src"
+    src_export.mkdir()
+    (src_export / "export.json").write_text(
+        json.dumps(
+            {
+                "format": "codex-export-v1",
+                "harness_id": "codex",
+                "session": {
+                    "id": "sess-codex-origin-77",
+                    "harness_id": "codex",
+                    "label": "wp5-handoff",
+                    "started_at": "2026-04-20T10:00:00Z",
+                    "ended_at": "2026-04-20T10:05:00Z",
+                    "codex_version": "0.1.0",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    (src_export / "session.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "id": "e1",
+                        "seq": 1,
+                        "type": "decision",
+                        "text": (
+                            "Preserve source session identity separately from importing caller."
+                        ),
+                        "timestamp": "2026-04-20T10:01:00Z",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": "m1",
+                        "seq": 2,
+                        "type": "memory_item",
+                        "identifier": "arch/handoff-111",
+                        "fact": "Handoff memory item carries canonical model/project/org tags.",
+                        "importance": 0.9,
+                        "tags": ["model:gpt-5", "project:hotmem", "org:knowguard"],
+                        "timestamp": "2026-04-20T10:02:00Z",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    policy = PolicyConfig(
+        store_id="store-handoff-111",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-preparer",
+                caller_id="caller-preparer",
+                store_id="store-handoff-111",
+                namespaces=("prep/workspace",),
+                operations=("read", "export"),
+            ),
+            CallerCredential.from_token(
+                token="tok-importer",
+                caller_id="caller-importer",
+                store_id="store-handoff-111",
+                namespaces=("claude/workspace",),
+                operations=("read", "write", "hydrate"),
+            ),
+        ],
+    )
+    app = create_app(
+        db_path=base_dir / "handoff_111.sqlite",
+        base_dir=base_dir,
+        policy=policy,
+    )
+    prep_hdr = {
+        "Authorization": "Bearer tok-preparer",
+        "X-HotMem-Store-Id": "store-handoff-111",
+        "X-HotMem-Harness-Id": "codex-exporter",
+        "X-HotMem-Session-Id": "sess-preparer-99",
+        "X-HotMem-Source": "cli://exporter",
+        "X-HotMem-Namespace": "prep/workspace",
+    }
+    imp_hdr = {
+        "Authorization": "Bearer tok-importer",
+        "X-HotMem-Store-Id": "store-handoff-111",
+        "X-HotMem-Harness-Id": "claude-code",
+        "X-HotMem-Session-Id": "sess-importer-42",
+        "X-HotMem-Source": "mcp://claude-code",
+        "X-HotMem-Namespace": "claude/workspace",
+    }
+
+    with TestClient(app) as client:
+        prep = client.post(
+            "/v1/handoff/prepare",
+            headers=prep_hdr,
+            json={
+                "source": "codex_src",
+                "output": "pkg_111",
+                "mode": "resume",
+                "consent": "owner approved handoff for #111",
+            },
+        )
+        assert prep.status_code == 200, prep.text
+
+        insp = client.get(
+            "/v1/handoff/inspect",
+            headers=prep_hdr,
+            params={"package": "pkg_111"},
+        ).json()
+        assert insp["valid"] is True
+        # Source session identity is distinct from preparing caller identity
+        assert insp["source"]["session_id"] == "sess-codex-origin-77"
+        assert insp["source"]["harness_id"] == "codex"
+        assert insp["prepared_by"]["caller_id"] == "caller-preparer"
+        assert insp["prepared_by"]["harness_id"] == "codex-exporter"
+        assert insp["prepared_by"]["session_id"] == "sess-preparer-99"
+
+        ver = client.post(
+            "/v1/handoff/verify",
+            headers=imp_hdr,
+            json={"package": "pkg_111"},
+        ).json()
+        assert ver["valid"] is True
+
+        hyd = client.post(
+            "/v1/handoff/hydrate",
+            headers=imp_hdr,
+            json={"package": "pkg_111"},
+        )
+        assert hyd.status_code == 200, hyd.text
+        assert hyd.json()["loaded"] == 2
+
+        # Recall hydrated memory as importer: destination namespace is claude/workspace,
+        # while record provenance retains source session sess-codex-origin-77 & harness codex,
+        # and canonical tags survive intact.
+        listed = client.get(
+            "/v1/memories",
+            headers=imp_hdr,
+            params={"identifier": "arch/handoff-111"},
+        ).json()["memories"]
+        assert len(listed) == 1
+        assert listed[0]["tags"] == ["model:gpt-5", "project:hotmem", "org:knowguard"]
+        assert listed[0]["provenance"]["handoff"]["session_id"] == "sess-codex-origin-77"
+        assert listed[0]["provenance"]["handoff"]["harness_id"] == "codex"
+
+        evs = client.get(
+            "/v1/events",
+            headers=imp_hdr,
+            params={"event_type": "handoff.applied"},
+        ).json()["events"]
+        assert len(evs) == 1
+        assert evs[0]["payload"]["hydrated_by"]["caller_id"] == "caller-importer"
+        assert evs[0]["payload"]["hydrated_by"]["harness_id"] == "claude-code"
+        assert evs[0]["payload"]["hydrated_by"]["session_id"] == "sess-importer-42"
+
+        # Existing 0.2.5 golden handoff fixture remains readable, verifiable, and hydratable
+        golden_src = Path(__file__).parent / "golden" / "fixtures" / "handoff"
+        golden_copy = base_dir / "legacy_025_pkg"
+        shutil.copytree(golden_src, golden_copy)
+        ver_025 = client.post(
+            "/v1/handoff/verify",
+            headers=imp_hdr,
+            json={"package": "legacy_025_pkg"},
+        )
+        assert ver_025.status_code == 200
+        assert ver_025.json()["valid"] is True
+        hyd_025 = client.post(
+            "/v1/handoff/hydrate",
+            headers=imp_hdr,
+            json={"package": "legacy_025_pkg"},
+        )
+        assert hyd_025.status_code == 200
+        assert hyd_025.json()["loaded"] >= 1

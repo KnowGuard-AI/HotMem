@@ -92,11 +92,30 @@ def test_mcp_tool_top_level_schema_keys_locked(tmp_path):
 def test_mcp_add_memory_argument_shape_locked(tmp_path):
     tools = _tools(tmp_path / "m.sqlite")
     props = tools["add_memory"]["inputSchema"]["properties"]
-    assert set(props) == {"identifier", "fact", "importance", "ttl_seconds"}
+    assert set(props) == {
+        "identifier",
+        "fact",
+        "importance",
+        "ttl_seconds",
+        "metadata",
+        "tags",
+        "source",
+        "namespace",
+        "session_id",
+        "harness_id",
+        "idempotency_key",
+    }
     assert props["identifier"] == {"type": "string"}
     assert props["fact"] == {"type": "string"}
     assert props["importance"] == {"type": "number", "minimum": 0.0, "maximum": 1.0}
     assert props["ttl_seconds"] == {"type": "integer", "minimum": 1}
+    assert props["metadata"] == {"type": "object"}
+    assert props["tags"] == {"type": "array", "items": {"type": "string"}}
+    assert props["source"] == {"type": "string"}
+    assert props["namespace"] == {"type": "string"}
+    assert props["session_id"] == {"type": "string"}
+    assert props["harness_id"] == {"type": "string"}
+    assert props["idempotency_key"] == {"type": "string"}
 
 
 def test_mcp_search_memory_argument_shape_locked(tmp_path):

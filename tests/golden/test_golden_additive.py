@@ -187,3 +187,34 @@ def test_search_identical_with_and_without_vector_acceleration(tmp_path):
         (m["score"], m["content"]) for m in baseline["memories"]
     ]
     assert accelerated["count"] == baseline["count"] == len(facts)
+
+
+def test_session_context_and_canonical_tags_are_additive(tmp_path):
+    """#111: explicit harness_id, session_id, and canonical tags are additive.
+
+    Minimal unauthenticated writes keep the locked 6-key search message shape and
+    7-key list row shape, while writes supplying session context or tags additively
+    project `provenance` and `tags`.
+    """
+    app = create_app(db_path=tmp_path / "additive_111.sqlite")
+    with TestClient(app) as c:
+        c.post(
+            "/v1/add",
+            headers={"X-HotMem-Harness-Id": "codex", "X-HotMem-Session-Id": "sess-111"},
+            json={
+                "identifier": "ctx/item",
+                "fact": "Contextual tagged decision for additive proof",
+                "tags": ["model:gpt-5", "project:hotmem", "org:knowguard"],
+            },
+        )
+        search_hit = c.post(
+            "/v1/search", json={"query": "Contextual tagged decision", "top_k": 1}
+        ).json()["memories"][0]
+        assert search_hit["tags"] == ["model:gpt-5", "project:hotmem", "org:knowguard"]
+        assert search_hit["provenance"]["harness_id"] == "codex"
+        assert search_hit["provenance"]["session_id"] == "sess-111"
+        assert search_hit["provenance"]["envelope_version"] == "hotmem-session-v1"
+
+        list_row = c.get("/v1/memories", params={"identifier": "ctx/item"}).json()["memories"][0]
+        assert list_row["tags"] == ["model:gpt-5", "project:hotmem", "org:knowguard"]
+        assert list_row["provenance"]["harness_id"] == "codex"

@@ -25,6 +25,7 @@ Extension: add new tools (e.g. delete_memory, forget_identifier) here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
@@ -35,8 +36,15 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import CallToolResult, TextContent, Tool
 
+from hotmem.annotations import AnnotationValidationError, validate_metadata
 from hotmem.db import MemoryDB
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
+from hotmem.policy import (
+    PolicyError,
+    SessionEnvelope,
+    validate_context_field,
+    validate_request_tags,
+)
 from hotmem.rerank import Reranker
 from hotmem.runtime import HotMemRuntime
 from hotmem.search import search_memories
@@ -55,6 +63,13 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "fact": {"type": "string"},
             "importance": {"type": "number", "minimum": 0.0, "maximum": 1.0},
             "ttl_seconds": {"type": "integer", "minimum": 1},
+            "metadata": {"type": "object"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "source": {"type": "string"},
+            "namespace": {"type": "string"},
+            "session_id": {"type": "string"},
+            "harness_id": {"type": "string"},
+            "idempotency_key": {"type": "string"},
         },
         "required": ["identifier", "fact"],
     },
@@ -130,6 +145,11 @@ class _ServerState:
     start_time: float
     embedder: Embedder = DEFAULT_EMBEDDER  # runtime-owned (issue #78)
     reranker: Reranker | None = None  # optional second stage (#80)
+    session_id: str = ""
+    harness_id: str = ""
+    source: str = ""
+    namespace: str = ""
+    store_id: str = ""
 
 
 _state = _ServerState()
@@ -142,6 +162,10 @@ def create_server(
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
     state: _ServerState | None = None,
+    session_id: str | None = None,
+    harness_id: str | None = None,
+    source: str | None = None,
+    namespace: str | None = None,
 ) -> Server:
     """Create and configure the HotMem MCP server.
 
@@ -159,6 +183,14 @@ def create_server(
     active_state = state if state is not None else _state
     active_state.embedder = embedder if embedder is not None else DEFAULT_EMBEDDER
     active_state.reranker = reranker
+    if session_id is not None:
+        active_state.session_id = session_id
+    if harness_id is not None:
+        active_state.harness_id = harness_id
+    if source is not None:
+        active_state.source = source
+    if namespace is not None:
+        active_state.namespace = namespace
 
     server = Server("hotmem")
 
@@ -251,7 +283,10 @@ def create_server(
         except KeyError as err:
             _trace.error("tool", f"missing required argument: {err}", detail={"tool": name})
             return _error(f"missing required argument: {err}")
-        except ValueError as err:
+        except PolicyError as err:
+            _trace.error("tool", f"{err.error}: {err.message}", detail={"tool": name})
+            return _error(f"{err.error}: {err.message}")
+        except (ValueError, AnnotationValidationError) as err:
             _trace.error("tool", f"invalid argument: {err}", detail={"tool": name})
             return _error(f"invalid argument: {err}")
 
@@ -377,6 +412,8 @@ def _format_http_error(err: Exception) -> str:
     """Format an httpx transport or status error into an actionable MCP error string."""
     import httpx
 
+    if isinstance(err, PolicyError):
+        return f"{err.error}: {err.message}"
     if isinstance(err, httpx.HTTPStatusError):
         resp = err.response
         try:
@@ -401,12 +438,13 @@ def create_relay_server(
     *,
     token: str | None = None,
     session_id: str | None = None,
+    harness_id: str | None = None,
     source: str | None = None,
     namespace: str | None = None,
     expected_store_id: str | None = None,
     client: Any | None = None,
 ) -> tuple[Server, Any]:
-    """Create a thin MCP stdio-to-daemon relay server (#109).
+    """Create a thin MCP stdio-to-daemon relay server (#109, #111).
 
     Uses a persistent `AsyncHotMemClient` so connections are pooled across tool
     invocations and never opens a local or temporary SQLite database.
@@ -421,6 +459,7 @@ def create_relay_server(
             base_url=base_url,
             token=token,
             session_id=session_id,
+            harness_id=harness_id,
             source=source or "mcp",
             namespace=namespace,
             expected_store_id=expected_store_id,
@@ -443,12 +482,76 @@ def create_relay_server(
                 ttl_seconds = arguments.get("ttl_seconds")
                 if ttl_seconds is not None:
                     ttl_seconds = int(ttl_seconds)
+
+                raw_meta = arguments.get("metadata")
+                if raw_meta is not None and not isinstance(raw_meta, dict):
+                    raise PolicyError(400, "invalid_metadata", "metadata must be a JSON object")
+                if raw_meta is not None:
+                    validate_metadata(raw_meta)
+
+                raw_tags = arguments.get("tags")
+                tag_list = validate_request_tags(raw_tags) if raw_tags is not None else None
+
+                arg_session = arguments.get("session_id")
+                if arg_session is not None:
+                    arg_session = validate_context_field(
+                        "session_id", arg_session, allow_empty=False
+                    )
+                    if session_id and arg_session != session_id:
+                        raise PolicyError(
+                            400,
+                            "context_conflict",
+                            f"tool session_id {arg_session!r} conflicts with "
+                            f"relay session_id {session_id!r}",
+                        )
+
+                arg_harness = arguments.get("harness_id")
+                if arg_harness is not None:
+                    arg_harness = validate_context_field(
+                        "harness_id", arg_harness, allow_empty=False
+                    )
+                    if harness_id and arg_harness != harness_id:
+                        raise PolicyError(
+                            400,
+                            "context_conflict",
+                            f"tool harness_id {arg_harness!r} conflicts with "
+                            f"relay harness_id {harness_id!r}",
+                        )
+
+                arg_source = arguments.get("source")
+                if arg_source is not None:
+                    arg_source = validate_context_field("source", arg_source, allow_empty=False)
+                    if source and arg_source != source:
+                        raise PolicyError(
+                            400,
+                            "context_conflict",
+                            f"tool source {arg_source!r} conflicts with relay source {source!r}",
+                        )
+
+                arg_namespace = arguments.get("namespace")
+                if arg_namespace is not None:
+                    arg_namespace = validate_context_field(
+                        "namespace", arg_namespace, allow_empty=False
+                    )
+
+                arg_idem = arguments.get("idempotency_key")
+                if arg_idem is not None:
+                    arg_idem = validate_context_field(
+                        "idempotency_key", arg_idem, allow_empty=False
+                    )
+
                 res = await owned_client.add(
                     identifier,
                     fact,
-                    source=source or "mcp",
+                    source=arg_source or source or "mcp",
                     importance=importance,
+                    metadata=raw_meta,
                     ttl_seconds=ttl_seconds,
+                    tags=tag_list,
+                    harness_id=arg_harness,
+                    session_id=arg_session,
+                    namespace=arg_namespace,
+                    idempotency_key=arg_idem,
                 )
                 return _ok(res)
 
@@ -544,6 +647,7 @@ async def run_relay(
     *,
     token: str | None = None,
     session_id: str | None = None,
+    harness_id: str | None = None,
     source: str | None = None,
     namespace: str | None = None,
     expected_store_id: str | None = None,
@@ -553,6 +657,7 @@ async def run_relay(
         base_url=base_url,
         token=token,
         session_id=session_id,
+        harness_id=harness_id,
         source=source,
         namespace=namespace,
         expected_store_id=expected_store_id,
@@ -583,32 +688,162 @@ def _handle_add_memory(state: _ServerState, arguments: dict[str, Any]) -> CallTo
     if ttl_seconds is not None:
         ttl_seconds = int(ttl_seconds)
 
-    with Timer() as t:
-        active = state.embedder
-        memory_id = uuid.uuid4().hex
-        content_hash = compute_content_hash(identifier, fact)
-        vec = active.embed(fact)
-        blob = pack_embedding(vec)
+    raw_meta = arguments.get("metadata")
+    if raw_meta is not None and not isinstance(raw_meta, dict):
+        raise PolicyError(400, "invalid_metadata", "metadata must be a JSON object")
+    meta_dict = raw_meta or {}
+    validate_metadata(meta_dict)
+    tag_list = validate_request_tags(arguments.get("tags"))
 
-        state.db.insert(
-            id=memory_id,
-            identifier=identifier,
-            fact_text=fact,
-            embedding=blob,
-            embedding_dim=active.descriptor.dimension,
-            embedding_model=active.descriptor.key,
-            source="mcp",
-            importance=importance,
-            metadata_json="{}",
-            content_hash=content_hash,
-            ttl_seconds=ttl_seconds,
+    state_session = getattr(state, "session_id", "") or ""
+    state_harness = getattr(state, "harness_id", "") or ""
+    state_source = getattr(state, "source", "") or ""
+    state_namespace = getattr(state, "namespace", "") or ""
+
+    arg_session = arguments.get("session_id")
+    if arg_session is not None:
+        arg_session = validate_context_field("session_id", arg_session, allow_empty=False)
+        if state_session and arg_session != state_session:
+            raise PolicyError(
+                400,
+                "context_conflict",
+                f"tool session_id {arg_session!r} conflicts with "
+                f"server session_id {state_session!r}",
+            )
+    eff_session = arg_session or state_session
+
+    arg_harness = arguments.get("harness_id")
+    if arg_harness is not None:
+        arg_harness = validate_context_field("harness_id", arg_harness, allow_empty=False)
+        if state_harness and arg_harness != state_harness:
+            raise PolicyError(
+                400,
+                "context_conflict",
+                f"tool harness_id {arg_harness!r} conflicts with "
+                f"server harness_id {state_harness!r}",
+            )
+    eff_harness = arg_harness or state_harness
+
+    arg_source = arguments.get("source")
+    if arg_source is not None:
+        arg_source = validate_context_field("source", arg_source, allow_empty=False)
+        if state_source and arg_source != state_source:
+            raise PolicyError(
+                400,
+                "context_conflict",
+                f"tool source {arg_source!r} conflicts with server source {state_source!r}",
+            )
+    eff_source = arg_source or state_source or "mcp"
+
+    arg_namespace = arguments.get("namespace")
+    if arg_namespace is not None:
+        arg_namespace = validate_context_field("namespace", arg_namespace, allow_empty=False)
+    eff_namespace = arg_namespace or state_namespace
+
+    arg_idem = arguments.get("idempotency_key")
+    if arg_idem is not None:
+        arg_idem = validate_context_field("idempotency_key", arg_idem, allow_empty=False)
+
+    provenance_json: str | None = None
+    if eff_session or eff_harness or eff_namespace:
+        env = SessionEnvelope(
+            caller_id="embedded",
+            harness_id=eff_harness,
+            session_id=eff_session,
+            source=eff_source,
+            namespace=eff_namespace,
+            store_id=getattr(state, "store_id", "") or "",
         )
+        provenance_json = json.dumps(env.to_provenance_dict(), sort_keys=True)
 
-    payload = {
+    req_canonical_dict: dict[str, Any] = {
+        "identifier": identifier,
+        "fact": fact,
+        "source": eff_source,
+        "importance": importance,
+        "metadata": meta_dict,
+        "ttl_seconds": ttl_seconds,
+        "namespace": eff_namespace,
+    }
+    if tag_list:
+        req_canonical_dict["tags"] = tag_list
+    if eff_harness:
+        req_canonical_dict["harness_id"] = eff_harness
+    req_canonical = json.dumps(req_canonical_dict, sort_keys=True, separators=(",", ":"))
+    request_hash = hashlib.sha256(req_canonical.encode("utf-8")).hexdigest()
+
+    with Timer() as t:
+        if arg_idem:
+            ledger_entry = state.db.get_operation_ledger("embedded", eff_namespace, arg_idem)
+            if ledger_entry is not None:
+                if ledger_entry["request_hash"] != request_hash:
+                    raise PolicyError(
+                        409,
+                        "idempotency_key_conflict",
+                        f"idempotency key {arg_idem!r} was already used "
+                        "with a different request payload",
+                    )
+                saved = json.loads(ledger_entry["response_json"])
+                return _ok(
+                    {
+                        "memory_id": saved["memory_id"],
+                        "content_hash": saved["content_hash"],
+                        "trace_ms": round(t.ms, 2),
+                    }
+                )
+
+        active = state.embedder
+        content_hash = compute_content_hash(identifier, fact)
+        existing_row = state.db.find_by_namespace_and_hash(eff_namespace, content_hash)
+        deduplicated = False
+        if existing_row is not None:
+            memory_id = str(existing_row["id"])
+            deduplicated = True
+        else:
+            memory_id = uuid.uuid4().hex
+            vec = active.embed(fact)
+            blob = pack_embedding(vec)
+
+            state.db.insert(
+                id=memory_id,
+                identifier=identifier,
+                fact_text=fact,
+                embedding=blob,
+                embedding_dim=active.descriptor.dimension,
+                embedding_model=active.descriptor.key,
+                source=eff_source,
+                importance=importance,
+                metadata_json=json.dumps(meta_dict),
+                content_hash=content_hash,
+                ttl_seconds=ttl_seconds,
+                namespace=eff_namespace,
+                tags=json.dumps(tag_list),
+                provenance_json=provenance_json,
+            )
+
+        if arg_idem:
+            state.db.put_operation_ledger(
+                caller_id="embedded",
+                namespace=eff_namespace,
+                operation_key=arg_idem,
+                operation_name="add",
+                request_hash=request_hash,
+                memory_id=memory_id,
+                content_hash=content_hash,
+                response_json=json.dumps(
+                    {"memory_id": memory_id, "content_hash": content_hash},
+                    sort_keys=True,
+                ),
+                _commit=True,
+            )
+
+    payload: dict[str, Any] = {
         "memory_id": memory_id,
         "content_hash": content_hash,
         "trace_ms": round(t.ms, 2),
     }
+    if deduplicated:
+        payload["deduplicated"] = True
     _trace.info("tool", "added memory", detail={"memory_id": memory_id})
     return _ok(payload)
 

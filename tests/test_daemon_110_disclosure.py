@@ -2107,3 +2107,110 @@ def test_mvt110_3c_handoff_ledger_does_not_advertise_foreign_brief(tmp_path: Pat
         assert body["loaded"] == 0
         assert body["brief_accessible"] is False
         assert body["brief"] is None
+
+
+def test_mvt110_tags_classification_and_secret_redaction_across_surfaces(tmp_path: Path):
+    """#111 / #110: Canonical tags obey private classification (including key:value tags)
+    and secret redaction across search, list, get_memory, and events (including deduplicated).
+    """
+    policy = PolicyConfig(
+        store_id="store-110-tags",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-a",
+                caller_id="caller-a",
+                store_id="store-110-tags",
+                namespaces=("team/shared",),
+                operations=("read", "write"),
+            ),
+            CallerCredential.from_token(
+                token="tok-b",
+                caller_id="caller-b",
+                store_id="store-110-tags",
+                namespaces=("b/private",),
+                operations=("read", "write"),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-110-tags",
+                        namespace="team/shared",
+                        audience=("caller-b",),
+                        operations=("read", "write"),
+                    ),
+                ),
+            ),
+        ],
+    )
+    app = create_app(db_path=tmp_path / "tags_disc.sqlite", policy=policy)
+    hdr_a = {
+        "Authorization": "Bearer tok-a",
+        "X-HotMem-Store-Id": "store-110-tags",
+        "X-HotMem-Harness-Id": "codex",
+        "X-HotMem-Session-Id": "sess-a-1",
+        "X-HotMem-Namespace": "team/shared",
+    }
+    hdr_b = {
+        "Authorization": "Bearer tok-b",
+        "X-HotMem-Store-Id": "store-110-tags",
+        "X-HotMem-Harness-Id": "claude-code",
+        "X-HotMem-Session-Id": "sess-b-1",
+        "X-HotMem-Namespace": "team/shared",
+    }
+    fake_secret = "sk-" + "a" * 36
+
+    with TestClient(app) as client:
+        # 1. Memory with visibility:confidential tag is omitted from search, list, get, events
+        priv_tag_mid = client.post(
+            "/v1/add",
+            headers=hdr_a,
+            json={
+                "identifier": "disc/tags",
+                "fact": "Tagged confidential record",
+                "tags": ["model:gpt-5", "visibility:confidential"],
+            },
+        ).json()["memory_id"]
+        assert client.get(f"/v1/memory/{priv_tag_mid}", headers=hdr_b).status_code == 404
+
+        # 2. Memory with a secret embedded in a tag has that tag redacted on recall & events
+        sec_tag_mid = client.post(
+            "/v1/add",
+            headers=hdr_a,
+            json={
+                "identifier": "disc/tags",
+                "fact": "Public text with secret accidentally placed in tag",
+                "tags": ["model:gpt-5", f" leaked:{fake_secret}"],
+            },
+        ).json()["memory_id"]
+
+        got = client.get(f"/v1/memory/{sec_tag_mid}", headers=hdr_b).json()
+        assert fake_secret not in json.dumps(got)
+        assert any("[REDACTED:" in t for t in got["tags"])
+
+        listed = client.get(
+            "/v1/memories", headers=hdr_b, params={"identifier": "disc/tags"}
+        ).json()["memories"]
+        assert len(listed) == 1
+        assert listed[0]["id"] == sec_tag_mid
+        assert fake_secret not in json.dumps(listed)
+
+        searched = client.post(
+            "/v1/search", headers=hdr_b, json={"query": "Public text", "top_k": 5}
+        ).json()["memories"]
+        assert len(searched) == 1
+        assert fake_secret not in json.dumps(searched)
+
+        # 3. Deduplicated write attempt with private tag on a public memory is omitted from events
+        client.post(
+            "/v1/add",
+            headers=hdr_b,
+            json={
+                "identifier": "disc/tags",
+                "fact": "Public text with secret accidentally placed in tag",
+                "tags": ["classification:private", "model:claude-sonnet-4"],
+            },
+        )
+        evs = client.get("/v1/events", headers=hdr_b, params={"memory_id": sec_tag_mid}).json()[
+            "events"
+        ]
+        assert not any(e["event_type"] == "memory.deduplicated" for e in evs)
+        assert fake_secret not in json.dumps(evs)

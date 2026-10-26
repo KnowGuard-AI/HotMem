@@ -564,6 +564,7 @@ class MemoryDB:
         metadata_json: str = "{}",
         content_hash: str = "",
         namespace: str = "",
+        tags: str = "[]",
         provenance_json: str | None = None,
         _commit: bool = True,
     ) -> None:
@@ -591,6 +592,7 @@ class MemoryDB:
             byte_offset=byte_offset,
             byte_length=byte_length,
             fact_summary=fact_summary,
+            tags=tags,
             provenance_json=provenance_json,
             _commit=_commit,
         )
@@ -1460,7 +1462,7 @@ class MemoryDB:
         if row_filter is None and row_transform is None:
             rows = self._conn.execute(
                 f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
-                           created_at
+                           created_at, tags, provenance_json
                     FROM memories
                     WHERE identifier = ?
                       AND {_ttl_live()}
@@ -1468,11 +1470,37 @@ class MemoryDB:
                     LIMIT ?""",
                 (identifier, limit),
             ).fetchall()
-            return [dict(r) for r in rows]
+            out_rows: list[dict[str, Any]] = []
+            for r in rows:
+                d = dict(r)
+                raw_tags = d.pop("tags", None)
+                raw_prov = d.pop("provenance_json", None)
+                parsed_tags: list[str] = []
+                if raw_tags:
+                    try:
+                        loaded = json.loads(raw_tags) if isinstance(raw_tags, str) else raw_tags
+                        if isinstance(loaded, list):
+                            parsed_tags = [str(item) for item in loaded]
+                    except (json.JSONDecodeError, TypeError):
+                        parsed_tags = []
+                parsed_prov: Any = None
+                if raw_prov:
+                    try:
+                        parsed_prov = (
+                            json.loads(raw_prov) if isinstance(raw_prov, str) else raw_prov
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        parsed_prov = None
+                if parsed_tags or parsed_prov is not None:
+                    d["tags"] = parsed_tags
+                if parsed_prov is not None:
+                    d["provenance"] = parsed_prov
+                out_rows.append(d)
+            return out_rows
 
         rows = self._conn.execute(
             f"""SELECT id, identifier, fact_text, importance, metadata_json, source,
-                       created_at, namespace, tags
+                       created_at, namespace, tags, provenance_json
                 FROM memories
                 WHERE identifier = ?
                   AND {_ttl_live()}
@@ -1490,6 +1518,24 @@ class MemoryDB:
                     continue
                 d = transformed
             d.pop("namespace", None)
+            raw_tags = d.pop("tags", None)
+            raw_prov = d.pop("provenance_json", None)
+            parsed_tags = []
+            if raw_tags:
+                try:
+                    loaded = json.loads(raw_tags) if isinstance(raw_tags, str) else raw_tags
+                    if isinstance(loaded, list):
+                        parsed_tags = [str(item) for item in loaded]
+                except (json.JSONDecodeError, TypeError):
+                    parsed_tags = []
+            d["tags"] = parsed_tags
+            if raw_prov:
+                try:
+                    parsed_prov = json.loads(raw_prov) if isinstance(raw_prov, str) else raw_prov
+                except (json.JSONDecodeError, TypeError):
+                    parsed_prov = None
+                if parsed_prov is not None:
+                    d["provenance"] = parsed_prov
             filtered.append(d)
             if len(filtered) >= limit:
                 break

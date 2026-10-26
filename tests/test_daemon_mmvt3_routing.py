@@ -185,6 +185,7 @@ def test_mmvt3_cross_adapter_routing_and_stdio_relay_disconnect(
         token: str,
         session_id: str,
         source: str,
+        harness_id: str | None = None,
         namespace: str | None = None,
         store_id: str = "store-mmvt3",
     ):
@@ -201,6 +202,8 @@ def test_mmvt3_cross_adapter_routing_and_stdio_relay_disconnect(
             "--store-id",
             store_id,
         ]
+        if harness_id is not None:
+            args.extend(["--harness", harness_id])
         if namespace is not None:
             args.extend(["--namespace", namespace])
         params = StdioServerParameters(command=executable, args=args)
@@ -220,6 +223,7 @@ def test_mmvt3_cross_adapter_routing_and_stdio_relay_disconnect(
                 url,
                 token="tok-a",
                 session_id="sess-a-mcp",
+                harness_id="claude-code",
                 source="mcp://claude-a",
                 namespace="ops/shared",
             ) as session:
@@ -231,7 +235,13 @@ def test_mmvt3_cross_adapter_routing_and_stdio_relay_disconnect(
 
                 add_res = await session.call_tool(
                     "add_memory",
-                    {"identifier": "ops/demo-17", "fact": shared_fact, "importance": 0.9},
+                    {
+                        "identifier": "ops/demo-17",
+                        "fact": shared_fact,
+                        "importance": 0.9,
+                        "metadata": {"incident": "DEMO-17", "approved": True},
+                        "tags": ["model:claude-sonnet-4", "project:hotmem", "org:knowguard"],
+                    },
                 )
                 assert not add_res.isError, add_res
                 return json.loads(add_res.content[0].text)["memory_id"]
@@ -251,12 +261,20 @@ def test_mmvt3_cross_adapter_routing_and_stdio_relay_disconnect(
                 "tok-a",
                 "--session",
                 "sess-a-cli",
+                "--harness",
+                "codex",
                 "--source",
                 "cli://ops-a",
                 "--namespace",
                 "ops/private",
                 "--store-id",
                 "store-mmvt3",
+                "--tag",
+                "model:gpt-5",
+                "--tag",
+                "project:secret-ops",
+                "--metadata",
+                '{"classification":"private"}',
                 "--json",
             ],
         )
@@ -286,7 +304,13 @@ def test_mmvt3_cross_adapter_routing_and_stdio_relay_disconnect(
         b_rows = json.loads(cli_search_b.output)
         assert len(b_rows) == 1
         assert b_rows[0]["memory_id"] == shared_mid
+        assert b_rows[0]["tags"] == [
+            "model:claude-sonnet-4",
+            "project:hotmem",
+            "org:knowguard",
+        ]
         assert b_rows[0]["provenance"]["caller_id"] == "caller-a"
+        assert b_rows[0]["provenance"]["harness_id"] == "claude-code"
         assert b_rows[0]["provenance"]["session_id"] == "sess-a-mcp"
         assert b_rows[0]["provenance"]["source"] == "mcp://claude-a"
 
@@ -343,7 +367,12 @@ def test_mmvt3_cross_adapter_routing_and_stdio_relay_disconnect(
             namespace="ops/private",
             expected_store_id="store-mmvt3",
         ) as sdk_a:
-            assert sdk_a.get_memory(canary_mid)["fact_text"] == canary_fact
+            canary_rec = sdk_a.get_memory(canary_mid)
+            assert canary_rec["fact_text"] == canary_fact
+            assert canary_rec["tags"] == ["model:gpt-5", "project:secret-ops"]
+            assert canary_rec["metadata"] == {"classification": "private"}
+            assert canary_rec["provenance"]["harness_id"] == "codex"
+            assert canary_rec["provenance"]["session_id"] == "sess-a-cli"
 
         # 6. CLI status with wrong token or unreachable port fails visibly
         bad_status = runner.invoke(main, ["status", "--url", url, "--token", "invalid-token"])

@@ -192,6 +192,8 @@ def _load_manifest(pkg: Path) -> dict[str, Any]:
     _object_field(manifest, "limits")
     if "consent" in manifest:
         _object_field(manifest, "consent")
+    if "prepared_by" in manifest:
+        _object_field(manifest, "prepared_by")
     return manifest
 
 
@@ -579,4 +581,6 @@ def inspect_handoff(pkg_dir: str | Path) -> dict[str, Any]:
         created_at=manifest.get("created_at"),
         hotmem_version=manifest.get("hotmem_version"),
     )
+    if "prepared_by" in manifest:
+        report["prepared_by"] = manifest.get("prepared_by")
     return report

@@ -18,10 +18,12 @@ def _build_context_headers(
     *,
     token: str | None = None,
     session_id: str | None = None,
+    harness_id: str | None = None,
     source: str | None = None,
     namespace: str | None = None,
     expected_store_id: str | None = None,
     idempotency_key: str | None = None,
+    envelope_version: str | None = None,
 ) -> dict[str, str]:
     headers: dict[str, str] = {}
     if token:
@@ -30,12 +32,16 @@ def _build_context_headers(
         headers["X-HotMem-Store-Id"] = expected_store_id
     if session_id:
         headers["X-HotMem-Session-Id"] = session_id
+    if harness_id:
+        headers["X-HotMem-Harness-Id"] = harness_id
     if source:
         headers["X-HotMem-Source"] = source
     if namespace:
         headers["X-HotMem-Namespace"] = namespace
     if idempotency_key:
         headers["X-HotMem-Idempotency-Key"] = idempotency_key
+    if envelope_version:
+        headers["X-HotMem-Envelope-Version"] = envelope_version
     return headers
 
 
@@ -49,22 +55,28 @@ class HotMemClient:
         timeout: float = 30.0,
         token: str | None = None,
         session_id: str | None = None,
+        harness_id: str | None = None,
         source: str | None = None,
         namespace: str | None = None,
         expected_store_id: str | None = None,
+        envelope_version: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.session_id = session_id
+        self.harness_id = harness_id
         self.source = source
         self.namespace = namespace
         self.expected_store_id = expected_store_id
+        self.envelope_version = envelope_version
         headers = _build_context_headers(
             token=token,
             session_id=session_id,
+            harness_id=harness_id,
             source=source,
             namespace=namespace,
             expected_store_id=expected_store_id,
+            envelope_version=envelope_version,
         )
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout, headers=headers)
 
@@ -83,6 +95,11 @@ class HotMemClient:
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
         ttl_seconds: int | None = None,
+        tags: list[str] | None = None,
+        harness_id: str | None = None,
+        session_id: str | None = None,
+        namespace: str | None = None,
+        envelope_version: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add an inline fact to memory."""
@@ -95,12 +112,26 @@ class HotMemClient:
         }
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
+        if tags is not None:
+            payload["tags"] = tags
+        extra_headers: dict[str, str] = {}
         if idempotency_key is not None:
-            resp = self._client.post(
-                "/v1/add",
-                json=payload,
-                headers={"X-HotMem-Idempotency-Key": idempotency_key},
-            )
+            extra_headers["X-HotMem-Idempotency-Key"] = idempotency_key
+        if harness_id is not None:
+            extra_headers["X-HotMem-Harness-Id"] = harness_id
+            payload["harness_id"] = harness_id
+        if session_id is not None:
+            extra_headers["X-HotMem-Session-Id"] = session_id
+            payload["session_id"] = session_id
+        if namespace is not None:
+            extra_headers["X-HotMem-Namespace"] = namespace
+        if envelope_version is not None:
+            extra_headers["X-HotMem-Envelope-Version"] = envelope_version
+            payload["envelope_version"] = envelope_version
+        if source and getattr(self, "source", None) and source != getattr(self, "source", None):
+            extra_headers["X-HotMem-Source"] = source
+        if extra_headers:
+            resp = self._client.post("/v1/add", json=payload, headers=extra_headers)
         else:
             resp = self._client.post("/v1/add", json=payload)
         resp.raise_for_status()
@@ -119,6 +150,11 @@ class HotMemClient:
         source: str = "",
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+        harness_id: str | None = None,
+        session_id: str | None = None,
+        namespace: str | None = None,
+        envelope_version: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add a file-backed memory by reference (zero bytes copied)."""
@@ -136,12 +172,26 @@ class HotMemClient:
             payload["source_checksum"] = source_checksum
         if summary is not None:
             payload["summary"] = summary
+        if tags is not None:
+            payload["tags"] = tags
+        extra_headers: dict[str, str] = {}
         if idempotency_key is not None:
-            resp = self._client.post(
-                "/v1/add",
-                json=payload,
-                headers={"X-HotMem-Idempotency-Key": idempotency_key},
-            )
+            extra_headers["X-HotMem-Idempotency-Key"] = idempotency_key
+        if harness_id is not None:
+            extra_headers["X-HotMem-Harness-Id"] = harness_id
+            payload["harness_id"] = harness_id
+        if session_id is not None:
+            extra_headers["X-HotMem-Session-Id"] = session_id
+            payload["session_id"] = session_id
+        if namespace is not None:
+            extra_headers["X-HotMem-Namespace"] = namespace
+        if envelope_version is not None:
+            extra_headers["X-HotMem-Envelope-Version"] = envelope_version
+            payload["envelope_version"] = envelope_version
+        if source and getattr(self, "source", None) and source != getattr(self, "source", None):
+            extra_headers["X-HotMem-Source"] = source
+        if extra_headers:
+            resp = self._client.post("/v1/add", json=payload, headers=extra_headers)
         else:
             resp = self._client.post("/v1/add", json=payload)
         resp.raise_for_status()
@@ -349,22 +399,28 @@ class AsyncHotMemClient:
         timeout: float = 30.0,
         token: str | None = None,
         session_id: str | None = None,
+        harness_id: str | None = None,
         source: str | None = None,
         namespace: str | None = None,
         expected_store_id: str | None = None,
+        envelope_version: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.session_id = session_id
+        self.harness_id = harness_id
         self.source = source
         self.namespace = namespace
         self.expected_store_id = expected_store_id
+        self.envelope_version = envelope_version
         headers = _build_context_headers(
             token=token,
             session_id=session_id,
+            harness_id=harness_id,
             source=source,
             namespace=namespace,
             expected_store_id=expected_store_id,
+            envelope_version=envelope_version,
         )
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=timeout, headers=headers)
 
@@ -383,6 +439,11 @@ class AsyncHotMemClient:
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
         ttl_seconds: int | None = None,
+        tags: list[str] | None = None,
+        harness_id: str | None = None,
+        session_id: str | None = None,
+        namespace: str | None = None,
+        envelope_version: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add a fact to memory."""
@@ -395,12 +456,26 @@ class AsyncHotMemClient:
         }
         if ttl_seconds is not None:
             payload["ttl_seconds"] = ttl_seconds
+        if tags is not None:
+            payload["tags"] = tags
+        extra_headers: dict[str, str] = {}
         if idempotency_key is not None:
-            resp = await self._client.post(
-                "/v1/add",
-                json=payload,
-                headers={"X-HotMem-Idempotency-Key": idempotency_key},
-            )
+            extra_headers["X-HotMem-Idempotency-Key"] = idempotency_key
+        if harness_id is not None:
+            extra_headers["X-HotMem-Harness-Id"] = harness_id
+            payload["harness_id"] = harness_id
+        if session_id is not None:
+            extra_headers["X-HotMem-Session-Id"] = session_id
+            payload["session_id"] = session_id
+        if namespace is not None:
+            extra_headers["X-HotMem-Namespace"] = namespace
+        if envelope_version is not None:
+            extra_headers["X-HotMem-Envelope-Version"] = envelope_version
+            payload["envelope_version"] = envelope_version
+        if source and getattr(self, "source", None) and source != getattr(self, "source", None):
+            extra_headers["X-HotMem-Source"] = source
+        if extra_headers:
+            resp = await self._client.post("/v1/add", json=payload, headers=extra_headers)
         else:
             resp = await self._client.post("/v1/add", json=payload)
         resp.raise_for_status()
@@ -419,6 +494,11 @@ class AsyncHotMemClient:
         source: str = "",
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+        harness_id: str | None = None,
+        session_id: str | None = None,
+        namespace: str | None = None,
+        envelope_version: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Add a file-backed memory by reference (zero bytes copied)."""
@@ -436,12 +516,26 @@ class AsyncHotMemClient:
             payload["source_checksum"] = source_checksum
         if summary is not None:
             payload["summary"] = summary
+        if tags is not None:
+            payload["tags"] = tags
+        extra_headers: dict[str, str] = {}
         if idempotency_key is not None:
-            resp = await self._client.post(
-                "/v1/add",
-                json=payload,
-                headers={"X-HotMem-Idempotency-Key": idempotency_key},
-            )
+            extra_headers["X-HotMem-Idempotency-Key"] = idempotency_key
+        if harness_id is not None:
+            extra_headers["X-HotMem-Harness-Id"] = harness_id
+            payload["harness_id"] = harness_id
+        if session_id is not None:
+            extra_headers["X-HotMem-Session-Id"] = session_id
+            payload["session_id"] = session_id
+        if namespace is not None:
+            extra_headers["X-HotMem-Namespace"] = namespace
+        if envelope_version is not None:
+            extra_headers["X-HotMem-Envelope-Version"] = envelope_version
+            payload["envelope_version"] = envelope_version
+        if source and getattr(self, "source", None) and source != getattr(self, "source", None):
+            extra_headers["X-HotMem-Source"] = source
+        if extra_headers:
+            resp = await self._client.post("/v1/add", json=payload, headers=extra_headers)
         else:
             resp = await self._client.post("/v1/add", json=payload)
         resp.raise_for_status()

@@ -36,7 +36,13 @@ from hotmem.lifecycle import (
     states_model,
     transition,
 )
-from hotmem.memory import FileRef, add_file_backed, get_memory_metadata, hydrate_memory
+from hotmem.memory import (
+    FileRef,
+    _file_ref_content_hash,
+    add_file_backed,
+    get_memory_metadata,
+    hydrate_memory,
+)
 from hotmem.mount import StoreIdentityError, StoreLock
 from hotmem.policy import (
     CallerContext,
@@ -45,6 +51,7 @@ from hotmem.policy import (
     PolicyError,
     redact_structure,
     scan_and_redact_text,
+    validate_request_tags,
 )
 from hotmem.profiles import HydrationProfile, hydrate_with_profile
 from hotmem.provenance import ProvenanceError
@@ -403,10 +410,13 @@ class HotMemRuntime:
         token: str | None = None,
         requested_store_id: str | None = None,
         session_id: str | None = None,
+        harness_id: str | None = None,
         source: str | None = None,
         namespace: str | None = None,
         actor: str | None = None,
         idempotency_key: str | None = None,
+        envelope_version: str | None = None,
+        caller_id_claim: str | None = None,
     ) -> CallerContext:
         """Resolve and authenticate caller context against this runtime's policy."""
         return self.policy.resolve_request(
@@ -414,10 +424,13 @@ class HotMemRuntime:
             token=token,
             requested_store_id=requested_store_id,
             session_id=session_id,
+            harness_id=harness_id,
             source=source,
             namespace=namespace,
             actor=actor,
             idempotency_key=idempotency_key,
+            envelope_version=envelope_version,
+            caller_id_claim=caller_id_claim,
         )
 
     def revoke_policy(
@@ -540,12 +553,25 @@ class HotMemRuntime:
         importance: float = 0.5,
         metadata: dict[str, Any] | None = None,
         ttl_seconds: int | None = None,
+        tags: Any = None,
+        harness_id: str | None = None,
+        session_id: str | None = None,
+        envelope_version: str | None = None,
+        caller_id: str | None = None,
     ) -> dict[str, Any]:
         self._require_db()
         ctx.require_operation("write")
         target_namespace = ctx.effective_write_namespace
-        effective_source = ctx.source or source
-        if ctx.policy_enforced and not ctx.session_id:
+        effective_session, effective_harness, effective_version = (
+            self.policy.validate_write_session_and_harness(
+                ctx,
+                session_id=session_id,
+                harness_id=harness_id,
+                envelope_version=envelope_version,
+                caller_id_claim=caller_id,
+            )
+        )
+        if ctx.policy_enforced and not effective_session:
             raise PolicyError(
                 400,
                 "session_required",
@@ -554,34 +580,52 @@ class HotMemRuntime:
             )
         # Reject source attribution the credential is not entitled to claim.
         self.policy.validate_write_source(ctx, source)
+        effective_source = ctx.source or (source.strip() if isinstance(source, str) else "")
 
+        if metadata is not None and not isinstance(metadata, dict):
+            raise PolicyError(
+                400,
+                "invalid_metadata",
+                "metadata must be a JSON object",
+            )
         meta_dict = metadata or {}
         validate_metadata(meta_dict)
+        tag_list = validate_request_tags(tags)
+        tags_json = json.dumps(tag_list)
 
         envelope = ctx.build_session_envelope(
-            namespace=target_namespace, request_source=effective_source
+            namespace=target_namespace,
+            request_source=effective_source,
+            request_harness_id=effective_harness,
+            request_session_id=effective_session,
+            request_envelope_version=effective_version,
         )
         provenance_dict = envelope.to_provenance_dict() if envelope is not None else None
         provenance_json = json.dumps(provenance_dict, sort_keys=True) if provenance_dict else None
 
         from hotmem.events import _build_memory_created_payload
 
+        req_canonical_dict: dict[str, Any] = {
+            "identifier": identifier,
+            "fact": fact,
+            "file_uri": file_uri,
+            "byte_offset": byte_offset,
+            "byte_length": byte_length,
+            "source_format": source_format,
+            "source_checksum": source_checksum,
+            "summary": summary,
+            "source": effective_source,
+            "importance": importance,
+            "metadata": meta_dict,
+            "ttl_seconds": ttl_seconds,
+            "namespace": target_namespace,
+        }
+        if tag_list:
+            req_canonical_dict["tags"] = tag_list
+        if effective_harness:
+            req_canonical_dict["harness_id"] = effective_harness
         req_canonical = json.dumps(
-            {
-                "identifier": identifier,
-                "fact": fact,
-                "file_uri": file_uri,
-                "byte_offset": byte_offset,
-                "byte_length": byte_length,
-                "source_format": source_format,
-                "source_checksum": source_checksum,
-                "summary": summary,
-                "source": effective_source,
-                "importance": importance,
-                "metadata": meta_dict,
-                "ttl_seconds": ttl_seconds,
-                "namespace": target_namespace,
-            },
+            req_canonical_dict,
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -617,29 +661,58 @@ class HotMemRuntime:
                     source_format=source_format or "",
                     source_checksum=source_checksum,
                 )
-                memory_id, content_hash = add_file_backed(
-                    db,
-                    identifier=identifier,
-                    file_ref=ref,
-                    base_dir=self.base_dir,
-                    summary=summary,
-                    importance=importance,
-                    metadata=meta_dict,
-                    source=effective_source,
-                    namespace=target_namespace,
-                    provenance=provenance_dict,
-                    embedder=self.embedder,
-                    _commit=False,
-                )
-                record = db.get_memory(memory_id) or {}
-                append_event(
-                    db,
-                    event_type=EventType.MEMORY_CREATED,
-                    memory_id=memory_id,
-                    namespace=target_namespace,
-                    payload=_build_memory_created_payload(record),
-                    _commit=not bool(ctx.idempotency_key),
-                )
+                content_hash = _file_ref_content_hash(identifier, ref)
+                existing_row = db.find_by_namespace_and_hash(target_namespace, content_hash)
+                if existing_row is not None:
+                    memory_id = str(existing_row["id"])
+                    deduplicated = True
+                    dedup_payload: dict[str, Any] = {
+                        "id": memory_id,
+                        "identifier": identifier,
+                        "content_hash": content_hash,
+                        "caller_id": ctx.caller_id,
+                        "harness_id": effective_harness,
+                        "session_id": effective_session,
+                        "source": effective_source,
+                        "tags": tag_list,
+                    }
+                    if meta_dict:
+                        dedup_payload["metadata_json"] = json.dumps(meta_dict)
+                    if provenance_json:
+                        dedup_payload["provenance_json"] = provenance_json
+                    append_event(
+                        db,
+                        event_type=EventType.MEMORY_DEDUPLICATED,
+                        memory_id=memory_id,
+                        namespace=target_namespace,
+                        payload=dedup_payload,
+                        _commit=not bool(ctx.idempotency_key),
+                    )
+                else:
+                    memory_id, content_hash = add_file_backed(
+                        db,
+                        identifier=identifier,
+                        file_ref=ref,
+                        base_dir=self.base_dir,
+                        summary=summary,
+                        importance=importance,
+                        metadata=meta_dict,
+                        source=effective_source,
+                        namespace=target_namespace,
+                        tags=tag_list,
+                        provenance=provenance_dict,
+                        embedder=self.embedder,
+                        _commit=False,
+                    )
+                    record = db.get_memory(memory_id) or {}
+                    append_event(
+                        db,
+                        event_type=EventType.MEMORY_CREATED,
+                        memory_id=memory_id,
+                        namespace=target_namespace,
+                        payload=_build_memory_created_payload(record),
+                        _commit=not bool(ctx.idempotency_key),
+                    )
             else:
                 active = self.embedder
                 content_hash = compute_content_hash(identifier, fact or "")
@@ -651,19 +724,26 @@ class HotMemRuntime:
                     # and tell the caller the write was deduplicated.
                     memory_id = str(existing_row["id"])
                     deduplicated = True
+                    dedup_payload: dict[str, Any] = {
+                        "id": memory_id,
+                        "identifier": identifier,
+                        "content_hash": content_hash,
+                        "caller_id": ctx.caller_id,
+                        "harness_id": effective_harness,
+                        "session_id": effective_session,
+                        "source": effective_source,
+                        "tags": tag_list,
+                    }
+                    if meta_dict:
+                        dedup_payload["metadata_json"] = json.dumps(meta_dict)
+                    if provenance_json:
+                        dedup_payload["provenance_json"] = provenance_json
                     append_event(
                         db,
                         event_type=EventType.MEMORY_DEDUPLICATED,
                         memory_id=memory_id,
                         namespace=target_namespace,
-                        payload={
-                            "id": memory_id,
-                            "identifier": identifier,
-                            "content_hash": content_hash,
-                            "caller_id": ctx.caller_id,
-                            "session_id": ctx.session_id,
-                            "source": effective_source,
-                        },
+                        payload=dedup_payload,
                         _commit=not bool(ctx.idempotency_key),
                     )
                 else:
@@ -684,6 +764,7 @@ class HotMemRuntime:
                         content_hash=content_hash,
                         ttl_seconds=ttl_seconds,
                         namespace=target_namespace,
+                        tags=tags_json,
                         provenance_json=provenance_json,
                         _commit=False,
                     )
@@ -932,6 +1013,12 @@ class HotMemRuntime:
             if disclosed is None:
                 return None
             record = disclosed
+        raw_tags = record.get("tags")
+        parsed_tags = (
+            _safe_json(raw_tags, [])
+            if isinstance(raw_tags, str)
+            else ([str(t) for t in raw_tags] if isinstance(raw_tags, list) else [])
+        )
         out = {
             "id": record["id"],
             "identifier": record["identifier"],
@@ -943,6 +1030,7 @@ class HotMemRuntime:
             "source": record["source"],
             "importance": record["importance"],
             "metadata": _safe_json(record["metadata_json"], {}),
+            "tags": parsed_tags,
             "content_hash": record["content_hash"],
             "source_uri": ctx.sanitize_source_uri(record.get("source_uri"), base_dir=self.base_dir),
             "byte_offset": record["byte_offset"],
@@ -1252,6 +1340,7 @@ class HotMemRuntime:
                 cred = ctx.credential
                 export_scope = {
                     "caller_id": ctx.caller_id,
+                    "harness_id": ctx.harness_id,
                     "session_id": ctx.session_id,
                     "source": ctx.source,
                     "namespace": ctx.namespace,
@@ -1303,12 +1392,23 @@ class HotMemRuntime:
         ctx.require_operation("export")
         resolved_source = str(self._confine_path(ctx, source, kind="handoff source"))
         resolved_output = str(self._confine_path(ctx, output, kind="handoff output"))
+        prepared_by: dict[str, Any] | None = None
+        if ctx.policy_enforced or ctx.authenticated or ctx.session_id or ctx.harness_id:
+            prepared_by = {
+                "caller_id": ctx.caller_id,
+                "harness_id": ctx.harness_id,
+                "session_id": ctx.session_id,
+                "source": ctx.source,
+                "namespace": ctx.namespace,
+                "store_id": self.store_id,
+            }
         result = prepare_handoff(
             resolved_source,
             resolved_output,
             mode=mode,
             consent=consent,
             session_id=session,
+            prepared_by=prepared_by,
         )
         counts = result.manifest["counts"]
         return {
@@ -1357,12 +1457,23 @@ class HotMemRuntime:
             resolved_package,
             default_namespace=target_ns or "",
         )
+        hydrated_by: dict[str, Any] | None = None
+        if ctx.policy_enforced or ctx.authenticated or ctx.session_id or ctx.harness_id:
+            hydrated_by = {
+                "caller_id": ctx.caller_id,
+                "harness_id": ctx.harness_id,
+                "session_id": ctx.session_id,
+                "source": ctx.source,
+                "namespace": target_ns,
+                "store_id": self.store_id,
+            }
         with self._write_slot() as db:
             result = hydrate_handoff(
                 db,
                 resolved_package,
                 embedder=self.embedder,
                 target_namespace=target_ns,
+                hydrated_by=hydrated_by,
             )
         return {
             "handoff_id": result.handoff_id,
@@ -1638,24 +1749,39 @@ class HotMemRuntime:
                         continue
                     ev_mid = ev.get("memory_id") or payload.get("id")
                     mem_row = page_meta.get(str(ev_mid)) if ev_mid else None
-                    probe = (
-                        mem_row
-                        if mem_row is not None
-                        else {
-                            **row_probe,
-                            "metadata_json": payload.get("metadata_json") or "{}",
-                            "tags": payload.get("tags") or "[]",
-                            "provenance_json": payload.get("provenance_json"),
-                        }
+                    payload_tags_raw = payload.get("tags")
+                    payload_tags_str = (
+                        json.dumps(payload_tags_raw)
+                        if isinstance(payload_tags_raw, list)
+                        else (payload_tags_raw or "[]")
                     )
+                    payload_probe = {
+                        **row_probe,
+                        "metadata_json": payload.get("metadata_json") or "{}",
+                        "tags": payload_tags_str,
+                        "provenance_json": payload.get("provenance_json"),
+                    }
+                    probe = mem_row if mem_row is not None else payload_probe
                     disclosed_probe = ctx.apply_disclosure_to_row(probe, operation="read")
                     if disclosed_probe is None:
+                        continue
+                    disclosed_payload_probe = (
+                        ctx.apply_disclosure_to_row(payload_probe, operation="read")
+                        if mem_row is not None
+                        else disclosed_probe
+                    )
+                    if disclosed_payload_probe is None:
                         continue
                     # Strip raw embedding blobs and full fact_text from the
                     # daemon activity stream.
                     sanitized_payload = dict(payload)
                     sanitized_payload.pop("embedding_b64", None)
                     sanitized_payload.pop("fact_text", None)
+                    probe_for_payload = (
+                        disclosed_payload_probe
+                        if ev.get("event_type") == EventType.MEMORY_DEDUPLICATED
+                        else disclosed_probe
+                    )
                     for key in (
                         "identifier",
                         "metadata_json",
@@ -1665,8 +1791,15 @@ class HotMemRuntime:
                         "parent_memory",
                         "related_memories",
                     ):
-                        if key in sanitized_payload and key in disclosed_probe:
-                            sanitized_payload[key] = disclosed_probe[key]
+                        if key in sanitized_payload and key in probe_for_payload:
+                            val = probe_for_payload[key]
+                            if (
+                                key == "tags"
+                                and isinstance(payload.get("tags"), list)
+                                and isinstance(val, str)
+                            ):
+                                val = _safe_json(val, [])
+                            sanitized_payload[key] = val
                     secret_action, _ = ctx.effective_disclosure_actions(probe, operation="read")
                     if secret_action != "allow":
                         redacted_payload, hits = redact_structure(sanitized_payload)
