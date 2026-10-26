@@ -1308,6 +1308,7 @@ class HotMemRuntime:
                 cred = ctx.credential
                 export_scope = {
                     "caller_id": ctx.caller_id,
+                    "harness_id": ctx.harness_id,
                     "session_id": ctx.session_id,
                     "source": ctx.source,
                     "namespace": ctx.namespace,
@@ -1359,12 +1360,23 @@ class HotMemRuntime:
         ctx.require_operation("export")
         resolved_source = str(self._confine_path(ctx, source, kind="handoff source"))
         resolved_output = str(self._confine_path(ctx, output, kind="handoff output"))
+        prepared_by: dict[str, Any] | None = None
+        if ctx.policy_enforced or ctx.authenticated or ctx.session_id or ctx.harness_id:
+            prepared_by = {
+                "caller_id": ctx.caller_id,
+                "harness_id": ctx.harness_id,
+                "session_id": ctx.session_id,
+                "source": ctx.source,
+                "namespace": ctx.namespace,
+                "store_id": self.store_id,
+            }
         result = prepare_handoff(
             resolved_source,
             resolved_output,
             mode=mode,
             consent=consent,
             session_id=session,
+            prepared_by=prepared_by,
         )
         counts = result.manifest["counts"]
         return {
@@ -1413,12 +1425,23 @@ class HotMemRuntime:
             resolved_package,
             default_namespace=target_ns or "",
         )
+        hydrated_by: dict[str, Any] | None = None
+        if ctx.policy_enforced or ctx.authenticated or ctx.session_id or ctx.harness_id:
+            hydrated_by = {
+                "caller_id": ctx.caller_id,
+                "harness_id": ctx.harness_id,
+                "session_id": ctx.session_id,
+                "source": ctx.source,
+                "namespace": target_ns,
+                "store_id": self.store_id,
+            }
         with self._write_slot() as db:
             result = hydrate_handoff(
                 db,
                 resolved_package,
                 embedder=self.embedder,
                 target_namespace=target_ns,
+                hydrated_by=hydrated_by,
             )
         return {
             "handoff_id": result.handoff_id,

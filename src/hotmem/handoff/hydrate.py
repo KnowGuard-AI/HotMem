@@ -95,6 +95,27 @@ def build_brief_record(verified: VerifiedHandoff) -> dict[str, Any] | None:
     identifier = brief_identifier_for(manifest)
     fact_text = str(brief.get("text") or "")
     source_meta = manifest.get("source") or {}
+    meta_handoff: dict[str, Any] = {
+        "handoff_id": manifest.get("handoff_id"),
+        "package_id": manifest.get("package_id"),
+        "mode": manifest.get("mode"),
+        "source_adapter": source_meta.get("adapter"),
+        "session_id": source_meta.get("session_id"),
+        "time_range": source_meta.get("time_range"),
+        "counts": manifest.get("counts"),
+        "links": brief.get("links"),
+        "kind": "resume_brief",
+    }
+    prov_handoff: dict[str, Any] = {
+        "handoff_id": manifest.get("handoff_id"),
+        "package_id": manifest.get("package_id"),
+        "mode": manifest.get("mode"),
+        "source_adapter": source_meta.get("adapter"),
+        "session_id": source_meta.get("session_id"),
+    }
+    if source_meta.get("harness_id"):
+        meta_handoff["harness_id"] = source_meta.get("harness_id")
+        prov_handoff["harness_id"] = source_meta.get("harness_id")
     record: dict[str, Any] = {
         "schema_version": 1,
         "id": hashlib.sha256(
@@ -105,29 +126,9 @@ def build_brief_record(verified: VerifiedHandoff) -> dict[str, Any] | None:
         "fact_text": fact_text,
         "source": "handoff",
         "importance": BRIEF_IMPORTANCE,
-        "metadata": {
-            "handoff": {
-                "handoff_id": manifest.get("handoff_id"),
-                "package_id": manifest.get("package_id"),
-                "mode": manifest.get("mode"),
-                "source_adapter": source_meta.get("adapter"),
-                "session_id": source_meta.get("session_id"),
-                "time_range": source_meta.get("time_range"),
-                "counts": manifest.get("counts"),
-                "links": brief.get("links"),
-                "kind": "resume_brief",
-            }
-        },
+        "metadata": {"handoff": meta_handoff},
         "content_hash": compute_content_hash(identifier, fact_text),
-        "provenance": {
-            "handoff": {
-                "handoff_id": manifest.get("handoff_id"),
-                "package_id": manifest.get("package_id"),
-                "mode": manifest.get("mode"),
-                "source_adapter": source_meta.get("adapter"),
-                "session_id": source_meta.get("session_id"),
-            }
-        },
+        "provenance": {"handoff": prov_handoff},
     }
     return record
 
@@ -138,6 +139,7 @@ def hydrate_handoff(
     *,
     embedder=None,
     target_namespace: str | None = None,
+    hydrated_by: dict[str, Any] | None = None,
 ) -> HandoffHydrateResult:
     """Hydrate a verified handoff package into ``db`` atomically (#101).
 
@@ -254,19 +256,22 @@ def hydrate_handoff(
                 applied_at=_utc_now_iso(),
                 _commit=False,
             )
+            applied_payload: dict[str, Any] = {
+                "handoff_id": handoff_id,
+                "package_id": package_id,
+                "mode": mode,
+                "loaded": counters["loaded"],
+                "skipped": counters["skipped"],
+                "invalid": counters["invalid"],
+                "brief_identifier": brief_identifier_for(manifest),
+            }
+            if hydrated_by is not None:
+                applied_payload["hydrated_by"] = hydrated_by
             append_event(
                 db,
                 event_type=EventType.HANDOFF_APPLIED,
                 namespace=target_namespace if target_namespace is not None else "handoff",
-                payload={
-                    "handoff_id": handoff_id,
-                    "package_id": package_id,
-                    "mode": mode,
-                    "loaded": counters["loaded"],
-                    "skipped": counters["skipped"],
-                    "invalid": counters["invalid"],
-                    "brief_identifier": brief_identifier_for(manifest),
-                },
+                payload=applied_payload,
                 _commit=False,
             )
             db.commit()
