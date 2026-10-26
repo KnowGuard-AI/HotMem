@@ -515,3 +515,261 @@ def test_annotation_merge_is_namespace_scoped(tmp_path: Path):
         assert json.loads(db.get_memory("rowB")["metadata_json"]) == {}
     finally:
         db.close()
+
+
+def test_wp4_deduplication_preserves_writer_and_idempotency_conflicts(tmp_path: Path):
+    """WP4: Deduplication preserves original writer attribution while logging later attempts;
+    idempotency key replay preserves writer attribution and rejects changed tags/harness/context.
+    """
+    policy = PolicyConfig(
+        store_id="store-wp4",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-a",
+                caller_id="caller-a",
+                store_id="store-wp4",
+                namespaces=("ops/shared",),
+                operations=("read", "write"),
+            ),
+            CallerCredential.from_token(
+                token="tok-b",
+                caller_id="caller-b",
+                store_id="store-wp4",
+                namespaces=("ops/shared",),
+                operations=("read", "write"),
+            ),
+        ],
+    )
+    app = create_app(db_path=tmp_path / "wp4.sqlite", policy=policy)
+    hdr_a = {
+        "Authorization": "Bearer tok-a",
+        "X-HotMem-Store-Id": "store-wp4",
+        "X-HotMem-Harness-Id": "codex",
+        "X-HotMem-Session-Id": "sess-a-orig",
+        "X-HotMem-Source": "agent://codex-a",
+        "X-HotMem-Namespace": "ops/shared",
+    }
+    hdr_b = {
+        "Authorization": "Bearer tok-b",
+        "X-HotMem-Store-Id": "store-wp4",
+        "X-HotMem-Harness-Id": "claude-code",
+        "X-HotMem-Session-Id": "sess-b-second",
+        "X-HotMem-Source": "agent://claude-b",
+        "X-HotMem-Namespace": "ops/shared",
+    }
+
+    with TestClient(app) as client:
+        # 1. Writer A creates memory with idempotency key
+        w_a = client.post(
+            "/v1/add",
+            headers={**hdr_a, "X-HotMem-Idempotency-Key": "idem-wp4-1"},
+            json={
+                "identifier": "ops/runbook-111",
+                "fact": "Drain worker queue before rotating credentials.",
+                "tags": ["model:gpt-5", "project:hotmem", "org:knowguard"],
+            },
+        )
+        assert w_a.status_code == 200
+        mid = w_a.json()["memory_id"]
+        assert not w_a.json().get("deduplicated")
+
+        # 2. Exact retry with same idempotency key (even from reconnected session) replays
+        #    without mutating original writer attribution.
+        replay = client.post(
+            "/v1/add",
+            headers={
+                **hdr_a,
+                "X-HotMem-Session-Id": "sess-a-reconnect",
+                "X-HotMem-Idempotency-Key": "idem-wp4-1",
+            },
+            json={
+                "identifier": "ops/runbook-111",
+                "fact": "Drain worker queue before rotating credentials.",
+                "tags": ["model:gpt-5", "project:hotmem", "org:knowguard"],
+            },
+        )
+        assert replay.status_code == 200
+        assert replay.json()["memory_id"] == mid
+
+        # 3. Changed tags, harness_id, source, metadata, or explicit body session_id under
+        #    same idempotency key fail with 409 idempotency_key_conflict.
+        for diff_hdr, diff_body in (
+            (
+                hdr_a,
+                {
+                    "identifier": "ops/runbook-111",
+                    "fact": "Drain worker queue before rotating credentials.",
+                    "tags": ["model:o4-mini", "project:hotmem"],
+                },
+            ),
+            (
+                {**hdr_a, "X-HotMem-Harness-Id": "codex-cli"},
+                {
+                    "identifier": "ops/runbook-111",
+                    "fact": "Drain worker queue before rotating credentials.",
+                    "tags": ["model:gpt-5", "project:hotmem", "org:knowguard"],
+                },
+            ),
+            (
+                {**hdr_a, "X-HotMem-Source": "agent://codex-other"},
+                {
+                    "identifier": "ops/runbook-111",
+                    "fact": "Drain worker queue before rotating credentials.",
+                    "tags": ["model:gpt-5", "project:hotmem", "org:knowguard"],
+                },
+            ),
+            (
+                hdr_a,
+                {
+                    "identifier": "ops/runbook-111",
+                    "fact": "Drain worker queue before rotating credentials.",
+                    "tags": ["model:gpt-5", "project:hotmem", "org:knowguard"],
+                    "metadata": {"extra": True},
+                },
+            ),
+        ):
+            conflict = client.post(
+                "/v1/add",
+                headers={**diff_hdr, "X-HotMem-Idempotency-Key": "idem-wp4-1"},
+                json=diff_body,
+            )
+            assert conflict.status_code == 409
+            assert conflict.json()["error"] == "idempotency_key_conflict"
+
+        # 4. Writer B writes identical (namespace, identifier, fact) with different context/tags:
+        #    content-hash deduplication preserves Writer A's stored attribution & tags, while
+        #    recording Writer B's attempt in memory.deduplicated event.
+        w_b = client.post(
+            "/v1/add",
+            headers=hdr_b,
+            json={
+                "identifier": "ops/runbook-111",
+                "fact": "Drain worker queue before rotating credentials.",
+                "tags": ["model:claude-sonnet-4", "project:hotmem"],
+            },
+        )
+        assert w_b.status_code == 200
+        assert w_b.json()["memory_id"] == mid
+        assert w_b.json()["deduplicated"] is True
+
+        # Reader B reads via get, list, and search -> Writer A attribution & tags remain intact
+        got = client.get(f"/v1/memory/{mid}", headers=hdr_b).json()
+        assert got["tags"] == ["model:gpt-5", "project:hotmem", "org:knowguard"]
+        assert got["provenance"] == {
+            "envelope_version": "hotmem-session-v1",
+            "caller_id": "caller-a",
+            "harness_id": "codex",
+            "session_id": "sess-a-orig",
+            "source": "agent://codex-a",
+            "namespace": "ops/shared",
+            "store_id": "store-wp4",
+        }
+
+        evs = client.get(
+            "/v1/events",
+            headers=hdr_b,
+            params={"memory_id": mid},
+        ).json()["events"]
+        dedup_evs = [e for e in evs if e["event_type"] == "memory.deduplicated"]
+        assert len(dedup_evs) == 1
+        assert dedup_evs[0]["payload"]["caller_id"] == "caller-b"
+        assert dedup_evs[0]["payload"]["harness_id"] == "claude-code"
+        assert dedup_evs[0]["payload"]["session_id"] == "sess-b-second"
+        assert dedup_evs[0]["payload"]["tags"] == ["model:claude-sonnet-4", "project:hotmem"]
+
+
+def test_wp4_concurrent_sessions_without_context_contamination(tmp_path: Path):
+    """WP4: Concurrent sessions (distinct conversations in one harness + across harnesses)
+    write and read simultaneously without shared mutable context bleed.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    policy = PolicyConfig(
+        store_id="store-conc-111",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-codex",
+                caller_id="caller-codex",
+                store_id="store-conc-111",
+                namespaces=("team/shared",),
+                operations=("read", "write"),
+            ),
+            CallerCredential.from_token(
+                token="tok-claude",
+                caller_id="caller-claude",
+                store_id="store-conc-111",
+                namespaces=("team/shared",),
+                operations=("read", "write"),
+            ),
+        ],
+    )
+    app = create_app(db_path=tmp_path / "conc.sqlite", policy=policy)
+    sessions = [
+        (
+            "tok-codex",
+            "caller-codex",
+            "codex",
+            "sess-codex-conv-1",
+            "agent://codex-1",
+            "model:gpt-5",
+        ),
+        (
+            "tok-codex",
+            "caller-codex",
+            "codex",
+            "sess-codex-conv-2",
+            "agent://codex-2",
+            "model:o4-mini",
+        ),
+        (
+            "tok-claude",
+            "caller-claude",
+            "claude-code",
+            "sess-claude-conv-1",
+            "agent://claude-1",
+            "model:claude-sonnet-4",
+        ),
+    ]
+
+    with TestClient(app) as client:
+
+        def worker(idx: int) -> tuple[str, str, str, str, str]:
+            tok, cid, harness, sess, src, model_tag = sessions[idx % len(sessions)]
+            resp = client.post(
+                "/v1/add",
+                headers={
+                    "Authorization": f"Bearer {tok}",
+                    "X-HotMem-Store-Id": "store-conc-111",
+                    "X-HotMem-Harness-Id": harness,
+                    "X-HotMem-Session-Id": f"{sess}-{idx}",
+                    "X-HotMem-Source": src,
+                    "X-HotMem-Namespace": "team/shared",
+                },
+                json={
+                    "identifier": f"conc/item-{idx}",
+                    "fact": f"Concurrent decision payload number {idx} from {sess}",
+                    "tags": [model_tag, f"seq:{idx}"],
+                },
+            )
+            assert resp.status_code == 200, resp.text
+            return resp.json()["memory_id"], cid, harness, f"{sess}-{idx}", model_tag
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(worker, range(18)))
+
+        for mid, expected_cid, expected_harness, expected_sess, expected_model in results:
+            rec = client.get(
+                f"/v1/memory/{mid}",
+                headers={
+                    "Authorization": "Bearer tok-claude",
+                    "X-HotMem-Store-Id": "store-conc-111",
+                    "X-HotMem-Harness-Id": "claude-code",
+                    "X-HotMem-Session-Id": "sess-verifier",
+                },
+            ).json()
+            assert rec["provenance"]["caller_id"] == expected_cid
+            assert rec["provenance"]["harness_id"] == expected_harness
+            assert rec["provenance"]["session_id"] == expected_sess
+            assert expected_model in rec["tags"]

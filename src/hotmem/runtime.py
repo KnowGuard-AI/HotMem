@@ -1694,24 +1694,39 @@ class HotMemRuntime:
                         continue
                     ev_mid = ev.get("memory_id") or payload.get("id")
                     mem_row = page_meta.get(str(ev_mid)) if ev_mid else None
-                    probe = (
-                        mem_row
-                        if mem_row is not None
-                        else {
-                            **row_probe,
-                            "metadata_json": payload.get("metadata_json") or "{}",
-                            "tags": payload.get("tags") or "[]",
-                            "provenance_json": payload.get("provenance_json"),
-                        }
+                    payload_tags_raw = payload.get("tags")
+                    payload_tags_str = (
+                        json.dumps(payload_tags_raw)
+                        if isinstance(payload_tags_raw, list)
+                        else (payload_tags_raw or "[]")
                     )
+                    payload_probe = {
+                        **row_probe,
+                        "metadata_json": payload.get("metadata_json") or "{}",
+                        "tags": payload_tags_str,
+                        "provenance_json": payload.get("provenance_json"),
+                    }
+                    probe = mem_row if mem_row is not None else payload_probe
                     disclosed_probe = ctx.apply_disclosure_to_row(probe, operation="read")
                     if disclosed_probe is None:
+                        continue
+                    disclosed_payload_probe = (
+                        ctx.apply_disclosure_to_row(payload_probe, operation="read")
+                        if mem_row is not None
+                        else disclosed_probe
+                    )
+                    if disclosed_payload_probe is None:
                         continue
                     # Strip raw embedding blobs and full fact_text from the
                     # daemon activity stream.
                     sanitized_payload = dict(payload)
                     sanitized_payload.pop("embedding_b64", None)
                     sanitized_payload.pop("fact_text", None)
+                    probe_for_payload = (
+                        disclosed_payload_probe
+                        if ev.get("event_type") == EventType.MEMORY_DEDUPLICATED
+                        else disclosed_probe
+                    )
                     for key in (
                         "identifier",
                         "metadata_json",
@@ -1721,8 +1736,15 @@ class HotMemRuntime:
                         "parent_memory",
                         "related_memories",
                     ):
-                        if key in sanitized_payload and key in disclosed_probe:
-                            sanitized_payload[key] = disclosed_probe[key]
+                        if key in sanitized_payload and key in probe_for_payload:
+                            val = probe_for_payload[key]
+                            if (
+                                key == "tags"
+                                and isinstance(payload.get("tags"), list)
+                                and isinstance(val, str)
+                            ):
+                                val = _safe_json(val, [])
+                            sanitized_payload[key] = val
                     secret_action, _ = ctx.effective_disclosure_actions(probe, operation="read")
                     if secret_action != "allow":
                         redacted_payload, hits = redact_structure(sanitized_payload)
