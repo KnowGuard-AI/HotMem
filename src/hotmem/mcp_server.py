@@ -205,73 +205,8 @@ def create_server(
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        """Declare the tools exposed by this MCP server."""
-        return [
-            Tool(
-                name="add_memory",
-                description="Store a fact in HotMem memory.",
-                inputSchema=_TOOL_SCHEMAS["add_memory"],
-            ),
-            Tool(
-                name="search_memories",
-                description="Search HotMem and return ranked, LLM-ready message objects.",
-                inputSchema=_TOOL_SCHEMAS["search_memories"],
-            ),
-            Tool(
-                name="list_memories",
-                description=(
-                    "List memories for an exact identifier in deterministic chronological "
-                    "order without semantic ranking."
-                ),
-                inputSchema=_TOOL_SCHEMAS["list_memories"],
-            ),
-            Tool(
-                name="memory_health",
-                description="Return HotMem status: memory count, uptime, and database path.",
-                inputSchema=_TOOL_SCHEMAS["memory_health"],
-            ),
-            Tool(
-                name="snapshot",
-                description=(
-                    "Export memories to a verified Snapshot v2 directory or JSONL/JSONL.GZ."
-                ),
-                inputSchema=_TOOL_SCHEMAS["snapshot"],
-            ),
-            Tool(
-                name="hydrate",
-                description="Restore a verified snapshot directory or JSONL/JSONL.GZ into HotMem.",
-                inputSchema=_TOOL_SCHEMAS["hydrate"],
-            ),
-            Tool(
-                name="handoff_prepare",
-                description=(
-                    "Prepare a hotmem-handoff-v1 package from a source export "
-                    "(#101). Requires explicit consent; capture is never implicit."
-                ),
-                inputSchema=_TOOL_SCHEMAS["handoff_prepare"],
-            ),
-            Tool(
-                name="handoff_inspect",
-                description=(
-                    "Read-only inspection of a handoff package: identity, counts, "
-                    "coverage, omissions, redactions, or the failure reason."
-                ),
-                inputSchema=_TOOL_SCHEMAS["handoff_inspect"],
-            ),
-            Tool(
-                name="handoff_verify",
-                description="Fail-closed verification of a handoff package.",
-                inputSchema=_TOOL_SCHEMAS["handoff_verify"],
-            ),
-            Tool(
-                name="handoff_hydrate",
-                description=(
-                    "Hydrate a verified handoff package into this HotMem instance "
-                    "(atomic, idempotent)."
-                ),
-                inputSchema=_TOOL_SCHEMAS["handoff_hydrate"],
-            ),
-        ]
+        """Declare the same additive tool contract in embedded and relay modes."""
+        return _build_tool_list()
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
