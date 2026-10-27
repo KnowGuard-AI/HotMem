@@ -244,7 +244,7 @@ rules** across retrieval (`search`, `list`, `get_memory`, `hydrate`,
 - **Canonical generic `tags` (`memories.tags`):** Model, project, and organization labels use canonical record tags (for example `{"tags": ["model:gpt-5", "project:hotmem", "org:knowguard"]}`) across HTTP (`/v1/add`), Python `HotMemClient` / `AsyncHotMemClient`, TypeScript `HotMemClient`, MCP `add_memory` (alongside `metadata`), and CLI `hotmem add --tag ...`. No dedicated model/project/org columns or parallel copies in `metadata` or `provenance` are created. Missing labels are omitted, `[]` is valid, and `model:*` labels can change per write within the same session.
 - **Native vs. adapter-scoped session IDs:**
   - When a client or harness exposes a native conversation/session ID, supply that ID per conversation or per write (`X-HotMem-Session-Id`, SDK `session_id`, or MCP `add_memory(session_id=...)`).
-  - Standard MCP stdio transport does **not** automatically expose a host's native conversation ID or automatic transcript capture. When `--session` / `HOTMEM_SESSION_ID` is passed to `hotmem mcp --url ...`, its lifetime is scoped to that relay process instance unless overridden per tool call. Do not assign one permanent static session ID across unrelated conversations; client-specific hook/adapter wiring belongs to #125.
+  - Standard MCP stdio transport does **not** automatically expose a host's native conversation ID or automatic transcript capture. When `--session` / `HOTMEM_SESSION_ID` is passed to `hotmem mcp --url ...`, its lifetime is scoped to that relay process instance unless overridden per tool call. Do not assign one permanent static session ID across unrelated conversations; see **Native Client Task Synchronization (#125)** for per-hook native session wiring.
 - **Writer preservation, retries, and observed activity:**
   - Reader context on `/v1/search`, `/v1/memories`, `/v1/memory/{id}`, and `/v1/memory/{id}/hydrate` never mutates stored writer provenance or tags.
   - Content-hash deduplication preserves the original writer's stored record and tags while recording subsequent attempts in scoped `memory.deduplicated` events.
@@ -267,6 +267,91 @@ the Python SDK. Results are ordered by `created_at` with insertion order as the
 tie-breaker for same-second records. `order` defaults to `asc`; `limit` defaults
 to 100 and accepts `1..1000`. Exact-identifier recall is deterministic, but a
 bounded result is not proof of complete history when the limit is reached.
+
+### Native Client Task Synchronization (#125)
+
+`hotmem task-sync` is an opt-in stdin/stdout hook adapter for persisting native
+client task mutations as ordinary HotMem memories and recalling their reduced
+current state. It uses the Python SDK against an explicitly configured daemon;
+it does not open a private database, start a daemon, or change policy. The
+adapter is not a distributed task engine.
+
+#### Claude Code
+
+The supported qualification target is the Claude Code CLI with native Task
+tools and command hooks. Live validation for this change used Claude Code
+`2.1.292`; Claude Desktop, IDE, web, and mobile variants are not covered by that
+result. Task tools are model/configuration dependent: when necessary, set
+`CLAUDE_CODE_ENABLE_TODO_TOOLS=1` and verify the tools available in the actual
+session. A model still decides when to use them, so hook installation does not
+guarantee automatic task creation.
+
+- `PostToolUse` matching `TaskCreate|TaskUpdate` captures successful creates,
+  status changes, dependency additions, owner/subject/description/activeForm
+  changes, and native `deleted` tombstones. Failed updates and unrelated tools
+  are ignored. Arbitrary native task metadata and legacy `TodoWrite` are not
+  captured by this adapter version.
+- `SessionStart` recalls the exact configured task list and injects its reduced
+  current state. A command hook is required for startup recall because MCP
+  servers are not yet initialized to serve `SessionStart` MCP hooks.
+- Claude's `session_id` becomes per-write HotMem session provenance and its
+  `tool_use_id` becomes the source event ID. Logical task IDs are namespaced by
+  client, native session, and native task ID. Transcript paths, cwd, permission
+  mode, and arbitrary hook metadata are not persisted.
+- Native task mutations do not expose the active model to this hook. Omit
+  `model:*` unless another reliable per-write source exists; supply project/org
+  labels only as explicit canonical `--tag` values. Empty tags are valid.
+
+Example settings excerpt (use an absolute `hotmem` path when the client PATH is
+not deterministic, and keep credentials out of committed files):
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1",
+    "HOTMEM_URL": "http://127.0.0.1:8711",
+    "HOTMEM_TOKEN": "<task-writer-token>",
+    "HOTMEM_NAMESPACE": "ops/shared",
+    "HOTMEM_STORE_ID": "<expected-store-id>",
+    "HOTMEM_TASK_LIST_ID": "incident-demo-17"
+  },
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "hotmem task-sync --client claude --tag project:hotmem", "timeout": 15}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "TaskCreate|TaskUpdate", "hooks": [{"type": "command", "command": "hotmem task-sync --client claude --tag project:hotmem", "timeout": 15}]}
+    ]
+  }
+}
+```
+
+The task-list ID is an explicit workstream key shared only by intentional
+continuation sessions. It is distinct from the native session ID; do not set a
+permanent `HOTMEM_SESSION_ID` across unrelated conversations. The adapter has
+no static session option and supplies each hook's native session per write, so
+it does not conflict with relay startup context bindings.
+
+Each event uses identifier `hotmem/task-sync/<task-list-id>` and an idempotency
+key derived from task-list ID, harness, native session, and native tool-use ID.
+An exact retry returns the original memory and writer attribution. A new native
+tool-use ID remains a new observation even when it repeats an earlier state, so
+A→B→A histories reconstruct correctly; altered content under a repeated key
+fails with the normal idempotency conflict.
+
+Recall processes at most 1000 ordered events. Reaching that bound, malformed
+history, or an update without its create causes recall to fail closed with a
+visible warning instead of claiming a complete current state. Native deletion
+is a task-event tombstone, not HotMem memory deletion or portable replay, and
+does not require #98.
+
+**Recall is not native task-store restoration.** A fresh Claude session can
+read current and remaining work from injected HotMem context and through
+`list_memories`, but its native `TaskList` remains empty unless the user/agent
+recreates tasks through supported native tools. Such recreation is
+instruction-driven and is not performed implicitly by this adapter. Reader
+credentials and namespace/share/disclosure checks apply to every recall;
+self-reported tags, sessions, or harness labels grant no permissions.
 
 ## Store schema migration (v5 -> v6)
 

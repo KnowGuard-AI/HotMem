@@ -546,3 +546,248 @@ def test_installed_server_bind_failure_releases_mount(tmp_path: Path):
         assert client.health()["memory_count"] == 0
     shutil.rmtree(mount)
     assert not mount.exists()
+
+
+class _FakeTaskSyncClient:
+    def __init__(self):
+        self.rows = []
+        self.add_calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def add(self, identifier, fact, **kwargs):
+        self.add_calls.append((identifier, fact, kwargs))
+        self.rows.append(
+            {
+                "id": f"memory-{len(self.rows)}",
+                "identifier": identifier,
+                "fact_text": fact,
+                "provenance": {"session_id": kwargs["session_id"]},
+            }
+        )
+        return {"memory_id": self.rows[-1]["id"]}
+
+    def list(self, _identifier, *, order="asc", limit=100):
+        assert limit == 1000
+        return list(reversed(self.rows)) if order == "desc" else list(self.rows)
+
+
+def _claude_task_hook(tool_name, event_id, tool_input, tool_response):
+    return {
+        "session_id": "sess-claude-tasks",
+        "transcript_path": "/private/transcript.jsonl",
+        "hook_event_name": "PostToolUse",
+        "tool_name": tool_name,
+        "tool_use_id": event_id,
+        "tool_input": tool_input,
+        "tool_response": tool_response,
+    }
+
+
+def test_task_sync_claude_lifecycle_recall_and_provenance():
+    from hotmem.cli import _task_sync_reduce
+
+    client = _FakeTaskSyncClient()
+    runner = CliRunner()
+    args = [
+        "task-sync",
+        "--client",
+        "claude",
+        "--task-list-id",
+        "tech20/lifecycle",
+        "--url",
+        "http://hotmem.test",
+        "--tag",
+        "project:hotmem",
+    ]
+    payloads = [
+        _claude_task_hook(
+            "TaskCreate",
+            "event-create-1",
+            {"subject": "Inspect", "description": "Inspect synthetic deployment"},
+            {"task": {"id": "1", "subject": "Inspect"}},
+        ),
+        _claude_task_hook(
+            "TaskCreate",
+            "event-create-2",
+            {"subject": "Record", "description": "Record synthetic outcome"},
+            {"task": {"id": "2", "subject": "Record"}},
+        ),
+        _claude_task_hook(
+            "TaskCreate",
+            "event-create-3",
+            {"subject": "Notify", "description": "Notify synthetic observer"},
+            {"task": {"id": "3", "subject": "Notify"}},
+        ),
+        _claude_task_hook(
+            "TaskUpdate",
+            "event-complete",
+            {"taskId": "1", "status": "completed"},
+            {"success": True, "taskId": "1", "updatedFields": ["status"]},
+        ),
+        _claude_task_hook(
+            "TaskUpdate",
+            "event-start",
+            {"taskId": "2", "status": "in_progress"},
+            {"success": True, "taskId": "2", "updatedFields": ["status"]},
+        ),
+        _claude_task_hook(
+            "TaskUpdate",
+            "event-block",
+            {"taskId": "3", "addBlockedBy": ["2"]},
+            {"success": True, "taskId": "3", "updatedFields": ["blockedBy"]},
+        ),
+        _claude_task_hook(
+            "TaskUpdate",
+            "event-delete",
+            {"taskId": "3", "status": "deleted"},
+            {"success": True, "taskId": "3", "updatedFields": ["deleted"]},
+        ),
+    ]
+    with mock.patch("hotmem.cli._make_daemon_client", return_value=client) as factory:
+        for payload in payloads:
+            result = runner.invoke(main, args, input=json.dumps(payload))
+            assert result.exit_code == 0, result.output
+        recalled = runner.invoke(
+            main,
+            args,
+            input=json.dumps({"hook_event_name": "SessionStart", "session_id": "fresh-session"}),
+        )
+
+    assert recalled.exit_code == 0, recalled.output
+    context = json.loads(recalled.output)["hookSpecificOutput"]["additionalContext"]
+    assert "hotmem/task-sync/tech20/lifecycle" in context
+    assert "remaining_task_ids" in context
+    assert "claude:sess-claude-tasks:2" in context
+    assert "claude:sess-claude-tasks:3" not in context
+    assert factory.call_args.kwargs.keys() == {"token", "namespace", "expected_store_id"}
+    assert all(call[2]["harness_id"] == "claude-code" for call in client.add_calls)
+    assert all(call[2]["session_id"] == "sess-claude-tasks" for call in client.add_calls)
+    assert all(call[2]["tags"] == ["project:hotmem"] for call in client.add_calls)
+    assert all("transcript" not in call[1] for call in client.add_calls)
+
+    state = _task_sync_reduce(client.rows, "tech20/lifecycle")
+    assert state["remaining_task_ids"] == ["claude:sess-claude-tasks:2"]
+    assert [(task["native_task_id"], task["status"]) for task in state["tasks"]] == [
+        ("1", "completed"),
+        ("2", "in_progress"),
+    ]
+
+
+def test_task_sync_distinguishes_retries_from_new_identical_updates():
+    client = _FakeTaskSyncClient()
+    create = _claude_task_hook(
+        "TaskCreate",
+        "event-create",
+        {"subject": "Inspect", "description": "Synthetic"},
+        {"task": {"id": "1", "subject": "Inspect"}},
+    )
+    update = _claude_task_hook(
+        "TaskUpdate",
+        "event-pending",
+        {"taskId": "1", "status": "pending"},
+        {"success": True, "taskId": "1", "updatedFields": ["status"]},
+    )
+    repeated = {**update, "tool_use_id": "event-pending-new"}
+    from hotmem.cli import _task_sync_process
+
+    for payload in (create, update, update, repeated):
+        _task_sync_process(client, "claude", "tech20/retry", payload)
+    assert client.add_calls[1][2]["idempotency_key"] == client.add_calls[2][2]["idempotency_key"]
+    assert client.add_calls[1][1] == client.add_calls[2][1]
+    assert client.add_calls[1][2]["idempotency_key"] != client.add_calls[3][2]["idempotency_key"]
+    assert client.add_calls[1][1] != client.add_calls[3][1]
+
+
+def test_task_sync_ignores_failed_update_and_fails_closed_on_incomplete_recall():
+    from hotmem.cli import _task_sync_process, _task_sync_reduce
+
+    client = _FakeTaskSyncClient()
+    failed = _claude_task_hook(
+        "TaskUpdate",
+        "event-failed",
+        {"taskId": "unknown", "status": "completed"},
+        {"success": False, "taskId": "unknown", "error": "not found"},
+    )
+    assert _task_sync_process(client, "claude", "tech20/failure", failed) is None
+    assert client.add_calls == []
+
+    orphan = {**failed, "tool_response": {"success": True, "taskId": "unknown"}}
+    assert _task_sync_process(client, "claude", "tech20/failure", orphan) is None
+    with pytest.raises(ValueError, match="incomplete"):
+        _task_sync_reduce(client.rows, "tech20/failure")
+
+    runner = CliRunner()
+    client.rows = [{"fact_text": "{}"}] * 1000
+    with mock.patch("hotmem.cli._make_daemon_client", return_value=client):
+        result = runner.invoke(
+            main,
+            [
+                "task-sync",
+                "--client",
+                "claude",
+                "--task-list-id",
+                "tech20/failure",
+                "--url",
+                "http://hotmem.test",
+            ],
+            input=json.dumps({"hook_event_name": "SessionStart"}),
+        )
+    assert result.exit_code == 0, result.output
+    output = json.loads(result.output)
+    assert "1000-record recall bound" in output["systemMessage"]
+    assert "hookSpecificOutput" not in output
+
+
+def test_task_sync_real_daemon_retry_conflict_and_aba(tmp_path: Path):
+    import httpx
+
+    from hotmem.cli import _task_sync_process, _task_sync_reduce
+
+    create = _claude_task_hook(
+        "TaskCreate",
+        "event-create",
+        {"subject": "Inspect", "description": "Synthetic"},
+        {"task": {"id": "1", "subject": "Inspect"}},
+    )
+    completed = _claude_task_hook(
+        "TaskUpdate",
+        "event-completed",
+        {"taskId": "1", "status": "completed"},
+        {"success": True, "taskId": "1", "updatedFields": ["status"]},
+    )
+    pending = _claude_task_hook(
+        "TaskUpdate",
+        "event-pending",
+        {"taskId": "1", "status": "pending"},
+        {"success": True, "taskId": "1", "updatedFields": ["status"]},
+    )
+    with _sidecar(tmp_path / "task-sync-mount") as (client, _):
+        _task_sync_process(client, "claude", "tech20/aba", create)
+        _task_sync_process(client, "claude", "tech20/aba", completed)
+        rows = client.list("hotmem/task-sync/tech20/aba")
+        original_id = rows[-1]["id"]
+
+        _task_sync_process(client, "claude", "tech20/aba", completed)
+        assert len(client.list("hotmem/task-sync/tech20/aba")) == 2
+        assert client.list("hotmem/task-sync/tech20/aba")[-1]["id"] == original_id
+
+        changed = {
+            **completed,
+            "tool_input": {"taskId": "1", "status": "in_progress"},
+        }
+        with pytest.raises(httpx.HTTPStatusError) as error:
+            _task_sync_process(client, "claude", "tech20/aba", changed)
+        assert error.value.response.status_code == 409
+
+        _task_sync_process(client, "claude", "tech20/aba", pending)
+        rows = client.list("hotmem/task-sync/tech20/aba")
+        assert len(rows) == 3
+        assert rows[-1]["id"] != original_id
+        state = _task_sync_reduce(rows, "tech20/aba")
+        assert state["tasks"][0]["status"] == "pending"
+        assert state["remaining_task_ids"] == ["claude:sess-claude-tasks:1"]

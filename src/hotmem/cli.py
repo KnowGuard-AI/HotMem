@@ -14,9 +14,11 @@ Extension: add new subcommands (e.g. `hotmem inspect`, `hotmem gc`) here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path as _Path
+from typing import Any
 
 import click
 
@@ -210,6 +212,237 @@ def _raise_cli_http_error(err: Exception) -> None:
     raise click.ClickException(str(err)) from err
 
 
+_TASK_SYNC_FORMAT = "hotmem-task-event-v1"
+_TASK_SYNC_HISTORY_LIMIT = 1000
+
+
+def _task_sync_identifier(task_list_id: str) -> str:
+    return f"hotmem/task-sync/{task_list_id}"
+
+
+def _task_sync_required_string(payload: dict[str, Any], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"task hook requires a non-empty {key}")
+    return value
+
+
+def _task_sync_claude_event(payload: dict[str, Any], task_list_id: str) -> dict[str, Any] | None:
+    session_id = _task_sync_required_string(payload, "session_id")
+    source_event_id = _task_sync_required_string(payload, "tool_use_id")
+    tool_name = _task_sync_required_string(payload, "tool_name")
+    tool_input = payload.get("tool_input")
+    tool_response = payload.get("tool_response")
+    if not isinstance(tool_input, dict) or not isinstance(tool_response, dict):
+        raise ValueError("task hook requires object tool_input and tool_response")
+
+    common = {
+        "format": _TASK_SYNC_FORMAT,
+        "client": "claude",
+        "task_list_id": task_list_id,
+        "source_event_id": source_event_id,
+    }
+    if tool_name == "TaskCreate":
+        created = tool_response.get("task")
+        if not isinstance(created, dict):
+            raise ValueError("TaskCreate response is missing task")
+        native_task_id = _task_sync_required_string(created, "id")
+        subject = _task_sync_required_string(tool_input, "subject")
+        description = tool_input.get("description", "")
+        if not isinstance(description, str):
+            raise ValueError("TaskCreate description must be a string")
+        task = {
+            "native_task_id": native_task_id,
+            "subject": subject,
+            "description": description,
+            "status": "pending",
+            "blocks": [],
+            "blockedBy": [],
+        }
+        active_form = tool_input.get("activeForm")
+        if active_form is not None:
+            if not isinstance(active_form, str):
+                raise ValueError("TaskCreate activeForm must be a string")
+            task["activeForm"] = active_form
+        return {
+            **common,
+            "action": "create",
+            "task_id": f"claude:{session_id}:{native_task_id}",
+            "task": task,
+        }
+
+    if tool_name != "TaskUpdate":
+        raise ValueError(f"unsupported Claude task tool: {tool_name}")
+    if tool_response.get("success") is False:
+        return None
+    if tool_response.get("success") is not True:
+        raise ValueError("TaskUpdate response is missing success")
+    native_task_id = _task_sync_required_string(tool_input, "taskId")
+    changes: dict[str, Any] = {}
+    for key in ("status", "subject", "description", "activeForm", "owner"):
+        value = tool_input.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"TaskUpdate {key} must be a string")
+        changes[key] = value
+    if "status" in changes and changes["status"] not in {
+        "pending",
+        "in_progress",
+        "completed",
+        "deleted",
+    }:
+        raise ValueError(f"unsupported Claude task status: {changes['status']}")
+    for key in ("addBlocks", "addBlockedBy"):
+        value = tool_input.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"TaskUpdate {key} must be a string array")
+        changes[key] = value
+    if not changes:
+        return None
+    event = {
+        **common,
+        "action": "update",
+        "task_id": f"claude:{session_id}:{native_task_id}",
+        "native_task_id": native_task_id,
+        "changes": changes,
+    }
+    updated_fields = tool_response.get("updatedFields")
+    if isinstance(updated_fields, list):
+        event["updated_fields"] = [str(item) for item in updated_fields]
+    status_change = tool_response.get("statusChange")
+    if isinstance(status_change, dict):
+        event["status_change"] = {
+            key: value
+            for key, value in status_change.items()
+            if key in {"from", "to"} and isinstance(value, str)
+        }
+    return event
+
+
+def _task_sync_reduce(rows: list[dict[str, Any]], task_list_id: str) -> dict[str, Any]:
+    if len(rows) >= _TASK_SYNC_HISTORY_LIMIT:
+        raise ValueError(
+            "task history reached the 1000-record recall bound; completeness is unknown"
+        )
+    tasks: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        try:
+            event = json.loads(row["fact_text"])
+        except (KeyError, TypeError, json.JSONDecodeError) as err:
+            raise ValueError("task history contains an invalid event") from err
+        if not isinstance(event, dict) or event.get("format") != _TASK_SYNC_FORMAT:
+            raise ValueError("task history contains an unsupported event format")
+        if event.get("task_list_id") != task_list_id:
+            raise ValueError("task history contains a mismatched task-list ID")
+        task_id = event.get("task_id")
+        action = event.get("action")
+        if not isinstance(task_id, str):
+            raise ValueError("task history contains an event without a task ID")
+        if action == "create":
+            task = event.get("task")
+            if not isinstance(task, dict):
+                raise ValueError("task history contains an invalid create event")
+            tasks[task_id] = {
+                **task,
+                "task_id": task_id,
+                "client": event.get("client"),
+                "last_source_event_id": event.get("source_event_id"),
+            }
+            continue
+        if action != "update" or task_id not in tasks:
+            raise ValueError("task history is incomplete or contains an invalid update")
+        task = tasks[task_id]
+        changes = event.get("changes")
+        if not isinstance(changes, dict):
+            raise ValueError("task history contains an invalid update event")
+        if changes.get("status") == "deleted":
+            del tasks[task_id]
+            continue
+        for key in ("status", "subject", "description", "activeForm", "owner"):
+            if key in changes:
+                task[key] = changes[key]
+        for source_key, target_key in (("addBlocks", "blocks"), ("addBlockedBy", "blockedBy")):
+            if source_key in changes:
+                task[target_key] = list(
+                    dict.fromkeys([*task.get(target_key, []), *changes[source_key]])
+                )
+        task["last_source_event_id"] = event.get("source_event_id")
+    ordered = sorted(tasks.values(), key=lambda task: task["task_id"])
+    return {
+        "task_list_id": task_list_id,
+        "complete": True,
+        "event_count": len(rows),
+        "tasks": ordered,
+        "remaining_task_ids": [
+            task["task_id"] for task in ordered if task.get("status") in {"pending", "in_progress"}
+        ],
+    }
+
+
+def _task_sync_process(
+    client: Any,
+    client_name: str,
+    task_list_id: str,
+    payload: dict[str, Any],
+    *,
+    tags: tuple[str, ...] = (),
+    source: str | None = None,
+) -> dict[str, Any] | None:
+    hook_event_name = payload.get("hook_event_name")
+    identifier = _task_sync_identifier(task_list_id)
+    if hook_event_name == "SessionStart":
+        rows = client.list(identifier, order="asc", limit=_TASK_SYNC_HISTORY_LIMIT)
+        if not rows:
+            return None
+        state = _task_sync_reduce(rows, task_list_id)
+        context = (
+            f"HotMem synchronized task state for task list {task_list_id}. "
+            "This is recalled state, not proof that native client task storage was restored. "
+            f"Use MCP list_memories with identifier {identifier} for exact event history. "
+            + json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        )
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        }
+    if hook_event_name != "PostToolUse":
+        return None
+    if client_name != "claude":
+        raise ValueError(f"unsupported task-sync client: {client_name}")
+    if payload.get("tool_name") not in {"TaskCreate", "TaskUpdate"}:
+        return None
+    event = _task_sync_claude_event(payload, task_list_id)
+    if event is None:
+        return None
+    session_id = _task_sync_required_string(payload, "session_id")
+    idempotency_key = hashlib.sha256(
+        "\0".join(
+            (
+                _TASK_SYNC_FORMAT,
+                task_list_id,
+                "claude-code",
+                session_id,
+                event["source_event_id"],
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    client.add(
+        identifier,
+        json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+        source=source or "hook://claude-code/tasks",
+        tags=list(tags),
+        harness_id="claude-code",
+        session_id=session_id,
+        idempotency_key=idempotency_key,
+    )
+    return None
+
+
 @main.command()
 @click.option("--port", default=8711, type=int, help="Port to listen on.")
 @click.option(
@@ -333,6 +566,57 @@ def serve(
         uvicorn.run(app, host=host, port=port, log_level="warning")
     except (StoreOwnershipError, StoreIdentityError) as err:
         raise click.ClickException(str(err)) from err
+
+
+@main.command("task-sync")
+@click.option("--client", "client_name", type=click.Choice(["claude"]), required=True)
+@click.option("--task-list-id", required=True, envvar="HOTMEM_TASK_LIST_ID")
+@click.option("--url", required=True, envvar="HOTMEM_URL", help="Running HotMem daemon URL.")
+@click.option("--token", "daemon_token", default=None, envvar="HOTMEM_TOKEN")
+@click.option("--namespace", "daemon_namespace", default=None, envvar="HOTMEM_NAMESPACE")
+@click.option("--source", "daemon_source", default=None, envvar="HOTMEM_SOURCE")
+@click.option("--store-id", "expected_store_id", default=None, envvar="HOTMEM_STORE_ID")
+@click.option("--tag", "tags", multiple=True, help="Canonical record tag (repeatable).")
+def task_sync(
+    client_name: str,
+    task_list_id: str,
+    url: str,
+    daemon_token: str | None,
+    daemon_namespace: str | None,
+    daemon_source: str | None,
+    expected_store_id: str | None,
+    tags: tuple[str, ...],
+):
+    """Process one native client hook JSON payload from stdin (#125)."""
+    payload: dict[str, Any] = {}
+    try:
+        parsed = json.loads(click.get_text_stream("stdin").read())
+        if not isinstance(parsed, dict):
+            raise ValueError("task hook payload must be a JSON object")
+        payload = parsed
+        with _make_daemon_client(
+            url,
+            token=daemon_token,
+            namespace=daemon_namespace,
+            expected_store_id=expected_store_id,
+        ) as client:
+            output = _task_sync_process(
+                client,
+                client_name,
+                task_list_id,
+                payload,
+                tags=tags,
+                source=daemon_source,
+            )
+    except ValueError as err:
+        if payload.get("hook_event_name") == "SessionStart":
+            output = {"systemMessage": f"HotMem task recall skipped: {err}"}
+        else:
+            raise click.ClickException(str(err)) from err
+    except Exception as err:
+        _raise_cli_http_error(err)
+    if output is not None:
+        click.echo(json.dumps(output, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
 
 
 @main.command()
