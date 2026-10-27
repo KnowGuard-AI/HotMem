@@ -220,6 +220,7 @@ _TASK_SYNC_MAX_INPUT_BYTES = 1_048_576
 _TASK_SYNC_STATUSES = {"pending", "in_progress", "completed"}
 _TASK_SYNC_CONTINUATION_LIST_KEY = "hotmem_task_list_id"
 _TASK_SYNC_CONTINUATION_TASK_KEY = "hotmem_task_id"
+_TASK_SYNC_LAST_OBSERVED_US = 0
 
 
 def _task_sync_identifier(task_list_id: str) -> str:
@@ -228,7 +229,13 @@ def _task_sync_identifier(task_list_id: str) -> str:
 
 
 def _task_sync_observed_at() -> str:
-    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    global _TASK_SYNC_LAST_OBSERVED_US
+    now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
+    if now_us <= _TASK_SYNC_LAST_OBSERVED_US:
+        now_us = _TASK_SYNC_LAST_OBSERVED_US + 1
+    _TASK_SYNC_LAST_OBSERVED_US = now_us
+    observed = datetime.fromtimestamp(now_us / 1_000_000, tz=UTC)
+    return observed.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _task_sync_validate_task_id(task_id: str) -> str:
@@ -424,10 +431,10 @@ def _task_sync_codex_event(payload: dict[str, Any], task_list_id: str) -> dict[s
 def _task_sync_event_sort_key(event: dict[str, Any], index: int) -> tuple[Any, ...]:
     observed_at = event.get("observed_at")
     if isinstance(observed_at, str) and observed_at:
-        return (1, observed_at, str(event.get("source_event_id") or ""), index)
+        return (1, observed_at, index)
     # Pre-v1 events from the initial integration have no durable order field.
     # Preserve their original list order ahead of newly timestamped events.
-    return (0, "", "", index)
+    return (0, "", index)
 
 
 def _task_sync_event_session(event: dict[str, Any], task_id: str) -> str:
