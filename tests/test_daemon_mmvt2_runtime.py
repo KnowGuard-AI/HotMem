@@ -16,7 +16,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from hotmem.policy import CallerCredential, PolicyConfig
+from hotmem.policy import CallerCredential, PolicyConfig, ShareApproval
 from hotmem.runtime import HotMemRuntime
 from hotmem.server import DAEMON_ROUTE_INVENTORY, create_app
 
@@ -254,3 +254,365 @@ def test_mmvt2_shared_operations_parity_and_policy_across_surface(tmp_path: Path
         }
         inventory_routes = {(m, p) for m, p, _ in DAEMON_ROUTE_INVENTORY}
         assert app_routes == inventory_routes
+
+
+def test_mmvt2_explicit_harness_session_and_tags_vertical_slice(tmp_path: Path):
+    """WP1 MVT1: Explicit harness_id, session_id, and canonical tags survive write -> recall."""
+    db_path = tmp_path / "mmvt2_111.sqlite"
+    policy = PolicyConfig(
+        store_id="store-111",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-alpha",
+                caller_id="caller-alpha",
+                store_id="store-111",
+                namespaces=("team/shared", "alpha/private"),
+                operations=("read", "write"),
+            ),
+            CallerCredential.from_token(
+                token="tok-beta",
+                caller_id="caller-beta",
+                store_id="store-111",
+                namespaces=("beta/private",),
+                operations=("read", "write"),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-111-team",
+                        namespace="team/shared",
+                        audience=("caller-beta",),
+                        operations=("read",),
+                    ),
+                ),
+            ),
+        ],
+    )
+    app = create_app(db_path=db_path, policy=policy)
+    alpha_shared_hdr = {
+        "Authorization": "Bearer tok-alpha",
+        "X-HotMem-Store-Id": "store-111",
+        "X-HotMem-Harness-Id": "codex",
+        "X-HotMem-Session-Id": "sess-alpha-101",
+        "X-HotMem-Source": "agent://codex-cli",
+        "X-HotMem-Namespace": "team/shared",
+    }
+    alpha_priv_hdr = {
+        **alpha_shared_hdr,
+        "X-HotMem-Namespace": "alpha/private",
+    }
+    beta_hdr = {
+        "Authorization": "Bearer tok-beta",
+        "X-HotMem-Store-Id": "store-111",
+        "X-HotMem-Harness-Id": "claude-code",
+        "X-HotMem-Session-Id": "sess-beta-202",
+        "X-HotMem-Source": "agent://claude-code",
+    }
+    canonical_tags = ["model:gpt-5", "project:hotmem", "org:knowguard"]
+
+    with TestClient(app) as client:
+        shared_resp = client.post(
+            "/v1/add",
+            headers=alpha_shared_hdr,
+            json={
+                "identifier": "arch/decision-111",
+                "fact": (
+                    "Keep session attribution explicit and model/project/org in canonical tags."
+                ),
+                "tags": canonical_tags,
+            },
+        )
+        assert shared_resp.status_code == 200
+        shared_id = shared_resp.json()["memory_id"]
+
+        priv_resp = client.post(
+            "/v1/add",
+            headers=alpha_priv_hdr,
+            json={
+                "identifier": "alpha/canary-111",
+                "fact": "PRIVATE-CANARY-111: internal investigation draft",
+                "tags": ["model:gpt-5", "project:secret-proj"],
+            },
+        )
+        assert priv_resp.status_code == 200
+        priv_id = priv_resp.json()["memory_id"]
+
+        # Reader B recalls shared decision via search, list, and direct get:
+        # Writer A's harness_id, session_id, caller_id, source, and tags are preserved.
+        search_b = client.post(
+            "/v1/search",
+            headers=beta_hdr,
+            json={"query": "explicit session attribution canonical tags", "top_k": 5},
+        )
+        assert search_b.status_code == 200
+        hits = search_b.json()["memories"]
+        assert len(hits) == 1
+        assert hits[0]["memory_id"] == shared_id
+        assert hits[0]["tags"] == canonical_tags
+        assert hits[0]["provenance"] == {
+            "envelope_version": "hotmem-session-v1",
+            "caller_id": "caller-alpha",
+            "harness_id": "codex",
+            "session_id": "sess-alpha-101",
+            "source": "agent://codex-cli",
+            "namespace": "team/shared",
+            "store_id": "store-111",
+        }
+
+        list_b = client.get(
+            "/v1/memories",
+            headers=beta_hdr,
+            params={"identifier": "arch/decision-111"},
+        )
+        assert list_b.status_code == 200
+        rows = list_b.json()["memories"]
+        assert len(rows) == 1
+        assert rows[0]["tags"] == canonical_tags
+        assert rows[0]["provenance"]["harness_id"] == "codex"
+        assert rows[0]["provenance"]["session_id"] == "sess-alpha-101"
+        assert rows[0]["provenance"]["caller_id"] == "caller-alpha"
+
+        get_b = client.get(f"/v1/memory/{shared_id}", headers=beta_hdr)
+        assert get_b.status_code == 200
+        got = get_b.json()
+        assert got["tags"] == canonical_tags
+        assert got["provenance"]["harness_id"] == "codex"
+        assert got["provenance"]["session_id"] == "sess-alpha-101"
+
+        # Private canary and its tags remain completely inaccessible to Reader B
+        assert client.get(f"/v1/memory/{priv_id}", headers=beta_hdr).status_code == 404
+        priv_search = client.post(
+            "/v1/search",
+            headers=beta_hdr,
+            json={"query": "PRIVATE-CANARY-111 secret-proj", "top_k": 5},
+        ).json()
+        assert all(m["memory_id"] != priv_id for m in priv_search["memories"])
+        assert "PRIVATE-CANARY-111" not in str(priv_search)
+        assert "secret-proj" not in str(priv_search)
+
+
+def test_mmvt2_wp1_layer2_tag_variations_validation_and_legacy_modes(tmp_path: Path):
+    """WP1 Layer 2: model-label changes per write, empty/omitted tags, file-backed tags,
+    malformed/conflicting context & tags, unknown envelope version, and legacy compatibility.
+    """
+    base_dir = tmp_path / "wp1_l2"
+    base_dir.mkdir()
+    doc_file = base_dir / "design.md"
+    doc_bytes = b"Architecture spec for explicit session attribution.\n"
+    doc_file.write_bytes(doc_bytes)
+
+    policy = PolicyConfig(
+        store_id="store-111-l2",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-alpha",
+                caller_id="caller-alpha",
+                store_id="store-111-l2",
+                namespaces=("team/shared",),
+                operations=("read", "write"),
+                allowed_sessions=("sess-alpha-1",),
+                allowed_sources=("agent://alpha",),
+                allowed_harnesses=("codex",),
+            ),
+            CallerCredential.from_token(
+                token="tok-beta",
+                caller_id="caller-beta",
+                store_id="store-111-l2",
+                namespaces=("team/shared",),
+                operations=("read", "write"),
+                allowed_sessions=("sess-beta-1",),
+                allowed_sources=("agent://beta",),
+                allowed_harnesses=("claude-code",),
+            ),
+        ],
+    )
+    app = create_app(db_path=base_dir / "l2.sqlite", policy=policy, base_dir=base_dir)
+    alpha_hdr = {
+        "Authorization": "Bearer tok-alpha",
+        "X-HotMem-Store-Id": "store-111-l2",
+        "X-HotMem-Harness-Id": "codex",
+        "X-HotMem-Session-Id": "sess-alpha-1",
+        "X-HotMem-Source": "agent://alpha",
+        "X-HotMem-Namespace": "team/shared",
+    }
+
+    with TestClient(app) as client:
+        # 1. Model label changes per write within the same session; empty/omitted tags valid
+        w1 = client.post(
+            "/v1/add",
+            headers=alpha_hdr,
+            json={
+                "identifier": "ops/step",
+                "fact": "First step drafted with model-a",
+                "tags": ["model:gpt-5", "project:hotmem"],
+            },
+        )
+        assert w1.status_code == 200
+        mid1 = w1.json()["memory_id"]
+
+        w2 = client.post(
+            "/v1/add",
+            headers=alpha_hdr,
+            json={
+                "identifier": "ops/step",
+                "fact": "Second step drafted with model-b in the same session",
+                "tags": ["model:o4-mini", "project:hotmem", "org:knowguard"],
+            },
+        )
+        assert w2.status_code == 200
+        mid2 = w2.json()["memory_id"]
+
+        w3 = client.post(
+            "/v1/add",
+            headers=alpha_hdr,
+            json={
+                "identifier": "ops/step",
+                "fact": "Third step drafted with explicit empty tag list",
+                "tags": [],
+            },
+        )
+        assert w3.status_code == 200
+        mid3 = w3.json()["memory_id"]
+
+        # File-backed memory with tags and harness_id
+        w_file = client.post(
+            "/v1/add",
+            headers=alpha_hdr,
+            json={
+                "identifier": "ops/spec-file",
+                "file_uri": "design.md",
+                "byte_offset": 0,
+                "byte_length": len(doc_bytes),
+                "source_format": "text/markdown",
+                "summary": "Architecture spec file",
+                "tags": ["model:gpt-5", "project:hotmem"],
+            },
+        )
+        assert w_file.status_code == 200
+        mid_file = w_file.json()["memory_id"]
+
+        g1 = client.get(f"/v1/memory/{mid1}", headers=alpha_hdr).json()
+        g2 = client.get(f"/v1/memory/{mid2}", headers=alpha_hdr).json()
+        g3 = client.get(f"/v1/memory/{mid3}", headers=alpha_hdr).json()
+        g_file = client.get(f"/v1/memory/{mid_file}", headers=alpha_hdr).json()
+
+        assert g1["tags"] == ["model:gpt-5", "project:hotmem"]
+        assert g2["tags"] == ["model:o4-mini", "project:hotmem", "org:knowguard"]
+        assert g3["tags"] == []
+        assert g_file["tags"] == ["model:gpt-5", "project:hotmem"]
+        assert g_file["provenance"]["harness_id"] == "codex"
+        # No parallel copy of tags in metadata or provenance
+        assert "tags" not in g1["metadata"]
+        assert "tags" not in g1["provenance"]
+        assert "model" not in g1["provenance"]
+
+        # Tags do not silently become retrieval filters
+        s_resp = client.post(
+            "/v1/search",
+            headers=alpha_hdr,
+            json={"query": "step drafted", "top_k": 10},
+        ).json()
+        returned_ids = {m["memory_id"] for m in s_resp["memories"]}
+        assert {mid1, mid2, mid3}.issubset(returned_ids)
+
+        # 2. Unknown / incompatible envelope_version rejected (400)
+        bad_ver = client.post(
+            "/v1/add",
+            headers={**alpha_hdr, "X-HotMem-Envelope-Version": "hotmem-session-v99"},
+            json={"identifier": "ops/bad", "fact": "bad version"},
+        )
+        assert bad_ver.status_code == 400
+        assert bad_ver.json()["error"] == "unsupported_envelope_version"
+
+        # 3. Conflicting header vs body context rejected (400 context_conflict)
+        conflict_sess = client.post(
+            "/v1/add",
+            headers=alpha_hdr,
+            json={"identifier": "ops/bad", "fact": "conflict", "session_id": "sess-other"},
+        )
+        assert conflict_sess.status_code == 400
+        assert conflict_sess.json()["error"] == "context_conflict"
+
+        conflict_harness = client.post(
+            "/v1/add",
+            headers=alpha_hdr,
+            json={"identifier": "ops/bad", "fact": "conflict", "harness_id": "claude-code"},
+        )
+        assert conflict_harness.status_code == 400
+        assert conflict_harness.json()["error"] == "context_conflict"
+
+        # 4. Malformed context (control chars / whitespace) & malformed tags/metadata rejected
+        bad_ctrl = client.post(
+            "/v1/add",
+            headers={**alpha_hdr, "X-HotMem-Harness-Id": "codex\x00bad"},
+            json={"identifier": "ops/bad", "fact": "ctrl"},
+        )
+        assert bad_ctrl.status_code == 400
+        assert bad_ctrl.json()["error"] == "invalid_session_context"
+
+        bad_ws_harness = client.post(
+            "/v1/add",
+            headers={**alpha_hdr, "X-HotMem-Harness-Id": "   "},
+            json={"identifier": "ops/bad", "fact": "ws"},
+        )
+        assert bad_ws_harness.status_code == 400
+        assert bad_ws_harness.json()["error"] == "invalid_session_context"
+
+        for bad_tags in ("not-a-list", [""], ["   "], [123], ["bad\x00tag"]):
+            r_tag = client.post(
+                "/v1/add",
+                headers=alpha_hdr,
+                json={"identifier": "ops/bad", "fact": "bad tag", "tags": bad_tags},
+            )
+            assert r_tag.status_code == 400
+            assert r_tag.json()["error"] == "invalid_tags"
+
+        r_meta = client.post(
+            "/v1/add",
+            headers=alpha_hdr,
+            json={"identifier": "ops/bad", "fact": "bad meta", "metadata": ["not", "dict"]},
+        )
+        assert r_meta.status_code == 400
+        assert r_meta.json()["error"] == "invalid_metadata"
+
+        # 5. Harness / caller impersonation rejected (403 session_impersonation_denied)
+        impersonate_harness = client.post(
+            "/v1/add",
+            headers={**alpha_hdr, "X-HotMem-Harness-Id": "claude-code"},
+            json={"identifier": "ops/bad", "fact": "wrong harness"},
+        )
+        assert impersonate_harness.status_code == 403
+        assert impersonate_harness.json()["error"] == "session_impersonation_denied"
+
+        impersonate_caller = client.post(
+            "/v1/add",
+            headers={**alpha_hdr, "X-HotMem-Caller-Id": "caller-beta"},
+            json={"identifier": "ops/bad", "fact": "wrong caller"},
+        )
+        assert impersonate_caller.status_code == 403
+        assert impersonate_caller.json()["error"] == "session_impersonation_denied"
+
+    # 6. Supported legacy/non-policy use: context preserved when supplied, omitted when bare
+    legacy_app = create_app(db_path=base_dir / "legacy.sqlite")
+    with TestClient(legacy_app) as lclient:
+        bare = lclient.post(
+            "/v1/add", json={"identifier": "leg/bare", "fact": "bare legacy"}
+        ).json()
+        bare_get = lclient.get(f"/v1/memory/{bare['memory_id']}").json()
+        assert bare_get["provenance"] is None
+        assert bare_get["tags"] == []
+
+        ctx_leg = lclient.post(
+            "/v1/add",
+            headers={"X-HotMem-Harness-Id": "codex", "X-HotMem-Session-Id": "sess-leg-1"},
+            json={
+                "identifier": "leg/ctx",
+                "fact": "contextual legacy",
+                "tags": ["model:gpt-5"],
+            },
+        ).json()
+        ctx_get = lclient.get(f"/v1/memory/{ctx_leg['memory_id']}").json()
+        assert ctx_get["tags"] == ["model:gpt-5"]
+        assert ctx_get["provenance"]["harness_id"] == "codex"
+        assert ctx_get["provenance"]["session_id"] == "sess-leg-1"
+        assert ctx_get["provenance"]["envelope_version"] == "hotmem-session-v1"

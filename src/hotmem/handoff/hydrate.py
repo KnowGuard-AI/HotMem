@@ -58,6 +58,7 @@ class HandoffHydrateResult:
     invalid: int = 0
     already_applied: bool = False
     brief_identifier: str | None = None
+    brief_accessible: bool = True
     embedding_reused: int = 0
     embedding_rebuilt: int = 0
     embedding_missing: int = 0
@@ -94,6 +95,27 @@ def build_brief_record(verified: VerifiedHandoff) -> dict[str, Any] | None:
     identifier = brief_identifier_for(manifest)
     fact_text = str(brief.get("text") or "")
     source_meta = manifest.get("source") or {}
+    meta_handoff: dict[str, Any] = {
+        "handoff_id": manifest.get("handoff_id"),
+        "package_id": manifest.get("package_id"),
+        "mode": manifest.get("mode"),
+        "source_adapter": source_meta.get("adapter"),
+        "session_id": source_meta.get("session_id"),
+        "time_range": source_meta.get("time_range"),
+        "counts": manifest.get("counts"),
+        "links": brief.get("links"),
+        "kind": "resume_brief",
+    }
+    prov_handoff: dict[str, Any] = {
+        "handoff_id": manifest.get("handoff_id"),
+        "package_id": manifest.get("package_id"),
+        "mode": manifest.get("mode"),
+        "source_adapter": source_meta.get("adapter"),
+        "session_id": source_meta.get("session_id"),
+    }
+    if source_meta.get("harness_id"):
+        meta_handoff["harness_id"] = source_meta.get("harness_id")
+        prov_handoff["harness_id"] = source_meta.get("harness_id")
     record: dict[str, Any] = {
         "schema_version": 1,
         "id": hashlib.sha256(
@@ -104,29 +126,9 @@ def build_brief_record(verified: VerifiedHandoff) -> dict[str, Any] | None:
         "fact_text": fact_text,
         "source": "handoff",
         "importance": BRIEF_IMPORTANCE,
-        "metadata": {
-            "handoff": {
-                "handoff_id": manifest.get("handoff_id"),
-                "package_id": manifest.get("package_id"),
-                "mode": manifest.get("mode"),
-                "source_adapter": source_meta.get("adapter"),
-                "session_id": source_meta.get("session_id"),
-                "time_range": source_meta.get("time_range"),
-                "counts": manifest.get("counts"),
-                "links": brief.get("links"),
-                "kind": "resume_brief",
-            }
-        },
+        "metadata": {"handoff": meta_handoff},
         "content_hash": compute_content_hash(identifier, fact_text),
-        "provenance": {
-            "handoff": {
-                "handoff_id": manifest.get("handoff_id"),
-                "package_id": manifest.get("package_id"),
-                "mode": manifest.get("mode"),
-                "source_adapter": source_meta.get("adapter"),
-                "session_id": source_meta.get("session_id"),
-            }
-        },
+        "provenance": {"handoff": prov_handoff},
     }
     return record
 
@@ -136,6 +138,8 @@ def hydrate_handoff(
     pkg_dir: str,
     *,
     embedder=None,
+    target_namespace: str | None = None,
+    hydrated_by: dict[str, Any] | None = None,
 ) -> HandoffHydrateResult:
     """Hydrate a verified handoff package into ``db`` atomically (#101).
 
@@ -159,12 +163,21 @@ def hydrate_handoff(
                 f"package {package_id[:12]} already applied at {ledger['applied_at']}",
                 detail={"package_id": package_id},
             )
+            applied_ns: str | None = None
+            try:
+                ledger_counts = json.loads(ledger.get("counts_json") or "{}")
+                if isinstance(ledger_counts, dict) and "namespace" in ledger_counts:
+                    applied_ns = str(ledger_counts.get("namespace") or "")
+            except (json.JSONDecodeError, TypeError):
+                applied_ns = None
+            brief_accessible = target_namespace is None or applied_ns == target_namespace
             return HandoffHydrateResult(
                 handoff_id=handoff_id,
                 package_id=package_id,
                 mode=mode,
                 already_applied=True,
-                brief_identifier=brief_identifier_for(manifest),
+                brief_identifier=(brief_identifier_for(manifest) if brief_accessible else None),
+                brief_accessible=brief_accessible,
             )
 
         counters = {
@@ -178,12 +191,16 @@ def hydrate_handoff(
         }
 
         def insert_records(records: list[dict[str, Any]]) -> None:
-            """Dedupe by content hash, resolve embeddings, insert, no commit."""
+            """Dedupe by (namespace, content_hash), resolve embeddings, insert, no commit."""
             if not records:
                 return
-            hashes = [r["content_hash"] for r in records]
-            existing = db.batch_existing_hashes(hashes)
-            todo = [r for r in records if r["content_hash"] not in existing]
+            pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in records]
+            existing = db.batch_existing_namespace_hashes(pairs)
+            todo = [
+                r
+                for r in records
+                if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
+            ]
             counters["skipped"] += len(records) - len(todo)
 
             rows = []
@@ -203,6 +220,8 @@ def hydrate_handoff(
             for line in verified.memory_lines():
                 try:
                     raw = json.loads(line)
+                    if target_namespace is not None and not raw.get("namespace"):
+                        raw = {**raw, "namespace": target_namespace}
                     rec = normalize_record(raw, default_source="handoff")
                 except Exception:
                     counters["invalid"] += 1
@@ -216,6 +235,8 @@ def hydrate_handoff(
             # 2. Exactly one resume-brief record (searchable, linked).
             brief_record = build_brief_record(verified)
             if brief_record is not None:
+                if target_namespace is not None:
+                    brief_record = {**brief_record, "namespace": target_namespace}
                 insert_records([normalize_record(brief_record, default_source="handoff")])
 
             # 3. Ledger + event inside the same transaction (#101 §11).
@@ -228,25 +249,29 @@ def hydrate_handoff(
                         "loaded": counters["loaded"],
                         "skipped": counters["skipped"],
                         "invalid": counters["invalid"],
+                        "namespace": target_namespace if target_namespace is not None else "",
                     },
                     sort_keys=True,
                 ),
                 applied_at=_utc_now_iso(),
                 _commit=False,
             )
+            applied_payload: dict[str, Any] = {
+                "handoff_id": handoff_id,
+                "package_id": package_id,
+                "mode": mode,
+                "loaded": counters["loaded"],
+                "skipped": counters["skipped"],
+                "invalid": counters["invalid"],
+                "brief_identifier": brief_identifier_for(manifest),
+            }
+            if hydrated_by is not None:
+                applied_payload["hydrated_by"] = hydrated_by
             append_event(
                 db,
                 event_type=EventType.HANDOFF_APPLIED,
-                namespace="handoff",
-                payload={
-                    "handoff_id": handoff_id,
-                    "package_id": package_id,
-                    "mode": mode,
-                    "loaded": counters["loaded"],
-                    "skipped": counters["skipped"],
-                    "invalid": counters["invalid"],
-                    "brief_identifier": brief_identifier_for(manifest),
-                },
+                namespace=target_namespace if target_namespace is not None else "handoff",
+                payload=applied_payload,
                 _commit=False,
             )
             db.commit()

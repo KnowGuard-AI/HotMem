@@ -116,7 +116,7 @@ describe("HotMemClient", () => {
     await expect(c.health()).rejects.toBeInstanceOf(HotMemError);
   });
 
-  it("propagates daemon auth, store, session, source, namespace, and idempotency headers (#109)", async () => {
+  it("propagates daemon auth, store, session, harness, source, namespace, and idempotency headers (#109, #111)", async () => {
     const calls = mockFetch(() => ({
       status: 200,
       body: { memory_id: "m-daemon", content_hash: "h-daemon", trace_ms: 0.4 },
@@ -125,17 +125,72 @@ describe("HotMemClient", () => {
       token: "tok-a",
       expectedStoreId: "store-incident-01",
       sessionId: "sess-a-1",
+      harnessId: "codex",
       source: "agent://ts-sdk",
       namespace: "ops/shared",
+      envelopeVersion: "hotmem-session-v1",
     });
-    await c.add("ops/demo-17", "rollback decision", { idempotencyKey: "op-key-1" });
+    await c.add("ops/demo-17", "rollback decision", {
+      idempotencyKey: "op-key-1",
+      tags: ["model:gpt-5", "project:hotmem", "org:knowguard"],
+    });
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers["authorization"]).toBe("Bearer tok-a");
     expect(headers["x-hotmem-store-id"]).toBe("store-incident-01");
     expect(headers["x-hotmem-session-id"]).toBe("sess-a-1");
+    expect(headers["x-hotmem-harness-id"]).toBe("codex");
     expect(headers["x-hotmem-source"]).toBe("agent://ts-sdk");
     expect(headers["x-hotmem-namespace"]).toBe("ops/shared");
+    expect(headers["x-hotmem-envelope-version"]).toBe("hotmem-session-v1");
     expect(headers["x-hotmem-idempotency-key"]).toBe("op-key-1");
+    const body = JSON.parse(calls[0].init.body as string);
+    expect(body.tags).toEqual(["model:gpt-5", "project:hotmem", "org:knowguard"]);
+  });
+
+  it("supports per-write model tag changes, empty tag lists, and per-call context overrides (#111)", async () => {
+    const calls = mockFetch(() => ({
+      status: 200,
+      body: { memory_id: "m-step", content_hash: "h-step", trace_ms: 0.3 },
+    }));
+    const c = new HotMemClient("http://127.0.0.1:8711", {
+      token: "tok-a",
+      sessionId: "sess-ts-1",
+      harnessId: "claude-code",
+      source: "agent://claude",
+    });
+    await c.add("ops/step", "first write", {
+      tags: ["model:claude-sonnet-4", "project:hotmem"],
+    });
+    await c.add("ops/step", "second write with changed model and override context", {
+      tags: ["model:claude-opus-4", "project:hotmem"],
+      harnessId: "claude-desktop",
+      sessionId: "sess-ts-2",
+      source: "agent://claude-desktop",
+    });
+    await c.add("ops/step", "third write with empty tags", {
+      tags: [],
+    });
+
+    const firstBody = JSON.parse(calls[0].init.body as string);
+    expect(firstBody.tags).toEqual(["model:claude-sonnet-4", "project:hotmem"]);
+    const firstHeaders = calls[0].init.headers as Record<string, string>;
+    expect(firstHeaders["x-hotmem-harness-id"]).toBe("claude-code");
+    expect(firstHeaders["x-hotmem-session-id"]).toBe("sess-ts-1");
+
+    const secondBody = JSON.parse(calls[1].init.body as string);
+    expect(secondBody.tags).toEqual(["model:claude-opus-4", "project:hotmem"]);
+    expect(secondBody.harness_id).toBe("claude-desktop");
+    expect(secondBody.session_id).toBe("sess-ts-2");
+    const secondHeaders = calls[1].init.headers as Record<string, string>;
+    expect(secondHeaders["x-hotmem-harness-id"]).toBe("claude-desktop");
+    expect(secondHeaders["x-hotmem-session-id"]).toBe("sess-ts-2");
+    expect(secondHeaders["x-hotmem-source"]).toBe("agent://claude-desktop");
+
+    const thirdBody = JSON.parse(calls[2].init.body as string);
+    expect(thirdBody.tags).toEqual([]);
+    const thirdHeaders = calls[2].init.headers as Record<string, string>;
+    expect(thirdHeaders["x-hotmem-harness-id"]).toBe("claude-code");
+    expect(thirdHeaders["x-hotmem-session-id"]).toBe("sess-ts-1");
   });
 
   it("formats structured daemon policy errors into HotMemError", async () => {

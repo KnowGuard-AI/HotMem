@@ -77,6 +77,8 @@ Modes differ in content and coverage — never inferred at the target.
   owns the handoff representation, integrity, hydration, and adapter seams.
 - No cloud transport, no encryption/authentication, no multi-writer sync.
 - Historical tools are inert data — nothing is ever re-executed.
+- Source-session provenance (`manifest.source.session_id`, optional `manifest.source.harness_id`, and per-record `provenance.handoff` + canonical `tags`) remains distinct from the caller preparing the package (`manifest.prepared_by`) and the caller/namespace hydrating it at the destination (`handoff.applied` event `hydrated_by` and destination `namespace` binding) (#111).
+- Existing v0.2.5 `hotmem-handoff-v1` (`schema_version: 1`) packages remain verifiable, inspectable, and hydratable without migration.
 - Until tombstone semantics land (#98), a package record deleted at a
   used target is re-inserted on repeat hydration; the showcase targets a
   clean database.

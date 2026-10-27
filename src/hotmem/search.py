@@ -75,6 +75,9 @@ def _fetch_candidates(
     vector_index: VectorIndex | None,
     embedding_model: str | None = None,
     embedding_dim: int | None = None,
+    *,
+    row_filter: Callable[[dict[str, Any]], bool] | None = None,
+    top_k: int = 5,
 ) -> list[dict[str, Any]]:
     """Return candidate rows with cosine scores for hybrid ranking.
 
@@ -106,8 +109,9 @@ def _fetch_candidates(
         # scan while any exist so ranking parity is preserved.
         and not db.has_unindexed_text_rows()
     ):
+        oversample_k = vector_index.oversample()
         try:
-            hits = vector_index.search(query_vec, top_k=vector_index.oversample())
+            hits = vector_index.search(query_vec, top_k=oversample_k)
         except Exception:  # index is disposable; never let it fail search
             _trace.warn("candidates", "vector index search failed; falling back to scan")
             hits = []
@@ -123,12 +127,20 @@ def _fetch_candidates(
                 include_archived=include_archived,
                 embedding_model=embedding_model,
             )
-            # Rows re-fetched by id already carry canonical cosine scores from
-            # the SQLite UDF — the index's own scores are advisory only.
-            return rows
-    return db.search_with_cosine(
+            if row_filter is not None:
+                filtered = [r for r in rows if row_filter(r)]
+                # If out-of-scope vectors crowded out the ANN oversample window,
+                # fall back to the exact SQLite scan so scoped recall is preserved.
+                if len(filtered) >= top_k or len(hits) < oversample_k:
+                    return filtered
+            else:
+                return rows
+    all_rows = db.search_with_cosine(
         query_blob, include_archived=include_archived, embedding_model=embedding_model
     )
+    if row_filter is not None:
+        return [r for r in all_rows if row_filter(r)]
+    return all_rows
 
 
 def _apply_reranker(
@@ -191,6 +203,7 @@ def search_memories(
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
     row_filter: Callable[[dict[str, Any]], bool] | None = None,
+    row_transform: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Search memories and return ranked, LLM-ready message objects.
 
@@ -234,9 +247,20 @@ def search_memories(
             vector_index,
             embedding_model=active.descriptor.key,
             embedding_dim=active.descriptor.dimension,
+            row_filter=row_filter,
+            top_k=top_k,
         )
-        if row_filter is not None:
-            candidates = [r for r in candidates if row_filter(r)]
+        if row_transform is not None:
+            disclosed_candidates: list[dict[str, Any]] = []
+            allowed_ids: set[str] = set()
+            for row in candidates:
+                transformed = row_transform(row)
+                if transformed is None:
+                    continue
+                disclosed_candidates.append(transformed)
+                allowed_ids.add(str(transformed["id"]))
+            candidates = disclosed_candidates
+            fts_rows = [r for r in fts_rows if str(r["id"]) in allowed_ids]
         fts_scores = _normalize_bm25(fts_rows)
 
         # Apply hybrid scoring
@@ -286,6 +310,7 @@ def search_memories(
                 "created_at": item.get("created_at"),
             }
             raw_prov = item.get("provenance_json")
+            parsed_prov = None
             if raw_prov:
                 try:
                     parsed_prov = json.loads(raw_prov) if isinstance(raw_prov, str) else raw_prov
@@ -293,6 +318,17 @@ def search_memories(
                     parsed_prov = None
                 if parsed_prov is not None:
                     msg["provenance"] = parsed_prov
+            raw_tags = item.get("tags")
+            parsed_tags: list[str] = []
+            if raw_tags:
+                try:
+                    loaded_tags = json.loads(raw_tags) if isinstance(raw_tags, str) else raw_tags
+                    if isinstance(loaded_tags, list):
+                        parsed_tags = [str(t) for t in loaded_tags]
+                except (json.JSONDecodeError, TypeError):
+                    parsed_tags = []
+            if parsed_tags or parsed_prov is not None:
+                msg["tags"] = parsed_tags
             messages.append(msg)
 
     _trace.info(

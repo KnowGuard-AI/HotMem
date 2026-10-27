@@ -226,6 +226,7 @@ def hydrate(
     *,
     on_progress: Callable[[int], None] | None = None,
     embedder: Embedder | None = None,
+    target_namespace: str | None = None,
 ) -> HydrateResult:
     """Load memories from a swap file into the database.
 
@@ -295,6 +296,8 @@ def hydrate(
                         continue
                     try:
                         rec = normalize_record(record)
+                        if target_namespace is not None and not rec.get("namespace"):
+                            rec["namespace"] = target_namespace
                     except AnnotationValidationError as err:
                         counters["invalid"] += 1  # malformed envelope: skip record (#79)
                         _trace.debug(
@@ -405,6 +408,7 @@ def snapshot(
     include_embeddings: bool = True,
     on_progress: Callable[[int], None] | None = None,
     row_filter: Callable[[dict], bool] | None = None,
+    row_transform: Callable[[dict], dict | None] | None = None,
 ) -> SnapshotResult:
     """Export memories from the database to a JSONL or JSONL.GZ swap file.
 
@@ -420,6 +424,11 @@ def snapshot(
             for row in db.iter_rows(include_embedding=include_embeddings):
                 if row_filter is not None and not row_filter(row):
                     continue
+                if row_transform is not None:
+                    transformed = row_transform(row)
+                    if transformed is None:
+                        continue
+                    row = transformed
                 embedding = row.pop("embedding", None)
                 if embedding is not None:
                     row["embedding_b64"] = base64.b64encode(embedding).decode("ascii")

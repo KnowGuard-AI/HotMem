@@ -21,10 +21,14 @@ these additional rules apply. They are **breaking** relative to an
 unauthenticated embedded server and are intentional for multi-caller use:
 
 - Every request requires a bearer token (or `X-HotMem-Token`).
-- `POST /v1/add` requires `X-HotMem-Session-Id`; missing attribution returns
-  `400 session_required`.
-- A request-body `source` must match the credential's bound sources and may
-  not claim another caller's source (`403 session_impersonation_denied`).
+- `POST /v1/add` requires `X-HotMem-Session-Id` (or body `session_id`); missing attribution returns `400 session_required`.
+- Optional `X-HotMem-Harness-Id` (or body `harness_id`) records the originating harness (for example `codex` or `claude-code`) in the `hotmem-session-v1` provenance envelope (`{envelope_version, caller_id, harness_id, session_id, source, namespace, store_id}`).
+- Optional `X-HotMem-Envelope-Version` (or body `envelope_version`) defaults to `hotmem-session-v1`; unknown versions fail closed with `400 unsupported_envelope_version`.
+- Conflicting context values between headers and JSON body fail with `400 context_conflict`; control characters, overlong strings (`>256` chars), or whitespace-only explicit overrides fail with `400 invalid_session_context`.
+- Supplied `harness_id`, `session_id`, and `source` values are **attribution, not authentication**: they never grant namespace access or override the authenticated `caller_id`. A request may not claim another caller's bound session, source, harness, or `caller_id` (`403 session_impersonation_denied`).
+- Canonical generic `tags` (`tags: list[str]`, e.g. `["model:gpt-5", "project:hotmem", "org:knowguard"]`) are stored in `memories.tags` without dedicated model/project/org columns or parallel copies in `metadata`/`provenance`. Missing labels are omitted, `[]` is valid, and `model:*` tags may change per write within the same session. Invalid tag payloads fail with `400 invalid_tags`; non-object metadata fails with `400 invalid_metadata`.
+- Tags survive permitted `/v1/search`, `/v1/memories`, `/v1/memory/{id}`, `/v1/events`, and portable exports/handoffs, do not act as implicit retrieval filters, and obey `secret_action` and `private_classification_action` (including `classification:private` / `visibility:confidential` tags).
+- Repeated writes with the same `X-HotMem-Idempotency-Key` replay the original response without mutating original writer attribution; changing `tags`, `harness_id`, `source`, `namespace`, `metadata`, or payload under the same key returns `409 idempotency_key_conflict`.
 - `X-HotMem-Store-Id` is a typo-safety assertion only; authorization comes
   from the token. A mismatch returns `409 store_mismatch` **after**
   authentication.
@@ -32,12 +36,32 @@ unauthenticated embedded server and are intentional for multi-caller use:
   (identical to a missing id); list/search/event results are filtered before
   ranking/output.
 - `GET /v1/health` requires the `read` operation, omits `db_path`, and reports
-  `store_state` as `verified_empty`, `ready`, or `empty_scope`.
+  `store_state` as `verified_empty`, `ready`, or `empty_scope`. Authenticated
+  responses include `policy_enforced: true` and `policy_revision`;
+  `total_memory_count` is non-zero only for management callers.
 - `GET /v1/bundles` and `POST /v1/discover` require management authority.
 - `GET /v1/hygiene` reports only the caller's visible rows and does not write
   audit events for read-only callers.
-- `POST /v1/snapshot` records the caller's scope and omissions in the
-  manifest/metadata and redacts host/database paths.
+- `POST /v1/snapshot` records `scope` (`exported_count`,
+  `scope_omitted_count`, `disclosure_omitted_count`, `omitted_count`,
+  `redacted_count`) in the manifest/metadata and redacts host/database paths.
+  File-backed records with no portable reference are omitted.
+- Retrieval and export routes apply `secret_action`
+  (`allow`/`redact`/`omit`/`fail_closed`) and
+  `private_classification_action` (`allow`/`omit`/`fail_closed`) over text,
+  summaries, metadata, provenance, tags, identifiers, and hydrated content.
+  Responses include a `disclosure` object:
+  `{redacted_count, redacted_records, omitted_count, reasons, patterns}`.
+  `fail_closed` raises `403 policy_disclosure_blocked` with a `reason`
+  (`secret_detected`, `private_classification`, or `non_text_payload`) and
+  matched pattern names — never the matched values.
+- `copy_attachments=true` requires `allow_attachments` (management callers are
+  allowed) and returns `403 attachments_not_permitted` otherwise.
+- `/v1/vector-index/rebuild` and `DELETE /v1/vector-index` require `manage`
+  under policy; `/v1/vector-index/status` scopes counts and omits the index
+  path for non-management callers.
+- Operation responses (`snapshot`, `hydrate`, `handoff prepare/inspect`) return
+  paths relative to the daemon base directory when `redact_host_paths` is on.
 - Filesystem paths supplied to `snapshot`, `hydrate`, `handoff *`, and
   `discover` must resolve inside the daemon base directory
   (`403 path_not_permitted`).
@@ -50,13 +74,17 @@ unauthenticated embedded server and are intentional for multi-caller use:
 GET /v1/health
 ```
 
-Returns server status, memory count, DB path, and uptime.
+Returns server status, memory count, DB path, and uptime (embedded mode), or
+scoped counts, `store_state`, `policy_enforced`, `policy_revision`, and no DB
+path (policy mode). Requires authentication in policy mode.
 
 ## 4. Add Memory
 
 ```http
 POST /v1/add
 Content-Type: application/json
+X-HotMem-Harness-Id: codex
+X-HotMem-Session-Id: sess-alpha-101
 
 {
   "identifier": "user",
@@ -64,11 +92,12 @@ Content-Type: application/json
   "source": "chat",
   "importance": 0.5,
   "metadata": {},
+  "tags": ["model:gpt-5", "project:hotmem", "org:knowguard"],
   "ttl_seconds": null
 }
 ```
 
-Returns `memory_id`, `content_hash`, and `trace_ms`.
+Returns `memory_id`, `content_hash`, and `trace_ms` (plus `"deduplicated": true` when content-hash deduplication matched an existing record in the target namespace without overwriting the original writer's attribution or tags). In supported legacy/non-policy mode (`require_auth=false`), `session_id`, `harness_id`, and `tags` are optional and preserved when supplied.
 
 ## 5. Search
 

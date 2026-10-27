@@ -230,12 +230,26 @@ _KIND_BY_TYPE = {
 
 
 def _build_memory_record(
-    raw: dict[str, Any], session_id: str, time_range: dict[str, Any]
+    raw: dict[str, Any],
+    session_id: str,
+    time_range: dict[str, Any],
+    *,
+    harness_id: str | None = None,
 ) -> dict[str, Any]:
     """Map one memory_item line to a deterministic interchange record."""
     identifier = str(raw.get("identifier") or "")
     fact = str(raw.get("fact") or "")
     content_hash = compute_content_hash(identifier, fact)
+    handoff_prov: dict[str, Any] = {
+        "adapter": SOURCE_ADAPTER_ID,
+        "adapter_version": SOURCE_ADAPTER_VERSION,
+        "session_id": session_id,
+        "source_entry_id": str(raw.get("id", "")),
+        "source_seq": int(raw.get("seq", 0)),
+        "session_time_range": time_range,
+    }
+    if harness_id:
+        handoff_prov["harness_id"] = harness_id
     record: dict[str, Any] = {
         "schema_version": 1,
         "id": hashlib.sha256(
@@ -250,16 +264,7 @@ def _build_memory_record(
         "metadata": None,
         "content_hash": content_hash,
         "tags": [str(t) for t in raw["tags"]] if isinstance(raw.get("tags"), list) else [],
-        "provenance": {
-            "handoff": {
-                "adapter": SOURCE_ADAPTER_ID,
-                "adapter_version": SOURCE_ADAPTER_VERSION,
-                "session_id": session_id,
-                "source_entry_id": str(raw.get("id", "")),
-                "source_seq": int(raw.get("seq", 0)),
-                "session_time_range": time_range,
-            }
-        },
+        "provenance": {"handoff": handoff_prov},
     }
     if raw.get("timestamp"):
         record["created_at"] = str(raw["timestamp"])
@@ -270,6 +275,7 @@ def read_codex_export(
     path: str | Path,
     *,
     session_id: str | None = None,
+    harness_id: str | None = None,
     consent: str | None = None,
     limits: Limits = DEFAULT_LIMITS,
 ) -> NormalizedSession:
@@ -298,6 +304,8 @@ def read_codex_export(
         "started_at": session.get("started_at"),
         "ended_at": session.get("ended_at"),
     }
+    raw_harness = harness_id or session.get("harness_id") or envelope.get("harness_id")
+    resolved_harness = str(raw_harness).strip() if raw_harness else None
     result = NormalizedSession(
         adapter=SOURCE_ADAPTER_ID,
         adapter_version=SOURCE_ADAPTER_VERSION,
@@ -305,6 +313,7 @@ def read_codex_export(
         label=str(session.get("label") or session["id"]),
         time_range=time_range,
         codex_version=str(session.get("codex_version")) or None,
+        harness_id=resolved_harness,
     )
 
     seen_ids: set[str] = set()
@@ -371,7 +380,12 @@ def read_codex_export(
                         source_id, raw, _FIELD_MAP[line_type], result.omissions
                     )
                     continue
-                record = _build_memory_record(raw, result.session_id, time_range)
+                record = _build_memory_record(
+                    raw,
+                    result.session_id,
+                    time_range,
+                    harness_id=resolved_harness,
+                )
                 # Bound the memory fact like any other entry text.
                 if len(record["fact_text"].encode()) > limits.max_entry_bytes:
                     record["fact_text"] = _truncate(record["fact_text"], limits.max_entry_bytes)

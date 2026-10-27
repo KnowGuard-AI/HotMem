@@ -25,6 +25,11 @@ Requires Python 3.11+.
 
 Keep PRs small and focused. One concern per PR.
 
+Ordinary PRs do not require package version bumps. A release PR aligns package,
+runtime, lockfile, and release metadata when a release is being cut. Follow the
+[release and versioning policy](docs/release-and-versioning.md); a new product
+version merged to `main` can trigger automatic tagging and publication.
+
 ## Code Style
 
 - We use [Ruff](https://docs.astral.sh/ruff/) for linting and formatting

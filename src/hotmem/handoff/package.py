@@ -147,9 +147,11 @@ def prepare_handoff(
     mode: str,
     consent: str,
     session_id: str | None = None,
+    harness_id: str | None = None,
+    prepared_by: dict[str, Any] | None = None,
     limits: Limits = DEFAULT_LIMITS,
 ) -> PrepareResult:
-    """Prepare one hotmem-handoff-v1 package atomically (#101).
+    """Prepare one hotmem-handoff-v1 package atomically (#101, #111).
 
     Fail-closed order: consent and selection are validated during the read
     (before any content is normalized); nothing is written until every
@@ -160,7 +162,13 @@ def prepare_handoff(
 
     started = time.perf_counter()
     with Timer() as t_read:
-        session = read_codex_export(source, session_id=session_id, consent=consent, limits=limits)
+        session = read_codex_export(
+            source,
+            session_id=session_id,
+            harness_id=harness_id,
+            consent=consent,
+            limits=limits,
+        )
     with Timer() as t_redact:
         session = redact_normalized(session)
     if mode == MODE_RESUME:
@@ -210,7 +218,21 @@ def prepare_handoff(
                 MEMORIES_NAME: _file_entry(memories_path),
                 BRIEF_NAME: _file_entry(brief_path),
             }
-            manifest = {
+            source_block: dict[str, Any] = {
+                "adapter": session.adapter,
+                "adapter_version": session.adapter_version,
+                "session_id": session.session_id,
+                "label": session.label,
+                "time_range": session.time_range,
+                "selection_scope": {
+                    "scope": f"session:{session.session_id}",
+                    "requested_session": session_id,
+                },
+                "codex_version": session.codex_version,
+            }
+            if session.harness_id:
+                source_block["harness_id"] = session.harness_id
+            manifest: dict[str, Any] = {
                 "format": FORMAT_ID,
                 "schema_version": SCHEMA_VERSION,
                 "package_id": package_id,
@@ -218,18 +240,7 @@ def prepare_handoff(
                 "mode": mode,
                 "created_at": created_at,
                 "hotmem_version": _hotmem_version(),
-                "source": {
-                    "adapter": session.adapter,
-                    "adapter_version": session.adapter_version,
-                    "session_id": session.session_id,
-                    "label": session.label,
-                    "time_range": session.time_range,
-                    "selection_scope": {
-                        "scope": f"session:{session.session_id}",
-                        "requested_session": session_id,
-                    },
-                    "codex_version": session.codex_version,
-                },
+                "source": source_block,
                 "target": {"adapter": TARGET_ADAPTER_ID},
                 "compatibility": {"min_hotmem": "0.2.4", "interchange_schema": 1},
                 "counts": {
@@ -254,6 +265,8 @@ def prepare_handoff(
                     "at": created_at,
                 },
             }
+            if prepared_by is not None:
+                manifest["prepared_by"] = prepared_by
             manifest_path = staging / MANIFEST_NAME
             with open(manifest_path, "w", encoding="utf-8", newline="\n") as f:
                 f.write(json.dumps(manifest, sort_keys=True, indent=2, ensure_ascii=False))

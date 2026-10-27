@@ -81,10 +81,16 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
         "prefixed_credential",
         re.compile(
             r"\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
-            r"sk-[A-Za-z0-9]{16,}|hotmem_sk_[A-Za-z0-9]{8,}|"
+            r"sk-[A-Za-z0-9_-]{16,}|hotmem_sk_[A-Za-z0-9]{8,}|"
             r"xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16})\b"
         ),
         "credential pattern: vendor-prefixed credential",
+    ),
+    (
+        "dsn_inline_password",
+        # Keep scheme/user visible; replace only the inline password.
+        re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)([^@\s\"\'\[\]]+)(?=@[^\s\"\']+)"),
+        "credential pattern: inline DSN password",
     ),
 )
 

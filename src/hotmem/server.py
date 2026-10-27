@@ -108,8 +108,13 @@ class AddRequest(BaseModel):
     )
     source: str = ""
     importance: float = Field(default=0.5, ge=0.0, le=1.0)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: Any = Field(default_factory=dict)
     ttl_seconds: int | None = Field(default=None, ge=1)
+    tags: Any = None
+    harness_id: Any = None
+    session_id: Any = None
+    envelope_version: Any = None
+    caller_id: Any = None
 
     @model_validator(mode="after")
     def _exactly_one_payload(self) -> AddRequest:
@@ -248,10 +253,13 @@ def _resolve_caller(runtime: HotMemRuntime, request: Request) -> CallerContext:
         token=_extract_token(request),
         requested_store_id=request.headers.get("x-hotmem-store-id"),
         session_id=request.headers.get("x-hotmem-session-id"),
+        harness_id=request.headers.get("x-hotmem-harness-id"),
         source=request.headers.get("x-hotmem-source"),
         namespace=request.headers.get("x-hotmem-namespace") or None,
         actor=request.headers.get("x-hotmem-actor"),
         idempotency_key=request.headers.get("x-hotmem-idempotency-key"),
+        envelope_version=request.headers.get("x-hotmem-envelope-version"),
+        caller_id_claim=request.headers.get("x-hotmem-caller-id"),
     )
 
 
@@ -357,6 +365,11 @@ def create_app(
                 importance=req.importance,
                 metadata=req.metadata,
                 ttl_seconds=req.ttl_seconds,
+                tags=req.tags,
+                harness_id=req.harness_id,
+                session_id=req.session_id,
+                envelope_version=req.envelope_version,
+                caller_id=req.caller_id,
             )
         except AnnotationValidationError as err:
             return JSONResponse(
@@ -456,7 +469,9 @@ def create_app(
                         "reason": err.reason,
                         "expected": err.expected,
                         "actual": err.actual,
-                        "source_uri": err.source_uri,
+                        "source_uri": ctx.sanitize_source_uri(
+                            err.source_uri, base_dir=owned_runtime.base_dir
+                        ),
                         "message": str(err),
                     },
                 )
@@ -483,7 +498,9 @@ def create_app(
                     "reason": err.reason,
                     "expected": err.expected,
                     "actual": err.actual,
-                    "source_uri": err.source_uri,
+                    "source_uri": ctx.sanitize_source_uri(
+                        err.source_uri, base_dir=owned_runtime.base_dir
+                    ),
                     "message": str(err),
                 },
             )

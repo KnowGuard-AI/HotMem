@@ -1,4 +1,4 @@
-# Shared Daemon, MCP Relay, and LSD Management Contract (#109, #110, #111, #112)
+# Shared Daemon, MCP Relay, and Management UI Contract (#109, #110, #111, #112)
 
 ## 1. Architecture Overview
 
@@ -7,11 +7,11 @@ In **daemon mode**, HotMem runs as an explicitly started, single-owner local ser
 - Warm runtime resources (`Embedder`, optional `Reranker`, optional `VectorIndex`).
 - The shared `HotMemRuntime` operation and policy boundary (`src/hotmem/runtime.py`, `src/hotmem/policy.py`).
 
-All daemon-mode clients—MCP (`hotmem mcp --url ...`), CLI (`hotmem <cmd> --url ...`), Python SDK (`HotMemClient` / `AsyncHotMemClient`), TypeScript SDK (`HotMemClient`), and the detachable LSD management client (#112)—route through the same `HotMemRuntime` boundary rather than opening independent or temporary SQLite databases.
+All daemon-mode clients—MCP (`hotmem mcp --url ...`), CLI (`hotmem <cmd> --url ...`), Python SDK (`HotMemClient` / `AsyncHotMemClient`), TypeScript SDK (`HotMemClient`), and the detachable management client (#112)—route through the same `HotMemRuntime` boundary rather than opening independent or temporary SQLite databases.
 
 ```
 ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────────┐
-│ MCP Host (stdio) │   │ CLI / Py / TS SDK│   │ Detachable LSD UI    │
+│ MCP Host (stdio) │   │ CLI / Py / TS SDK│   │ Detachable UI    │
 │ hotmem mcp --url │   │ --url / Client   │   │ (management client)  │
 └────────┬─────────┘   └────────┬─────────┘   └──────────┬───────────┘
          │                      │                        │
@@ -107,6 +107,7 @@ Configure your MCP host (e.g. Claude Desktop or Cursor) to launch `hotmem mcp` i
         "mcp",
         "--url", "http://127.0.0.1:8711",
         "--token", "tok-caller-a",
+        "--harness", "claude-code",
         "--session", "sess-a-investigation",
         "--source", "mcp://claude-a",
         "--namespace", "ops/shared",
@@ -145,6 +146,10 @@ Closing or restarting the MCP host closes only the `stdio` relay; the daemon and
   read-only WAL connections; the shared write connection is never read
   concurrently mid-transaction. Slow writes and exports do not block
   `/v1/health` or basic reads.
+- **Scoped diagnostics are O(rows) under redaction.** `/v1/health` and
+  `/v1/vector-index/status` scan visible rows and run disclosure patterns to
+  produce scoped counts; this is linear in store size and should be monitored
+  on large stores.
 - **Scoped diagnostics.** `/v1/hygiene`, `/v1/events`, `/v1/health`, and
   snapshots report only the caller's permitted rows; health exposes
   `store_state` as `verified_empty`, `ready`, or `empty_scope`, and omits
@@ -162,12 +167,91 @@ Closing or restarting the MCP host closes only the `stdio` relay; the daemon and
   `hotmem policy revoke --url ... --caller caller-b` or `--approval <id>`, and
   `hotmem policy reload --url ...` to re-read the policy file.
 - **Exports are self-describing.** Scoped snapshot/package exports record their
-  `scope`, `exported_count`, and `omitted_count` in the manifest/metadata and
-  redact host/database paths. Snapshot v2 records declare record schema 2;
-  interchange v1 records keep `schema_version: 1` and carry the stored row
-  version separately as `record_schema_version`.
+  `scope`, `exported_count`, `omitted_count`, `redacted_count`, and
+  `disclosure` summary in the manifest/metadata and redact host/database paths.
+  Snapshot v2 records declare record schema 2; interchange v1 records keep
+  `schema_version: 1` and carry the stored row version separately as
+  `record_schema_version`.
 
-### Store schema migration (v5 -> v6)
+### Scoped Disclosure & Privacy Policy Contract (#110)
+
+When a policy (`--policy` or `<mount>/policy.json`) is active, `HotMemRuntime`
+enforces both **pre-ranking namespace/share scope** and **outbound disclosure
+rules** across retrieval (`search`, `list`, `get_memory`, `hydrate`,
+`hydrate-batch`, `files`, `promotion/candidates`, `promotion/by-state`,
+`events`, `hygiene`, `health`, `vector-index/status`) and exports (`snapshot`):
+
+| Policy Field | Values | Default | Behavior |
+| --- | --- | --- | --- |
+| `secret_action` | `"allow"` \| `"redact"` \| `"omit"` \| `"fail_closed"` | `"redact"` on shared (`ShareApproval`) access; `"allow"` on direct self-owned namespaces unless explicitly set. Top-level `default_secret_action` applies to shared access. | Controls how secret-shaped (`api_key`, `bearer_token`, `private_key`, `prefixed_credential`, `dsn_inline_password`) and PII (`pii_ssn`, `pii_email`) patterns are handled in text, summaries, hydrated file bytes, and metadata. |
+| `private_classification_action` | `"allow"` \| `"omit"` \| `"fail_closed"` | `"omit"` on shared (`ShareApproval`) access; `"allow"` on direct self-owned namespaces unless explicitly set. Top-level `default_private_classification_action` applies to shared access. | Controls how records tagged with `metadata.classification` / `visibility` in `{"private", "secret", "confidential", "restricted"}` (or `metadata.private: true`) are handled. |
+| `redact_host_paths` | `true` \| `false` | `true` | Strips absolute host directory prefixes from `source_uri` in API responses, hygiene warnings, events, and exports, and omits `db_path`/`host` from health, vector status, and Snapshot v2 `metadata.json`. |
+| `allow_attachments` | `true` \| `false` | `false` (`true` for `is_management`) | Gates `copy_attachments=true` on `/v1/snapshot` (403 `attachments_not_permitted` when disabled). |
+
+- **Pre-ranking candidate selection:** Scope (`ctx.can_access_row`) and
+  disclosure transforms (`omit` / `redact` / `fail_closed`) run **before** FTS
+  BM25 min/max normalization, hybrid score sorting, second-stage MMR reranking,
+  and `top_k` / `max_chars` truncation. When the optional derived `VectorIndex`
+  is active and out-of-scope private vectors crowd the ANN oversample window,
+  search automatically falls back to the exact scoped SQLite scan so authorized
+  callers are never starved.
+- **Inbound bulk-import confinement:** `POST /v1/hydrate` and
+  `POST /v1/handoff/hydrate` validate every record's target namespace against
+  `ctx.can_access_namespace(..., operation="write")` before committing any
+  rows. Snapshot v2 and interchange packages are integrity-verified first;
+  legacy JSONL and markdown bundles are structurally validated only (they
+  carry no checksummed envelope). Unscoped records bind to the caller's
+  namespace (pinned header, or the single granted namespace); explicit foreign
+  namespaces still fail closed with `403 scope_denied`.
+- **Distinct security guarantees (Scoped Snapshot vs. Consented Handoff):**
+
+| Guarantee Dimension | Scoped Snapshot (`POST /v1/snapshot`) | Consented Handoff (`POST /v1/handoff/prepare`) |
+| --- | --- | --- |
+| **Primary Purpose** | Portable cassette backup/clone of authorized SQLite rows (`.jsonl`, Snapshot v2, `hotmem-interchange-v1`) | Bounded session transfer (`hotmem-handoff-v1`) with `resume-brief.json` and inert history |
+| **API Authorization** | Requires `export` + `read` on permitted namespaces / `ShareApproval` | Requires `export` operation and path confined to `base_dir` |
+| **Explicit User Consent** | Not required (governed by caller credential & share policy) | **Mandatory** non-empty `consent` verified before reading source lines |
+| **Secret / PII Redaction** | Configurable per credential/share (`allow`, `redact`, `omit`, `fail_closed`) including PII patterns; recomputes `content_hash` and embeddings when redacted | Always-on credential redaction (`redact.py`: assignments, bearer tokens, private keys, prefixed keys, inline DSN passwords) + fail-closed `assert_no_secrets` output gate; PII/classification rules are policy-surface only |
+| **Tool Execution Safety** | Stores declarative facts and file pointers only | Forces `executable=false` on all historical tool calls |
+| **Artifact Integrity** | SHA-256 per-file & overall digests (`hotmem verify`) | SHA-256 per-file, `package_id`, and `handoff_id` (`hotmem handoff verify`) |
+| **Encryption & Signing** | Not provided (plaintext JSONL/JSON; use OS/volume or external age/GPG encryption) | Not provided (plaintext JSONL/JSON; checksums prove integrity, not cryptographic authorship) |
+
+#- **Handoff ledger is store-global.** A `package_id` applies once per store.
+  A second caller hydrating it in another namespace receives
+  `already_applied: true`, `loaded: 0`, `brief_accessible: false`, and no
+  brief identifier for the foreign namespace.
+- **Non-text hydration fails closed.** Raw hydration of a file-backed payload
+  that is not valid UTF-8 returns `403 policy_disclosure_blocked`
+  (`reason: non_text_payload`) when `secret_action` is not `allow`; bytes are
+  never decoded and re-encoded destructively.
+- **PII patterns are opinionated.** `pii_email` matches ordinary addresses
+  (support aliases, bot accounts) and `pii_ssn` matches 3-2-4 digit strings, so
+  shared rows can be redacted or fail closed on benign data. Set
+  `secret_action: "allow"` for a share when those patterns are unacceptable.
+- **Artifact validation is point-in-time.** `hydrate` scans namespaces before
+  the loader re-reads the artifact; a caller with write access to `base_dir`
+  could race a replacement between the two reads. Treat the daemon base
+  directory as trusted operator-controlled storage.
+- **Event payloads obey the same disclosure action.** `metadata_json`,
+  `provenance_json`, `tags`, `identifier`, and `fact_summary` are redacted,
+  omitted, or fail closed before an event is returned.
+
+### Explicit Session & Harness Context, Generic Tags, and ID Lifetimes (#111)
+
+- **Versioned session provenance (`hotmem-session-v1`):** Contextual writes record
+  `{"envelope_version": "hotmem-session-v1", "caller_id": ..., "harness_id": ..., "session_id": ..., "source": ..., "namespace": ..., "store_id": ...}`
+  in `memories.provenance_json`. Unknown envelope versions fail closed (`400 unsupported_envelope_version`); conflicting header vs. payload context fails with `400 context_conflict`.
+- **Attribution vs. authentication:** `harness_id`, `session_id`, and `source` are writer attribution. Authentication and namespace/share access derive solely from the bearer token (`CallerCredential`). Credentials may optionally pin `allowed_sessions`, `allowed_sources`, and `allowed_harnesses`; claiming another caller's bound identity fails with `403 session_impersonation_denied`.
+- **Canonical generic `tags` (`memories.tags`):** Model, project, and organization labels use canonical record tags (for example `{"tags": ["model:gpt-5", "project:hotmem", "org:knowguard"]}`) across HTTP (`/v1/add`), Python `HotMemClient` / `AsyncHotMemClient`, TypeScript `HotMemClient`, MCP `add_memory` (alongside `metadata`), and CLI `hotmem add --tag ...`. No dedicated model/project/org columns or parallel copies in `metadata` or `provenance` are created. Missing labels are omitted, `[]` is valid, and `model:*` labels can change per write within the same session.
+- **Native vs. adapter-scoped session IDs:**
+  - When a client or harness exposes a native conversation/session ID, supply that ID per conversation or per write (`X-HotMem-Session-Id`, SDK `session_id`, or MCP `add_memory(session_id=...)`).
+  - Standard MCP stdio transport does **not** automatically expose a host's native conversation ID or automatic transcript capture. When `--session` / `HOTMEM_SESSION_ID` is passed to `hotmem mcp --url ...`, its lifetime is scoped to that relay process instance unless overridden per tool call. Do not assign one permanent static session ID across unrelated conversations; client-specific hook/adapter wiring belongs to #125.
+- **Writer preservation, retries, and observed activity:**
+  - Reader context on `/v1/search`, `/v1/memories`, `/v1/memory/{id}`, and `/v1/memory/{id}/hydrate` never mutates stored writer provenance or tags.
+  - Content-hash deduplication preserves the original writer's stored record and tags while recording subsequent attempts in scoped `memory.deduplicated` events.
+  - Idempotency-key retries (`X-HotMem-Idempotency-Key`) include `tags`, `harness_id`, `source`, `namespace`, and `metadata` in the request fingerprint; changed context or tags under a repeated key fail with `409 idempotency_key_conflict`.
+  - Activity (`GET /v1/events`) reports only genuine HotMem-observed, permission-scoped operations (`memory.created`, `memory.deduplicated`, `snapshot.imported`, `handoff.applied`, etc.) and reuses existing `ttl_seconds` and event retention mechanisms without client-presence polling.
+
+## Store schema migration (v5 -> v6)
 
 The persistent SQLite schema moved from `user_version = 5` to `6`. The
 migration runs automatically on the next open and is **fail-closed**:
@@ -213,8 +297,8 @@ Every route on the daemon is registered in `DAEMON_ROUTE_INVENTORY` (`src/hotmem
 | `GET` | `/v1/handoff/inspect` | `read` | Inspect handoff package metadata & coverage |
 | `POST` | `/v1/handoff/hydrate` | `hydrate` | Hydrate verified handoff package into store |
 | `GET` | `/v1/files` | `read` | List file-backed references visible to caller |
-| `GET` | `/v1/bundles` | `read` | List indexed bundles |
-| `POST` | `/v1/discover` | `write` | Scan directory root for bundles |
+| `GET` | `/v1/bundles` | `manage` | List indexed bundles |
+| `POST` | `/v1/discover` | `manage` | Scan directory root for bundles |
 | `GET` | `/v1/hygiene` | `read` | Run store hygiene check |
 | `GET` | `/v1/events` | `read` | Scoped activity stream with `store_id`, `runtime_generation`, `policy_revision` (strips raw `fact_text` & `embedding_b64`) |
 | `POST` | `/v1/memory/{memory_id}/promote` | `promote` | Lifecycle state transition (`HOT` -> `READY` -> `PROMOTED` -> `ARCHIVED`) |
@@ -222,9 +306,9 @@ Every route on the daemon is registered in `DAEMON_ROUTE_INVENTORY` (`src/hotmem
 | `GET` | `/v1/promotion/candidates` | `read` | List promotion candidates in caller scope |
 | `GET` | `/v1/promotion/states` | `read` | Return promotion state machine model |
 | `GET` | `/v1/promotion/by-state` | `read` | List memories by promotion state in caller scope |
-| `POST` | `/v1/vector-index/rebuild` | `write` | Rebuild derived vector index |
+| `POST` | `/v1/vector-index/rebuild` | `manage` | Rebuild derived vector index |
 | `GET` | `/v1/vector-index/status` | `read` | Derived vector index status |
-| `DELETE` | `/v1/vector-index` | `write` | Clear derived vector index |
+| `DELETE` | `/v1/vector-index` | `manage` | Clear derived vector index |
 | `POST` | `/v1/policy/revoke` | `manage` | Immediately revoke a caller credential and/or share approval |
 | `POST` | `/v1/policy/reload` | `manage` | Reload the daemon policy file without restart |
 
@@ -258,14 +342,14 @@ from that decision, with its evidence and permissions intact.
 
 This is the experience HotMem is being built to deliver: a working brain that
 belongs to its owner and can travel between compatible tools. **JSONL is the
-memory cassette. HotMem is the recorder and player. LSD is the detachable
+memory cassette. HotMem is the recorder and player. The management UI is the detachable
 interface that keeps the recorder in view.**
 
 For a developer, the job is concrete. Keep memory durable. Give each client the
 right view. Make the service survive a disconnected agent, a closed window, and
 a restart. Then show two people and their agents continuing useful work.
 
-The sections below preserve the original v0.2.7 design narrative for the shared daemon, memory cassette, and LSD management surface (#112). The runbook above is the implemented operator contract.
+The sections below preserve the original v0.2.7 design narrative for the shared daemon, memory cassette, and management surface (#112). The runbook above is the implemented operator contract.
 
 ## The cassette: knowledge you can carry
 
@@ -337,7 +421,7 @@ A CLI command, an MCP call, and an action in the management window reach the
 same memory operations under the same rules.
 
 ```text
-agents / MCP relay     CLI / SDK     management UI / detachable LSD
+agents / MCP relay     CLI / SDK     management UI / detachable view
            \              |                     /
                  configured daemon endpoint
                             |
@@ -408,7 +492,7 @@ and whether the handoff is moving. The default management view should answer
 those questions directly: service health, cassette/store identity, client
 permissions, pending privileged actions, and recent authorised activity.
 
-LSD carries that view into a detachable player. Keep it beside the incident
+The detachable management UI carries that view into a detachable player. Keep it beside the incident
 channel, open the relevant stream, and return to full management when needed.
 Both views use the daemon. Closing either window leaves the recording and
 other clients running.
@@ -559,8 +643,10 @@ not evidence from running Flats.
 
 ## Implementation map
 
-HotMem is a formal KnowGuard product; KnowB is a shadow brand and no required
-runtime service. The [Vision and Canon](vision-and-canon.md) defines the enduring
+HotMem is a formal KnowGuard product. Daemonite is its planned desktop console;
+HotMem owns its interface, theme, tray integration, daemon/store operations
+and authorization. The approved [desktop direction](daemonite-desktop.md) defines
+the v0.3.0 shell and packaging baseline. The [Vision and Canon](vision-and-canon.md) defines the enduring
 product commitments. [#112](https://github.com/KnowGuard-AI/HotMem/issues/112)
 holds this guide's v0.2.7 daemon/relay direction and implementation evidence.
 Grok remains excluded from the integration/showcase programme.
