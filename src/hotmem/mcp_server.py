@@ -331,12 +331,12 @@ def _build_tool_list() -> list[Tool]:
         ),
         Tool(
             name="snapshot",
-            description="Export all memories to a JSONL swap file.",
+            description=("Export memories to a verified Snapshot v2 directory or JSONL/JSONL.GZ."),
             inputSchema=_TOOL_SCHEMAS["snapshot"],
         ),
         Tool(
             name="hydrate",
-            description="Load memories from a JSONL swap file into HotMem.",
+            description="Restore a verified Snapshot v2 directory or JSONL/JSONL.GZ into HotMem.",
             inputSchema=_TOOL_SCHEMAS["hydrate"],
         ),
         Tool(
@@ -532,8 +532,9 @@ def create_relay_server(
 
             if name == "list_memories":
                 identifier, order, limit = _parse_list_memories_arguments(arguments)
-                memories = await owned_client.list(identifier, order=order, limit=limit)
-                return _ok({"memories": memories, "count": len(memories)})
+                return _ok(
+                    await owned_client.list_with_disclosure(identifier, order=order, limit=limit)
+                )
 
             if name == "memory_health":
                 res = await owned_client.health()
@@ -816,21 +817,37 @@ def _handle_add_memory(state: _ServerState, arguments: dict[str, Any]) -> CallTo
 
 
 def _parse_list_memories_arguments(arguments: dict[str, Any]) -> tuple[str, str, int]:
-    identifier = str(arguments["identifier"])
-    order = str(arguments.get("order", "asc"))
-    if order not in {"asc", "desc"}:
+    identifier = arguments.get("identifier")
+    if not isinstance(identifier, str) or not identifier:
+        raise ValueError("identifier must be a non-empty string")
+    order = arguments.get("order", "asc")
+    if not isinstance(order, str) or order not in {"asc", "desc"}:
         raise ValueError("order must be 'asc' or 'desc'")
-    limit = int(arguments.get("limit", 100))
-    if not 1 <= limit <= 1000:
-        raise ValueError("limit must be between 1 and 1000")
+    limit = arguments.get("limit", 100)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+        raise ValueError("limit must be an integer between 1 and 1000")
     return identifier, order, limit
 
 
 def _handle_list_memories(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
-    """List exact-identifier memories in deterministic chronological/insertion order."""
+    """List exact-identifier memories with the embedded namespace applied when configured."""
     identifier, order, limit = _parse_list_memories_arguments(arguments)
-    memories = state.db.list_by_identifier(identifier, order=order, limit=limit)
-    return _ok({"memories": memories, "count": len(memories)})
+    namespace = getattr(state, "namespace", "") or ""
+    row_filter = (lambda row: row.get("namespace") == namespace) if namespace else None
+    with Timer() as t:
+        memories = state.db.list_by_identifier(
+            identifier,
+            order=order,
+            limit=limit,
+            row_filter=row_filter,
+        )
+    return _ok(
+        {
+            "memories": memories,
+            "count": len(memories),
+            "trace_ms": round(t.ms, 2),
+        }
+    )
 
 
 def _handle_search_memories(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:

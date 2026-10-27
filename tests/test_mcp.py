@@ -353,8 +353,53 @@ def test_list_memories_exact_identifier_order_and_validation(state: _ServerState
         _handle_list_memories(state, {"identifier": "tasks/current", "order": "newest"})
     with pytest.raises(ValueError, match="limit"):
         _handle_list_memories(state, {"identifier": "tasks/current", "limit": 0})
-    with pytest.raises(KeyError):
+    with pytest.raises(ValueError, match="identifier"):
         _handle_list_memories(state, {})
+
+
+def test_list_memories_embedded_namespace_and_relay_disclosure(state: _ServerState):
+    _handle_add_memory(
+        state,
+        {"identifier": "shared/name", "fact": "namespace A", "namespace": "tenant-a"},
+    )
+    _handle_add_memory(
+        state,
+        {"identifier": "shared/name", "fact": "namespace B", "namespace": "tenant-b"},
+    )
+    state.namespace = "tenant-a"
+    payload = _text(_handle_list_memories(state, {"identifier": "shared/name"}))
+    assert payload["count"] == 1
+    assert payload["memories"][0]["fact_text"] == "namespace A"
+
+    class _RelayListClient:
+        async def list_with_disclosure(self, identifier, *, order, limit):
+            assert identifier == "tasks/current"
+            assert order == "desc"
+            assert limit == 1
+            return {
+                "memories": [{"id": "m1", "identifier": identifier}],
+                "count": 1,
+                "disclosure": {"omitted_count": 1, "redacted_count": 0},
+                "trace_ms": 1.5,
+            }
+
+    from mcp.types import CallToolRequest, CallToolRequestParams
+
+    from hotmem.mcp_server import create_relay_server
+
+    relay, _client = create_relay_server(client=_RelayListClient())
+    req = CallToolRequest(
+        method="tools/call",
+        params=CallToolRequestParams(
+            name="list_memories",
+            arguments={"identifier": "tasks/current", "order": "desc", "limit": 1},
+        ),
+    )
+    response = asyncio.run(relay.request_handlers[CallToolRequest](req))
+    assert not response.root.isError
+    relay_payload = _text(response.root)
+    assert relay_payload["disclosure"]["omitted_count"] == 1
+    assert relay_payload["trace_ms"] == 1.5
 
 
 def test_search_memories(state: _ServerState):

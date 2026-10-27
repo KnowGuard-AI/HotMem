@@ -136,6 +136,10 @@ def test_mcp_list_memory_argument_shape_locked(tmp_path):
     assert props["identifier"] == {"type": "string"}
     assert props["order"] == {"type": "string", "enum": ["asc", "desc"]}
     assert props["limit"] == {"type": "integer", "minimum": 1, "maximum": 1000}
+    assert "Snapshot v2" in tools["snapshot"]["description"]
+    assert "JSONL/JSONL.GZ" in tools["snapshot"]["description"]
+    assert "Snapshot v2" in tools["hydrate"]["description"]
+    assert "JSONL/JSONL.GZ" in tools["hydrate"]["description"]
 
 
 def test_mcp_handoff_prepare_argument_shape_locked(tmp_path):
@@ -208,7 +212,7 @@ def test_mcp_list_result_shape_locked(tmp_path):
     try:
         _handle_add_memory(st, {"identifier": "tasks/current", "fact": "pending"})
         payload = _text(_handle_list_memories(st, {"identifier": "tasks/current"}))
-        assert set(payload) == {"memories", "count"}
+        assert set(payload) == {"memories", "count", "trace_ms"}
         assert payload["count"] == 1
         row = payload["memories"][0]
         assert row["identifier"] == "tasks/current"
