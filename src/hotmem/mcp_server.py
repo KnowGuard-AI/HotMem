@@ -82,6 +82,15 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "required": ["query"],
     },
+    "list_memories": {
+        "type": "object",
+        "properties": {
+            "identifier": {"type": "string"},
+            "order": {"type": "string", "enum": ["asc", "desc"]},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+        },
+        "required": ["identifier"],
+    },
     "memory_health": {
         "type": "object",
         "properties": {},
@@ -209,6 +218,14 @@ def create_server(
                 inputSchema=_TOOL_SCHEMAS["search_memories"],
             ),
             Tool(
+                name="list_memories",
+                description=(
+                    "List memories for an exact identifier in deterministic chronological "
+                    "order without semantic ranking."
+                ),
+                inputSchema=_TOOL_SCHEMAS["list_memories"],
+            ),
+            Tool(
                 name="memory_health",
                 description="Return HotMem status: memory count, uptime, and database path.",
                 inputSchema=_TOOL_SCHEMAS["memory_health"],
@@ -266,6 +283,8 @@ def create_server(
                 return _handle_add_memory(active_state, arguments)
             if name == "search_memories":
                 return _handle_search_memories(active_state, arguments)
+            if name == "list_memories":
+                return _handle_list_memories(active_state, arguments)
             if name == "memory_health":
                 return _handle_memory_health(active_state, arguments)
             if name == "snapshot":
@@ -361,6 +380,14 @@ def _build_tool_list() -> list[Tool]:
             name="search_memories",
             description="Search HotMem and return ranked, LLM-ready message objects.",
             inputSchema=_TOOL_SCHEMAS["search_memories"],
+        ),
+        Tool(
+            name="list_memories",
+            description=(
+                "List memories for an exact identifier in deterministic chronological "
+                "order without semantic ranking."
+            ),
+            inputSchema=_TOOL_SCHEMAS["list_memories"],
         ),
         Tool(
             name="memory_health",
@@ -567,6 +594,11 @@ def create_relay_server(
                 resp = await owned_client._client.post("/v1/search", json=payload)
                 resp.raise_for_status()
                 return _ok(resp.json())
+
+            if name == "list_memories":
+                identifier, order, limit = _parse_list_memories_arguments(arguments)
+                memories = await owned_client.list(identifier, order=order, limit=limit)
+                return _ok({"memories": memories, "count": len(memories)})
 
             if name == "memory_health":
                 res = await owned_client.health()
@@ -846,6 +878,24 @@ def _handle_add_memory(state: _ServerState, arguments: dict[str, Any]) -> CallTo
         payload["deduplicated"] = True
     _trace.info("tool", "added memory", detail={"memory_id": memory_id})
     return _ok(payload)
+
+
+def _parse_list_memories_arguments(arguments: dict[str, Any]) -> tuple[str, str, int]:
+    identifier = str(arguments["identifier"])
+    order = str(arguments.get("order", "asc"))
+    if order not in {"asc", "desc"}:
+        raise ValueError("order must be 'asc' or 'desc'")
+    limit = int(arguments.get("limit", 100))
+    if not 1 <= limit <= 1000:
+        raise ValueError("limit must be between 1 and 1000")
+    return identifier, order, limit
+
+
+def _handle_list_memories(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
+    """List exact-identifier memories in deterministic chronological/insertion order."""
+    identifier, order, limit = _parse_list_memories_arguments(arguments)
+    memories = state.db.list_by_identifier(identifier, order=order, limit=limit)
+    return _ok({"memories": memories, "count": len(memories)})
 
 
 def _handle_search_memories(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:

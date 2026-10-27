@@ -15,6 +15,7 @@ from hotmem.db import MemoryDB  # noqa: E402
 from hotmem.mcp_server import (  # noqa: E402
     _handle_add_memory,
     _handle_hydrate,
+    _handle_list_memories,
     _handle_memory_health,
     _handle_search_memories,
     _handle_snapshot,
@@ -267,6 +268,24 @@ def test_mcp_add_memory_forwards_metadata_tags_and_context(tmp_path: Path):
                 assert not res.root.isError, res.root.content[0].text
                 mid = _text(res.root)["memory_id"]
 
+                list_req = CallToolRequest(
+                    method="tools/call",
+                    params=CallToolRequestParams(
+                        name="list_memories",
+                        arguments={
+                            "identifier": "ops/mcp-relay-111",
+                            "order": "desc",
+                            "limit": 1,
+                        },
+                    ),
+                )
+                list_res = await relay_srv.request_handlers[CallToolRequest](list_req)
+                assert not list_res.root.isError, list_res.root.content[0].text
+                listed = _text(list_res.root)
+                assert listed["count"] == 1
+                assert listed["memories"][0]["id"] == mid
+                assert listed["memories"][0]["provenance"]["session_id"] == "sess-relay-1"
+
                 # Conflicting session_id in tool call vs relay startup session_id fails clearly
                 conflict_req = CallToolRequest(
                     method="tools/call",
@@ -310,6 +329,32 @@ def test_mcp_add_memory_forwards_metadata_tags_and_context(tmp_path: Path):
 def test_add_memory_missing_required_argument_errors(state: _ServerState):
     with pytest.raises(KeyError):
         _handle_add_memory(state, {"identifier": "v"})
+
+
+def test_list_memories_exact_identifier_order_and_validation(state: _ServerState):
+    for identifier, fact in (
+        ("tasks/current", "pending"),
+        ("tasks/other", "unrelated"),
+        ("tasks/current", "completed"),
+    ):
+        _handle_add_memory(state, {"identifier": identifier, "fact": fact})
+
+    payload = _text(
+        _handle_list_memories(
+            state,
+            {"identifier": "tasks/current", "order": "desc", "limit": 1},
+        )
+    )
+    assert payload["count"] == 1
+    assert [row["fact_text"] for row in payload["memories"]] == ["completed"]
+    assert all(row["identifier"] == "tasks/current" for row in payload["memories"])
+
+    with pytest.raises(ValueError, match="order"):
+        _handle_list_memories(state, {"identifier": "tasks/current", "order": "newest"})
+    with pytest.raises(ValueError, match="limit"):
+        _handle_list_memories(state, {"identifier": "tasks/current", "limit": 0})
+    with pytest.raises(KeyError):
+        _handle_list_memories(state, {})
 
 
 def test_search_memories(state: _ServerState):
@@ -403,6 +448,7 @@ def test_list_tools_wiring():
     assert names == {
         "add_memory",
         "search_memories",
+        "list_memories",
         "memory_health",
         "snapshot",
         "hydrate",

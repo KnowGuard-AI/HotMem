@@ -114,6 +114,19 @@ Content-Type: application/json
 
 Returns ranked `memories` (LLM-ready message objects) with `count` and `trace_ms`.
 
+### Exact-identifier recall: `GET /v1/memories`
+
+```http
+GET /v1/memories?identifier=tasks%2Fcurrent&order=desc&limit=1
+```
+
+Returns `memories` and `count` without semantic ranking. Results are ordered by
+`created_at`, then by insertion order for records with the same timestamp;
+`order` is `asc` or `desc` (default `asc`) and `limit` is clamped to `1..1000`.
+The same exact-identifier operation is available to MCP hosts as
+`list_memories(identifier, order?, limit?)` in embedded and daemon-relay modes.
+All normal caller namespace/share and disclosure checks apply.
+
 ## 6. Hydrate
 
 ```http

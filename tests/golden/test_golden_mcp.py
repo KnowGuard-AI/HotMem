@@ -28,6 +28,7 @@ from .conftest import mask  # noqa: E402
 LOCKED_TOOLS = {
     "add_memory",
     "search_memories",
+    "list_memories",
     "memory_health",
     "snapshot",
     "hydrate",
@@ -41,6 +42,7 @@ LOCKED_TOOLS = {
 LOCKED_REQUIRED = {
     "add_memory": ["identifier", "fact"],
     "search_memories": ["query"],
+    "list_memories": ["identifier"],
     "memory_health": [],
     "snapshot": [],
     "hydrate": [],
@@ -127,6 +129,15 @@ def test_mcp_search_memory_argument_shape_locked(tmp_path):
     assert props["max_chars"] == {"type": "integer", "minimum": 1}
 
 
+def test_mcp_list_memory_argument_shape_locked(tmp_path):
+    tools = _tools(tmp_path / "m.sqlite")
+    props = tools["list_memories"]["inputSchema"]["properties"]
+    assert set(props) == {"identifier", "order", "limit"}
+    assert props["identifier"] == {"type": "string"}
+    assert props["order"] == {"type": "string", "enum": ["asc", "desc"]}
+    assert props["limit"] == {"type": "integer", "minimum": 1, "maximum": 1000}
+
+
 def test_mcp_handoff_prepare_argument_shape_locked(tmp_path):
     """#101: consent is a REQUIRED argument — capture is never implicit."""
     tools = _tools(tmp_path / "m.sqlite")
@@ -186,6 +197,31 @@ def test_mcp_search_result_shape_locked(tmp_path):
         msg = payload["memories"][0]
         assert set(msg) == {"role", "content", "memory_id", "identifier", "score", "created_at"}
         assert msg["role"] == "system"
+    finally:
+        st.db.close()
+
+
+def test_mcp_list_result_shape_locked(tmp_path):
+    from hotmem.mcp_server import _handle_add_memory, _handle_list_memories
+
+    st = _state(tmp_path)
+    try:
+        _handle_add_memory(st, {"identifier": "tasks/current", "fact": "pending"})
+        payload = _text(_handle_list_memories(st, {"identifier": "tasks/current"}))
+        assert set(payload) == {"memories", "count"}
+        assert payload["count"] == 1
+        row = payload["memories"][0]
+        assert row["identifier"] == "tasks/current"
+        assert row["fact_text"] == "pending"
+        assert set(row) == {
+            "id",
+            "identifier",
+            "fact_text",
+            "importance",
+            "metadata_json",
+            "source",
+            "created_at",
+        }
     finally:
         st.db.close()
 

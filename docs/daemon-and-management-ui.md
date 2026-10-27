@@ -251,6 +251,23 @@ rules** across retrieval (`search`, `list`, `get_memory`, `hydrate`,
   - Idempotency-key retries (`X-HotMem-Idempotency-Key`) include `tags`, `harness_id`, `source`, `namespace`, and `metadata` in the request fingerprint; changed context or tags under a repeated key fail with `409 idempotency_key_conflict`.
   - Activity (`GET /v1/events`) reports only genuine HotMem-observed, permission-scoped operations (`memory.created`, `memory.deduplicated`, `snapshot.imported`, `handoff.applied`, etc.) and reuses existing `ttl_seconds` and event retention mechanisms without client-presence polling.
 
+### Deterministic Exact-Identifier Recall (#125)
+
+Semantic `search_memories` ranks by relevance and does not define which record
+is current. When a caller needs the latest state for a known task list or other
+logical stream, use `list_memories` with its exact identifier instead:
+
+```json
+{"identifier": "tasks/current", "order": "desc", "limit": 1}
+```
+
+The additive MCP tool is available in embedded and daemon-relay modes and uses
+the same `GET /v1/memories` operation and authorization/disclosure boundary as
+the Python SDK. Results are ordered by `created_at` with insertion order as the
+tie-breaker for same-second records. `order` defaults to `asc`; `limit` defaults
+to 100 and accepts `1..1000`. Exact-identifier recall is deterministic, but a
+bounded result is not proof of complete history when the limit is reached.
+
 ## Store schema migration (v5 -> v6)
 
 The persistent SQLite schema moved from `user_version = 5` to `6`. The

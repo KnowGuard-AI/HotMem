@@ -1454,7 +1454,7 @@ class MemoryDB:
         row_filter: Any | None = None,
         row_transform: Any | None = None,
     ) -> list[dict[str, Any]]:
-        """Return memories for an identifier in created_at order (chronological).
+        """Return memories in created_at order with insertion-order tie-breaking.
 
         Excludes TTL-expired memories, consistent with search.
         """
@@ -1466,7 +1466,7 @@ class MemoryDB:
                     FROM memories
                     WHERE identifier = ?
                       AND {_ttl_live()}
-                    ORDER BY created_at {direction}
+                    ORDER BY created_at {direction}, rowid {direction}
                     LIMIT ?""",
                 (identifier, limit),
             ).fetchall()
@@ -1504,7 +1504,7 @@ class MemoryDB:
                 FROM memories
                 WHERE identifier = ?
                   AND {_ttl_live()}
-                ORDER BY created_at {direction}""",
+                ORDER BY created_at {direction}, rowid {direction}""",
             (identifier,),
         ).fetchall()
         filtered: list[dict[str, Any]] = []
