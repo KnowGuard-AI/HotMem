@@ -353,6 +353,53 @@ instruction-driven and is not performed implicitly by this adapter. Reader
 credentials and namespace/share/disclosure checks apply to every recall;
 self-reported tags, sessions, or harness labels grant no permissions.
 
+#### Codex CLI
+
+The qualified task-sync surface is Codex CLI `0.164.0` `exec` with command
+hooks and `update_plan`; live validation used `gpt-6.1-sol`. Interactive TUI,
+IDE, Desktop, Cloud, and app-server variants are not covered by that result.
+Headless exec did not expose `update_plan` by default in the validated
+configuration, so enable it explicitly with the public TOML setting
+`tools.update_plan.enabled=true`. The `exec --json` `todo_list` projection keeps
+only text plus a completed boolean and is not the persistence seam because it
+loses `in_progress`; `PostToolUse(update_plan)` retains the complete native
+plan and all three statuses.
+
+- `PostToolUse(update_plan)` stores each full plan snapshot, optional
+  explanation, source `tool_use_id`, and source `turn_id`. Fresh state replaces
+  the previous Codex plan for that task list, including item removal and plan
+  clearing. It does not replace Claude tasks if a task list is intentionally
+  shared between clients.
+- Codex plan items have no native task IDs or dependency fields. The adapter
+  generates `codex:*` item keys from exact step text and duplicate occurrence;
+  duplicate steps remain distinct and order is preserved. Renaming a step
+  creates a new surrogate identity. No dependency semantics are inferred.
+- Native `session_id`, `turn_id`, and per-write `model` are read from the hook.
+  The model becomes a canonical `model:*` tag, replacing a configured model tag
+  for that write; project/org labels remain explicit canonical tags.
+- `SessionStart` injects the reduced current plan and remaining work. As with
+  Claude, recalled context does not prove native plan storage was restored.
+
+Live qualification used reviewed session-flag configuration. The essential
+flags are shown below; use an absolute adapter path and explicit arguments when
+client hook environments are not deterministic:
+
+```sh
+codex exec \
+  --enable hooks \
+  -c 'tools.update_plan.enabled=true' \
+  -c 'hooks.SessionStart=[{hooks=[{type="command",command="hotmem task-sync --client codex --task-list-id incident-demo-17 --url http://127.0.0.1:8711 --token <task-writer-token> --namespace ops/shared --store-id <expected-store-id> --tag project:hotmem"}]}]' \
+  -c 'hooks.PostToolUse=[{matcher="update_plan",hooks=[{type="command",command="hotmem task-sync --client codex --task-list-id incident-demo-17 --url http://127.0.0.1:8711 --token <task-writer-token> --namespace ops/shared --store-id <expected-store-id> --tag project:hotmem"}]}]' \
+  'Create and update a synthetic plan'
+```
+
+The isolated live test also used `--ignore-user-config`, `--ignore-rules`,
+`--ephemeral`, read-only sandboxing, and `--dangerously-bypass-hook-trust` on a
+reviewed temporary configuration. The bypass is not a recommended default:
+normal installations should review and trust their hook sources rather than
+skipping trust enforcement. Project-file hook discovery was not qualified by
+the headless test; session flags above are the verified configuration.
+
 ## Store schema migration (v5 -> v6)
 
 The persistent SQLite schema moved from `user_version = 5` to `6`. The

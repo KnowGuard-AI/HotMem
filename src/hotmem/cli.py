@@ -322,6 +322,49 @@ def _task_sync_claude_event(payload: dict[str, Any], task_list_id: str) -> dict[
     return event
 
 
+def _task_sync_codex_event(payload: dict[str, Any], task_list_id: str) -> dict[str, Any]:
+    source_event_id = _task_sync_required_string(payload, "tool_use_id")
+    source_turn_id = _task_sync_required_string(payload, "turn_id")
+    tool_input = payload.get("tool_input")
+    if not isinstance(tool_input, dict) or not isinstance(tool_input.get("plan"), list):
+        raise ValueError("update_plan hook requires a plan array")
+    occurrences: dict[str, int] = {}
+    plan = []
+    for position, item in enumerate(tool_input["plan"]):
+        if not isinstance(item, dict):
+            raise ValueError("update_plan items must be objects")
+        step = _task_sync_required_string(item, "step")
+        status = _task_sync_required_string(item, "status")
+        if status not in {"pending", "in_progress", "completed"}:
+            raise ValueError(f"unsupported Codex plan status: {status}")
+        occurrence = occurrences.get(step, 0)
+        occurrences[step] = occurrence + 1
+        item_key = hashlib.sha256(f"{step}\0{occurrence}".encode()).hexdigest()[:24]
+        plan.append(
+            {
+                "task_id": f"codex:{item_key}",
+                "step": step,
+                "status": status,
+                "position": position,
+            }
+        )
+    event = {
+        "format": _TASK_SYNC_FORMAT,
+        "client": "codex",
+        "task_list_id": task_list_id,
+        "source_event_id": source_event_id,
+        "source_turn_id": source_turn_id,
+        "action": "replace_plan",
+        "plan": plan,
+    }
+    explanation = tool_input.get("explanation")
+    if explanation is not None:
+        if not isinstance(explanation, str):
+            raise ValueError("update_plan explanation must be a string")
+        event["explanation"] = explanation
+    return event
+
+
 def _task_sync_reduce(rows: list[dict[str, Any]], task_list_id: str) -> dict[str, Any]:
     if len(rows) >= _TASK_SYNC_HISTORY_LIMIT:
         raise ValueError(
@@ -337,8 +380,35 @@ def _task_sync_reduce(rows: list[dict[str, Any]], task_list_id: str) -> dict[str
             raise ValueError("task history contains an unsupported event format")
         if event.get("task_list_id") != task_list_id:
             raise ValueError("task history contains a mismatched task-list ID")
-        task_id = event.get("task_id")
         action = event.get("action")
+        if action == "replace_plan":
+            plan = event.get("plan")
+            if not isinstance(plan, list):
+                raise ValueError("task history contains an invalid plan event")
+            tasks = {
+                existing_id: task
+                for existing_id, task in tasks.items()
+                if task.get("client") != "codex"
+            }
+            for item in plan:
+                if (
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("task_id"), str)
+                    or not isinstance(item.get("step"), str)
+                    or not isinstance(item.get("status"), str)
+                    or not isinstance(item.get("position"), int)
+                ):
+                    raise ValueError("task history contains an invalid plan item")
+                tasks[item["task_id"]] = {
+                    "task_id": item["task_id"],
+                    "client": "codex",
+                    "subject": item["step"],
+                    "status": item["status"],
+                    "position": item["position"],
+                    "last_source_event_id": event.get("source_event_id"),
+                }
+            continue
+        task_id = event.get("task_id")
         if not isinstance(task_id, str):
             raise ValueError("task history contains an event without a task ID")
         if action == "create":
@@ -370,7 +440,10 @@ def _task_sync_reduce(rows: list[dict[str, Any]], task_list_id: str) -> dict[str
                     dict.fromkeys([*task.get(target_key, []), *changes[source_key]])
                 )
         task["last_source_event_id"] = event.get("source_event_id")
-    ordered = sorted(tasks.values(), key=lambda task: task["task_id"])
+    ordered = sorted(
+        tasks.values(),
+        key=lambda task: (task.get("client", ""), task.get("position", 0), task["task_id"]),
+    )
     return {
         "task_list_id": task_list_id,
         "complete": True,
@@ -412,11 +485,19 @@ def _task_sync_process(
         }
     if hook_event_name != "PostToolUse":
         return None
-    if client_name != "claude":
+    tool_name = payload.get("tool_name")
+    if client_name == "claude":
+        if tool_name not in {"TaskCreate", "TaskUpdate"}:
+            return None
+        event = _task_sync_claude_event(payload, task_list_id)
+        harness_id = "claude-code"
+    elif client_name == "codex":
+        if tool_name != "update_plan":
+            return None
+        event = _task_sync_codex_event(payload, task_list_id)
+        harness_id = "codex-cli"
+    else:
         raise ValueError(f"unsupported task-sync client: {client_name}")
-    if payload.get("tool_name") not in {"TaskCreate", "TaskUpdate"}:
-        return None
-    event = _task_sync_claude_event(payload, task_list_id)
     if event is None:
         return None
     session_id = _task_sync_required_string(payload, "session_id")
@@ -425,18 +506,23 @@ def _task_sync_process(
             (
                 _TASK_SYNC_FORMAT,
                 task_list_id,
-                "claude-code",
+                harness_id,
                 session_id,
                 event["source_event_id"],
             )
         ).encode("utf-8")
     ).hexdigest()
+    event_tags = list(tags)
+    model = payload.get("model")
+    if client_name == "codex" and isinstance(model, str) and model:
+        event_tags = [tag for tag in event_tags if not tag.startswith("model:")]
+        event_tags.append(f"model:{model}")
     client.add(
         identifier,
         json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
-        source=source or "hook://claude-code/tasks",
-        tags=list(tags),
-        harness_id="claude-code",
+        source=source or f"hook://{harness_id}/tasks",
+        tags=event_tags,
+        harness_id=harness_id,
         session_id=session_id,
         idempotency_key=idempotency_key,
     )
@@ -569,7 +655,7 @@ def serve(
 
 
 @main.command("task-sync")
-@click.option("--client", "client_name", type=click.Choice(["claude"]), required=True)
+@click.option("--client", "client_name", type=click.Choice(["claude", "codex"]), required=True)
 @click.option("--task-list-id", required=True, envvar="HOTMEM_TASK_LIST_ID")
 @click.option("--url", required=True, envvar="HOTMEM_URL", help="Running HotMem daemon URL.")
 @click.option("--token", "daemon_token", default=None, envvar="HOTMEM_TOKEN")

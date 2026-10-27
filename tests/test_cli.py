@@ -791,3 +791,145 @@ def test_task_sync_real_daemon_retry_conflict_and_aba(tmp_path: Path):
         state = _task_sync_reduce(rows, "tech20/aba")
         assert state["tasks"][0]["status"] == "pending"
         assert state["remaining_task_ids"] == ["claude:sess-claude-tasks:1"]
+
+
+def _codex_plan_hook(event_id, plan, *, model="gpt-6.1-sol"):
+    return {
+        "session_id": "sess-codex-plan",
+        "turn_id": "turn-codex-plan",
+        "transcript_path": None,
+        "cwd": "/private/workspace",
+        "hook_event_name": "PostToolUse",
+        "model": model,
+        "tool_name": "update_plan",
+        "tool_use_id": event_id,
+        "tool_input": {"plan": plan},
+        "tool_response": "Plan updated",
+    }
+
+
+def test_task_sync_codex_plan_recall_identity_and_model_tags():
+    from hotmem.cli import _task_sync_reduce
+
+    client = _FakeTaskSyncClient()
+    runner = CliRunner()
+    args = [
+        "task-sync",
+        "--client",
+        "codex",
+        "--task-list-id",
+        "tech20/codex",
+        "--url",
+        "http://hotmem.test",
+        "--tag",
+        "project:hotmem",
+        "--tag",
+        "model:configured",
+    ]
+    initial = _codex_plan_hook(
+        "event-plan-1",
+        [
+            {"step": "Inspect", "status": "pending"},
+            {"step": "Record", "status": "pending"},
+            {"step": "Notify", "status": "pending"},
+        ],
+        model="gpt-test-a",
+    )
+    current = _codex_plan_hook(
+        "event-plan-2",
+        [
+            {"step": "Inspect", "status": "completed"},
+            {"step": "Record", "status": "in_progress"},
+            {"step": "Notify", "status": "pending"},
+        ],
+        model="gpt-test-b",
+    )
+    with mock.patch("hotmem.cli._make_daemon_client", return_value=client):
+        for payload in (initial, current):
+            result = runner.invoke(main, args, input=json.dumps(payload))
+            assert result.exit_code == 0, result.output
+        recalled = runner.invoke(
+            main,
+            args,
+            input=json.dumps({"hook_event_name": "SessionStart", "session_id": "fresh-codex"}),
+        )
+
+    assert recalled.exit_code == 0, recalled.output
+    assert len(client.add_calls) == 2
+    assert all(call[2]["harness_id"] == "codex-cli" for call in client.add_calls)
+    assert all(call[2]["source"] == "hook://codex-cli/tasks" for call in client.add_calls)
+    assert client.add_calls[0][2]["tags"] == ["project:hotmem", "model:gpt-test-a"]
+    assert client.add_calls[1][2]["tags"] == ["project:hotmem", "model:gpt-test-b"]
+    assert all("cwd" not in call[1] and "transcript" not in call[1] for call in client.add_calls)
+    state = _task_sync_reduce(client.rows, "tech20/codex")
+    assert [task["subject"] for task in state["tasks"]] == ["Inspect", "Record", "Notify"]
+    assert [task["status"] for task in state["tasks"]] == [
+        "completed",
+        "in_progress",
+        "pending",
+    ]
+    assert state["remaining_task_ids"] == [
+        state["tasks"][1]["task_id"],
+        state["tasks"][2]["task_id"],
+    ]
+    assert all("native_task_id" not in task for task in state["tasks"])
+    assert "fresh-codex" not in recalled.output
+
+
+def test_task_sync_codex_duplicate_steps_empty_plan_and_real_daemon_retry(tmp_path: Path):
+    from hotmem.cli import _task_sync_process, _task_sync_reduce
+
+    duplicate = _codex_plan_hook(
+        "event-duplicates",
+        [
+            {"step": "Repeat", "status": "pending"},
+            {"step": "Repeat", "status": "completed"},
+        ],
+    )
+    initial = _codex_plan_hook(
+        "event-initial",
+        [
+            {"step": "Inspect", "status": "pending"},
+            {"step": "Record", "status": "pending"},
+        ],
+    )
+    completed = _codex_plan_hook(
+        "event-completed",
+        [
+            {"step": "Inspect", "status": "completed"},
+            {"step": "Record", "status": "in_progress"},
+        ],
+    )
+    empty = _codex_plan_hook("event-empty", [])
+    with _sidecar(tmp_path / "codex-task-sync-mount") as (client, _):
+        _task_sync_process(client, "codex", "tech20/codex-retry", initial)
+        _task_sync_process(client, "codex", "tech20/codex-retry", completed)
+        _task_sync_process(client, "codex", "tech20/codex-retry", completed)
+        rows = client.list("hotmem/task-sync/tech20/codex-retry")
+        assert len(rows) == 2
+
+        initial_again = {**initial, "tool_use_id": "event-initial-new"}
+        _task_sync_process(client, "codex", "tech20/codex-retry", initial_again)
+        rows = client.list("hotmem/task-sync/tech20/codex-retry")
+        assert len(rows) == 3
+        state = _task_sync_reduce(rows, "tech20/codex-retry")
+        assert [task["status"] for task in state["tasks"]] == ["pending", "pending"]
+
+        _task_sync_process(client, "codex", "tech20/codex-retry", duplicate)
+        duplicate_state = _task_sync_reduce(
+            client.list("hotmem/task-sync/tech20/codex-retry"),
+            "tech20/codex-retry",
+        )
+        assert len({task["task_id"] for task in duplicate_state["tasks"]}) == 2
+        assert [task["status"] for task in duplicate_state["tasks"]] == [
+            "pending",
+            "completed",
+        ]
+
+        _task_sync_process(client, "codex", "tech20/codex-retry", empty)
+        final_state = _task_sync_reduce(
+            client.list("hotmem/task-sync/tech20/codex-retry"),
+            "tech20/codex-retry",
+        )
+        assert final_state["tasks"] == []
+        assert final_state["remaining_task_ids"] == []
