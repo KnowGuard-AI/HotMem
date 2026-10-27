@@ -263,10 +263,18 @@ logical stream, use `list_memories` with its exact identifier instead:
 
 The additive MCP tool is available in embedded and daemon-relay modes and uses
 the same `GET /v1/memories` operation and authorization/disclosure boundary as
-the Python SDK. Results are ordered by `created_at` with insertion order as the
-tie-breaker for same-second records. `order` defaults to `asc`; `limit` defaults
-to 100 and accepts `1..1000`. Exact-identifier recall is deterministic, but a
-bounded result is not proof of complete history when the limit is reached.
+the Python SDK. Embedded reads honor the configured server namespace. Relay
+results retain `memories`, `count`, `trace_ms`, and the runtime `disclosure`
+envelope; embedded results include `memories`, `count`, and `trace_ms`.
+
+Results are ordered by `created_at` with local insertion order as the tie-breaker
+for same-second records. That tie-breaker is intentionally local to the current
+store, not a portable sequence. Task-sync events therefore carry their own
+durable observation order for reconstruction across snapshot/restore. `order`
+defaults to `asc`; `limit` defaults to 100 and must be `1..1000` (invalid values
+are rejected). Exact-identifier recall is deterministic in one store, but a
+bounded result or `disclosure.omitted_count > 0` is not proof of a complete
+history and must not be treated as authoritative.
 
 ### Native Client Task Synchronization (#125)
 
@@ -291,13 +299,21 @@ guarantee automatic task creation.
   changes, and native `deleted` tombstones. Failed updates and unrelated tools
   are ignored. Arbitrary native task metadata and legacy `TodoWrite` are not
   captured by this adapter version.
-- `SessionStart` recalls the exact configured task list and injects its reduced
-  current state. A command hook is required for startup recall because MCP
-  servers are not yet initialized to serve `SessionStart` MCP hooks.
+- `SessionStart` recalls the exact configured task list and injects a bounded
+  reduced state. A command hook is required for startup recall because MCP
+  servers are not yet initialized to serve `SessionStart` MCP hooks. Task
+  subjects/descriptions are labeled as untrusted data; descriptions are omitted
+  from automatic context by default. Use `--include-task-descriptions` only
+  when bounded description context is acceptable.
 - Claude's `session_id` becomes per-write HotMem session provenance and its
-  `tool_use_id` becomes the source event ID. Logical task IDs are namespaced by
-  client, native session, and native task ID. Transcript paths, cwd, permission
-  mode, and arbitrary hook metadata are not persisted.
+  `tool_use_id` becomes the source event ID. Initial logical task IDs are
+  namespaced by client, native session, and native task ID. Transcript paths,
+  cwd, permission mode, and arbitrary hook metadata are not persisted.
+- To continue a task intentionally in a fresh Claude session, recreate only
+  remaining tasks with the injected `task_id` in TaskCreate metadata:
+  `{"hotmem_task_list_id": "<task-list-id>", "hotmem_task_id": "<task-id>"}`.
+  The adapter validates and uses those namespaced continuation fields; no
+  arbitrary task metadata is retained. Do not recreate completed tasks.
 - Native task mutations do not expose the active model to this hook. Omit
   `model:*` unless another reliable per-write source exists; supply project/org
   labels only as explicit canonical `--tag` values. Empty tags are valid.
@@ -310,7 +326,6 @@ not deterministic, and keep credentials out of committed files):
   "env": {
     "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1",
     "HOTMEM_URL": "http://127.0.0.1:8711",
-    "HOTMEM_TOKEN": "<task-writer-token>",
     "HOTMEM_NAMESPACE": "ops/shared",
     "HOTMEM_STORE_ID": "<expected-store-id>",
     "HOTMEM_TASK_LIST_ID": "incident-demo-17"
@@ -326,32 +341,56 @@ not deterministic, and keep credentials out of committed files):
 }
 ```
 
+Set `HOTMEM_TOKEN` in the client process environment rather than storing the
+bearer token in shared repository settings. If a user-local settings file must
+contain credentials or a task list name, restrict its permissions (`0600`),
+never commit it, and rotate the synthetic/development token if exposed.
+
 The task-list ID is an explicit workstream key shared only by intentional
 continuation sessions. It is distinct from the native session ID; do not set a
 permanent `HOTMEM_SESSION_ID` across unrelated conversations. The adapter has
 no static session option and supplies each hook's native session per write, so
 it does not conflict with relay startup context bindings.
 
-Each event uses identifier `hotmem/task-sync/<task-list-id>` and an idempotency
-key derived from task-list ID, harness, native session, and native tool-use ID.
-An exact retry returns the original memory and writer attribution. A new native
-tool-use ID remains a new observation even when it repeats an earlier state, so
-A→B→A histories reconstruct correctly; altered content under a repeated key
-fails with the normal idempotency conflict.
+Each event uses identifier `hotmem/task-sync/<task-list-id>`, a durable
+`observed_at` ordering value, and an idempotency key derived from task-list ID,
+harness, native session, and native tool-use ID. An exact retry returns the
+original memory and writer attribution; because `observed_at` is regenerated,
+the adapter recognizes the expected idempotency fingerprint conflict by reading
+the existing event before suppressing it. A new native tool-use ID remains a
+new observation even when it repeats an earlier state, so A→B→A histories
+reconstruct correctly; altered content under a repeated key still fails.
 
-Recall processes at most 1000 ordered events. Reaching that bound, malformed
-history, or an update without its create causes recall to fail closed with a
-visible warning instead of claiming a complete current state. Native deletion
-is a task-event tombstone, not HotMem memory deletion or portable replay, and
-does not require #98.
+Recall reads the disclosure envelope and processes at most 1000 ordered events.
+Reaching that bound, policy omission (`omitted_count > 0`), malformed history,
+an update without its create, an oversized context, or an ambiguous native alias
+causes recall to fail closed with a visible warning instead of claiming a
+complete current state. Context is capped at 8000 characters; larger task lists
+must use authorized MCP `list_memories` detail instead. Native deletion is a
+task-event tombstone, not HotMem memory deletion or portable replay, and does
+not require #98.
+
+Task events carry their observation order in the record, so snapshot/handoff
+round trips preserve task state even though the generic list's `rowid`
+tie-breaker is local. The observed timestamp is generated on the hook host; an
+extreme clock rollback remains an operational assumption.
+
+Hook failures are surfaced and are not silently acknowledged, but HotMem does
+not provide a durable hook outbox. Replaying the same native event is safe via
+idempotency. Independent adapters must not concurrently mutate one task-list ID;
+use separate task-list IDs for unrelated workstreams. Long task histories are
+not compacted by this adapter, so the 1000-event completeness bound is an
+operational limit.
 
 **Recall is not native task-store restoration.** A fresh Claude session can
 read current and remaining work from injected HotMem context and through
 `list_memories`, but its native `TaskList` remains empty unless the user/agent
-recreates tasks through supported native tools. Such recreation is
-instruction-driven and is not performed implicitly by this adapter. Reader
+recreates remaining tasks with the continuation metadata described above. Such
+recreation is instruction-driven and is not performed implicitly. Reader
 credentials and namespace/share/disclosure checks apply to every recall;
-self-reported tags, sessions, or harness labels grant no permissions.
+self-reported tags, sessions, or harness labels grant no permissions. Task text
+is persisted in HotMem and is subject to that store's retention and disclosure
+policy; it can contain sensitive data even after native task deletion.
 
 #### Codex CLI
 
@@ -374,24 +413,39 @@ plan and all three statuses.
   generates `codex:*` item keys from exact step text and duplicate occurrence;
   duplicate steps remain distinct and order is preserved. Renaming a step
   creates a new surrogate identity. No dependency semantics are inferred.
-- Native `session_id`, `turn_id`, and per-write `model` are read from the hook.
-  The model becomes a canonical `model:*` tag, replacing a configured model tag
-  for that write; project/org labels remain explicit canonical tags.
-- `SessionStart` injects the reduced current plan and remaining work. As with
-  Claude, recalled context does not prove native plan storage was restored.
+- Only an accepted `Plan updated` response is persisted; failed plan responses
+  are ignored. Native `session_id`, `turn_id`, and per-write `model` are read
+  from the hook. The model becomes a canonical `model:*` tag, replacing or
+  removing a configured model tag for that write; project/org labels remain
+  explicit canonical tags.
+- `SessionStart` injects the bounded reduced current plan and remaining work as
+  untrusted data. Descriptions are omitted by default and the same 8000-character
+  context limit applies. As with Claude, recalled context does not prove native
+  plan storage was restored.
 
 Live qualification used reviewed session-flag configuration. The essential
 flags are shown below; use an absolute adapter path and explicit arguments when
-client hook environments are not deterministic:
+client hook environments are not deterministic. Pass the bearer token through
+the protected client/process environment (`HOTMEM_TOKEN`), never in the `-c`
+argv shown in process listings and logs. Set a short timeout so an unavailable
+daemon does not retain the default 600-second hook budget:
 
 ```sh
+# Set in the client's protected environment, not in a committed file or argv.
+export HOTMEM_TOKEN='<task-writer-token>'
+
 codex exec \
   --enable hooks \
   -c 'tools.update_plan.enabled=true' \
-  -c 'hooks.SessionStart=[{hooks=[{type="command",command="hotmem task-sync --client codex --task-list-id incident-demo-17 --url http://127.0.0.1:8711 --token <task-writer-token> --namespace ops/shared --store-id <expected-store-id> --tag project:hotmem"}]}]' \
-  -c 'hooks.PostToolUse=[{matcher="update_plan",hooks=[{type="command",command="hotmem task-sync --client codex --task-list-id incident-demo-17 --url http://127.0.0.1:8711 --token <task-writer-token> --namespace ops/shared --store-id <expected-store-id> --tag project:hotmem"}]}]' \
+  -c 'hooks.SessionStart=[{hooks=[{type="command",command="hotmem task-sync --client codex --task-list-id incident-demo-17 --url http://127.0.0.1:8711 --namespace ops/shared --store-id <expected-store-id> --tag project:hotmem",timeout=15}]}]' \
+  -c 'hooks.PostToolUse=[{matcher="update_plan",hooks=[{type="command",command="hotmem task-sync --client codex --task-list-id incident-demo-17 --url http://127.0.0.1:8711 --namespace ops/shared --store-id <expected-store-id> --tag project:hotmem",timeout=15}]}]' \
   'Create and update a synthetic plan'
 ```
+
+The adapter caps injected task context at 8000 characters. Configure the
+client's hook `additionalContextLimit` below its documented spill threshold if
+the host writes oversized output to disk; task text is data, not instructions,
+and should not contain secrets.
 
 The isolated live test also used `--ignore-user-config`, `--ignore-rules`,
 `--ephemeral`, read-only sandboxing, and `--dangerously-bypass-hook-trust` on a

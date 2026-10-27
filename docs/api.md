@@ -120,12 +120,19 @@ Returns ranked `memories` (LLM-ready message objects) with `count` and `trace_ms
 GET /v1/memories?identifier=tasks%2Fcurrent&order=desc&limit=1
 ```
 
-Returns `memories` and `count` without semantic ranking. Results are ordered by
-`created_at`, then by insertion order for records with the same timestamp;
-`order` is `asc` or `desc` (default `asc`) and `limit` is clamped to `1..1000`.
+Returns `memories`, `count`, and `trace_ms` without semantic ranking. When a
+policy is active it also returns the disclosure envelope, including
+`omitted_count`, `redacted_count`, reasons, and patterns. Results are ordered by
+`created_at`, then by local insertion order for records with the same timestamp.
+That insertion tie-breaker is not a portable sequence. `order` is `asc` or
+`desc` (default `asc`); `limit` must be `1..1000` (default `100`) and invalid
+values return `400`, not a clamped success. A caller must not treat visible rows
+as complete when `disclosure.omitted_count > 0` or when the limit is reached.
+
 The same exact-identifier operation is available to MCP hosts as
 `list_memories(identifier, order?, limit?)` in embedded and daemon-relay modes.
-All normal caller namespace/share and disclosure checks apply.
+MCP preserves the relay disclosure envelope and applies the configured embedded
+namespace. All normal caller namespace/share and disclosure checks apply.
 
 ## 6. Hydrate
 
