@@ -191,16 +191,11 @@ def hydrate_handoff(
         }
 
         def insert_records(records: list[dict[str, Any]]) -> None:
-            """Dedupe by (namespace, content_hash), resolve embeddings, insert, no commit."""
+            """Dedupe by logical identity, resolve embeddings, insert, no commit."""
             if not records:
                 return
-            pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in records]
-            existing = db.batch_existing_namespace_hashes(pairs)
-            todo = [
-                r
-                for r in records
-                if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
-            ]
+            existing = db.batch_existing_record_identities(records)
+            todo = [r for r in records if db.record_identity_key(r) not in existing]
             counters["skipped"] += len(records) - len(todo)
 
             rows = []

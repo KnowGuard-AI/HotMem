@@ -113,7 +113,12 @@ def compute_file_content_hash(
     )
 
 
-def legacy_file_content_hashes(identifier: str, ref: FileRef) -> tuple[str, ...]:
+def legacy_file_content_hashes(
+    identifier: str,
+    ref: FileRef,
+    *,
+    base_dir: str | Path | None = None,
+) -> tuple[str, ...]:
     """Hashes written by pre-#100 file-backed writers, newest first.
 
     The legacy formula included the raw (unnormalized) URI and the optional
@@ -121,10 +126,22 @@ def legacy_file_content_hashes(identifier: str, ref: FileRef) -> tuple[str, ...]
     whether a reference is already stored; new rows always use
     :func:`compute_file_content_hash`.
     """
-    base = f"{identifier}:{ref.source_uri}:{ref.byte_offset}:{ref.byte_length}"
-    hashes = [hashlib.sha256(f"{base}:{ref.source_checksum or ''}".encode()).hexdigest()]
-    if ref.source_checksum:
-        hashes.append(hashlib.sha256(f"{base}:".encode()).hexdigest())
+    uris = [ref.source_uri, normalize_source_uri(ref.source_uri)]
+    if base_dir is not None:
+        uris.append(normalize_source_uri(ref.source_uri, base_dir=base_dir))
+    hashes: list[str] = []
+    seen: set[str] = set()
+    for uri in uris:
+        if not uri:
+            continue
+        base = f"{identifier}:{uri}:{ref.byte_offset}:{ref.byte_length}"
+        candidates = [hashlib.sha256(f"{base}:{ref.source_checksum or ''}".encode()).hexdigest()]
+        if ref.source_checksum:
+            candidates.append(hashlib.sha256(f"{base}:".encode()).hexdigest())
+        for h in candidates:
+            if h not in seen:
+                seen.add(h)
+                hashes.append(h)
     return tuple(hashes)
 
 
@@ -147,15 +164,26 @@ def find_existing_file_record(
     base_dir: str | Path | None = None,
 ) -> dict[str, Any] | None:
     """Return an existing row for this reference, including legacy hashes."""
+    seen: set[str] = set()
     for content_hash in (
         compute_file_content_hash(identifier, ref, base_dir=base_dir),
         compute_file_content_hash(identifier, ref),
-        *legacy_file_content_hashes(identifier, ref),
+        *legacy_file_content_hashes(identifier, ref, base_dir=base_dir),
     ):
+        if not content_hash or content_hash in seen:
+            continue
+        seen.add(content_hash)
         row = db.find_by_namespace_and_hash(namespace, content_hash)
         if row is not None:
             return row
-    return None
+    return db.find_file_record_by_reference(
+        namespace,
+        identifier,
+        ref.source_uri,
+        ref.byte_offset,
+        ref.byte_length,
+        base_dir=base_dir,
+    )
 
 
 def _resolve_uri(source_uri: str, base_dir: str | None) -> str:

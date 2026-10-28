@@ -34,7 +34,6 @@ Extension: add strict validation mode, remote bundles, or bundle indexing here.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field, replace
@@ -288,43 +287,25 @@ def parse_bundle(
 def _skip_legacy_attachment_duplicates(
     db: MemoryDB,
     records: list[MemoryRecord],
-    bundle_dir: Path,
-    base_dir: str | Path | None,
 ) -> int:
-    """Drop bundle attachments already stored under the legacy byte hash.
+    """Drop bundle records already stored in the target namespace (#100).
 
-    Before #100 bundle attachments used ``SHA-256(file bytes)`` as their
-    identity. Re-reading the same bundle after upgrading must remain
-    idempotent, so a row with that legacy hash in the same namespace is
-    treated as the same memory. The legacy digest is only a compatibility
-    alias; new rows use the shared file-reference identity.
+    Uses :meth:`MemoryDB.batch_existing_record_identities` so an attachment
+    stored under a pre-#100 byte hash is matched by its scoped reference tuple
+    ``(namespace, identifier, normalized_source_uri, byte_offset,
+    byte_length)`` without re-reading attachment files or falsely skipping
+    distinct attachments that share the same bytes.
     """
-    root = Path(base_dir) if base_dir is not None else bundle_dir
-    legacy_pairs: list[tuple[str, str]] = []
-    legacy_by_index: dict[int, tuple[str, str]] = {}
-    for index, record in enumerate(records):
-        if record.memory_type != "file" or not record.source_uri:
-            continue
-        path = Path(record.source_uri)
-        if not path.is_absolute():
-            path = root / path
-        try:
-            legacy_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            continue
-        pair = (record.namespace or "", legacy_hash)
-        legacy_pairs.append(pair)
-        legacy_by_index[index] = pair
-    if not legacy_pairs:
+    if not records:
         return 0
-    existing = db.batch_existing_namespace_hashes(legacy_pairs)
+    existing = db.batch_existing_record_identities(records)
     if not existing:
         return 0
     removed = 0
     kept: list[MemoryRecord] = []
-    for index, record in enumerate(records):
-        pair = legacy_by_index.get(index)
-        if pair is not None and pair in existing:
+    for record in records:
+        key = db.record_identity_key(record)
+        if key[1] and key in existing:
             removed += 1
             continue
         kept.append(record)
@@ -340,12 +321,10 @@ def read_bundle(
     embedder: Embedder | None = None,
     target_namespace: str | None = None,
 ) -> BundleResult:
-    """Read a loose local markdown bundle into HotMem.
+    """Parse ``bundle_dir`` and insert all records into ``db`` (idempotent).
 
-    Thin wrapper around ``parse_bundle()`` that inserts records via
-    ``db.insert_many_ignore()``. ``embedder`` owns the inline-record
-    embeddings (issue #78; ``None`` = the hash default). Returns a
-    ``BundleResult`` with loaded count, skipped dupes, and warnings.
+    Deduplicates via ``insert_many_ignore`` (by content_hash). Re-reading the
+    same bundle is a no-op (`loaded=0, skipped_dupes=N`).
     """
     bundle_dir = Path(bundle_dir)
     with Timer() as t:
@@ -355,7 +334,7 @@ def read_bundle(
                 r if getattr(r, "namespace", "") else replace(r, namespace=target_namespace)
                 for r in records
             ]
-        skipped = _skip_legacy_attachment_duplicates(db, records, bundle_dir, base_dir)
+        skipped = _skip_legacy_attachment_duplicates(db, records)
         loaded = db.insert_many_ignore(records)
         skipped += len(records) - loaded
         embedded = sum(1 for r in records if r.embedding)

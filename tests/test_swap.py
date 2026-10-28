@@ -639,3 +639,62 @@ def test_normalize_record_strips_whitespace_content_hash(tmp_db: MemoryDB, tmp_p
     assert result.loaded == 1
     row = tmp_db.all_rows()[0]
     assert row["content_hash"] == compute_content_hash("doc", "hello")
+
+
+def test_hydrate_file_record_deduplicates_across_legacy_and_canonical_hashes(
+    tmp_db: MemoryDB, tmp_path: Path
+):
+    """#100: hydration deduplicates file records across pre-#100 and canonical hashes."""
+    import hashlib
+
+    from hotmem.interchange.canonical import compute_file_reference_hash
+
+    legacy_hash = hashlib.sha256(b"dataset:data.csv:0:5:deadbeef").hexdigest()
+    canonical_hash = compute_file_reference_hash("dataset", "data.csv", 0, 5)
+
+    swap = tmp_path / "file-cross-era.jsonl"
+    lines = [
+        json.dumps(
+            {
+                "id": "file-legacy",
+                "identifier": "dataset",
+                "memory_type": "file",
+                "source_uri": "data.csv",
+                "byte_offset": 0,
+                "byte_length": 5,
+                "source_format": "csv",
+                "source_checksum": "deadbeef",
+                "content_hash": legacy_hash,
+                "namespace": "ns-a",
+            }
+        ),
+        # Intra-batch twin with canonical hash and "./" URI spelling in same namespace.
+        json.dumps(
+            {
+                "id": "file-canonical-same-batch",
+                "identifier": "dataset",
+                "memory_type": "file",
+                "source_uri": "./data.csv",
+                "byte_offset": 0,
+                "byte_length": 5,
+                "source_format": "csv",
+                "content_hash": canonical_hash,
+                "namespace": "ns-a",
+            }
+        ),
+    ]
+    swap.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    first = hydrate(tmp_db, swap)
+    assert first.loaded == 1
+    assert first.skipped_dupes == 1
+    assert tmp_db.count() == 1
+    assert tmp_db.get_memory("file-legacy") is not None
+
+    # Second hydrate with only the canonical-hash record against the stored legacy row.
+    swap_canon = tmp_path / "file-canonical-only.jsonl"
+    swap_canon.write_text(lines[1] + "\n", encoding="utf-8")
+    second = hydrate(tmp_db, swap_canon)
+    assert second.loaded == 0
+    assert second.skipped_dupes == 1
+    assert tmp_db.count() == 1

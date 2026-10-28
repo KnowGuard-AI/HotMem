@@ -643,18 +643,22 @@ def test_bundle_attachment_twins_survive_in_distinct_namespaces(
 
 
 def test_bundle_attachment_legacy_byte_hash_is_recognized(tmp_db: MemoryDB, full_bundle: Path):
-    """A bundle attachment stored under the pre-#100 byte hash is not duplicated."""
+    """A bundle attachment stored under the pre-#100 byte hash is not duplicated,
+    while another attachment with identical bytes and a distinct reference is kept."""
     import hashlib
 
     from hotmem.db import MemoryRecord
 
     att = full_bundle / "attachments" / "invoice.csv"
+    twin_att = full_bundle / "attachments" / "invoice_copy.csv"
+    twin_att.write_bytes(att.read_bytes())
+
     legacy_hash = hashlib.sha256(att.read_bytes()).hexdigest()
     tmp_db.insert_many_ignore(
         [
             MemoryRecord(
                 id="legacy-attachment",
-                identifier=f"{full_bundle.name}:invoice.csv",
+                identifier="acme_q3:invoice.csv",
                 fact_text="",
                 embedding=b"",
                 content_hash=legacy_hash,
@@ -670,5 +674,8 @@ def test_bundle_attachment_legacy_byte_hash_is_recognized(tmp_db: MemoryDB, full
 
     result = read_bundle(tmp_db, full_bundle)
     assert result.skipped_dupes == 1
-    assert result.loaded == 6
-    assert tmp_db.count() == 7
+    assert result.loaded == 7
+    assert tmp_db.count() == 8
+    file_uris = {r["source_uri"] for r in tmp_db.all_rows() if r["memory_type"] == "file"}
+    assert "attachments/invoice.csv" in file_uris
+    assert "attachments/invoice_copy.csv" in file_uris

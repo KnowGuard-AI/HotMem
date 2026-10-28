@@ -194,16 +194,13 @@ def _flush_batch(
     Annotation-only changes on content-hash duplicates merge in-batch (#79):
     disjoint items combine, conflicts are retained — never last-write-wins.
     """
-    pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in pending]
-    existing = db.batch_existing_namespace_hashes(pairs)
-    todo = [
-        r for r in pending if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
-    ]
+    existing = db.batch_existing_record_identities(pending)
+    todo = [r for r in pending if db.record_identity_key(r) not in existing]
     counters["skipped"] += len(pending) - len(todo)
 
     merge_duplicate_annotations(
         db,
-        [r for r in pending if (str(r.get("namespace") or ""), r["content_hash"]) in existing],
+        [r for r in pending if db.record_identity_key(r) in existing],
         counters,
         # Per-batch autocommit path: no later commit exists to carry an
         # all-duplicate batch's merge (durability, #79 review).
@@ -312,11 +309,12 @@ def hydrate(
                         counters["invalid"] += 1
                         continue
 
-                    dedup_key = (str(rec.get("namespace") or ""), rec["content_hash"])
-                    if dedup_key in batch_seen:
+                    dedup_key = db.record_identity_key(rec)
+                    if dedup_key[1] and dedup_key in batch_seen:
                         counters["skipped"] += 1
                         continue
-                    batch_seen.add(dedup_key)
+                    if dedup_key[1]:
+                        batch_seen.add(dedup_key)
                     pending.append(rec)
                     if len(pending) >= HYDRATE_BATCH:
                         flush()

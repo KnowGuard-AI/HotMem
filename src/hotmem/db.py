@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from hotmem.embed import EMBEDDING_DIM, EMBEDDING_MODEL, cosine
+from hotmem.interchange.canonical import compute_file_reference_hash, normalize_source_uri
 from hotmem.trace import get_tracer
 
 _trace = get_tracer("db")
@@ -809,6 +810,187 @@ class MemoryDB:
             (namespace, content_hash),
         ).fetchone()
         return dict(row) if row is not None else None
+
+    def find_file_record_by_reference(
+        self,
+        namespace: str,
+        identifier: str,
+        source_uri: str,
+        byte_offset: int,
+        byte_length: int,
+        *,
+        base_dir: str | Path | None = None,
+    ) -> dict[str, Any] | None:
+        """Find an existing file-backed row by normalized reference tuple (#100).
+
+        Matches pre-#100 rows whose ``content_hash`` encoded a checksum, an
+        unnormalized URI spelling, or a bundle attachment byte digest. Rows
+        with an empty ``content_hash`` have no logical identity and are
+        ignored.
+        """
+        target_norms = {
+            normalize_source_uri(source_uri, base_dir=base_dir),
+            normalize_source_uri(source_uri),
+        }
+        target_norms.discard("")
+        if not target_norms:
+            return None
+        rows = self._conn.execute(
+            """SELECT id, identifier, namespace, content_hash, memory_type,
+                      fact_text, fact_summary, source, importance, metadata_json,
+                      provenance_json, created_at, source_uri, byte_offset, byte_length
+               FROM memories
+               WHERE identifier = ? AND namespace = ? AND memory_type = 'file'
+                 AND byte_offset = ? AND byte_length = ? AND content_hash != ''
+               ORDER BY created_at ASC, rowid ASC""",
+            (identifier, namespace, byte_offset, byte_length),
+        ).fetchall()
+        for row in rows:
+            row_uri = str(row["source_uri"] or "")
+            row_norms = {
+                normalize_source_uri(row_uri, base_dir=base_dir),
+                normalize_source_uri(row_uri),
+            }
+            if target_norms & row_norms:
+                return dict(row)
+        return None
+
+    @staticmethod
+    def record_identity_key(record: dict[str, Any] | MemoryRecord) -> tuple[str, str]:
+        """Return the namespace-scoped logical identity key for ``record`` (#100).
+
+        Inline records use ``(namespace, content_hash)``. File-backed records
+        with a non-empty ``content_hash`` use ``(namespace,
+        compute_file_reference_hash(...))`` so pre-#100 and post-#100 file
+        hashes resolve to the same logical identity. Records with an empty
+        ``content_hash`` have no logical identity and return ``(namespace, "")``.
+        """
+        if isinstance(record, MemoryRecord):
+            ns = str(record.namespace or "")
+            ch = str(record.content_hash or "")
+            if not ch:
+                return (ns, "")
+            if record.memory_type == "file" and record.source_uri:
+                return (
+                    ns,
+                    compute_file_reference_hash(
+                        record.identifier,
+                        record.source_uri,
+                        int(record.byte_offset or 0),
+                        int(record.byte_length or 0),
+                    ),
+                )
+            return (ns, ch)
+
+        ns = str(record.get("namespace") or "")
+        ch = str(record.get("content_hash") or "")
+        if not ch:
+            return (ns, "")
+        if record.get("memory_type") == "file" and record.get("source_uri"):
+            return (
+                ns,
+                compute_file_reference_hash(
+                    str(record.get("identifier") or ""),
+                    str(record.get("source_uri") or ""),
+                    int(record.get("byte_offset") or 0),
+                    int(record.get("byte_length") or 0),
+                ),
+            )
+        return (ns, ch)
+
+    def batch_existing_record_identities(
+        self, records: list[dict[str, Any]] | list[MemoryRecord]
+    ) -> set[tuple[str, str]]:
+        """Return the subset of ``record_identity_key(r)`` values already stored.
+
+        Combines :meth:`batch_existing_namespace_hashes` with reference-tuple
+        matching for ``memory_type == 'file'`` rows so hydration and SQLite
+        imports deduplicate across legacy and post-#100 file hashes (#100).
+        """
+        if not records:
+            return set()
+        hash_pairs: list[tuple[str, str]] = []
+        file_candidates: list[tuple[str, str, tuple[str, str]]] = []
+        for r in records:
+            key = self.record_identity_key(r)
+            if not key[1]:
+                continue
+            raw_ch = (
+                str(r.content_hash or "")
+                if isinstance(r, MemoryRecord)
+                else str(r.get("content_hash") or "")
+            )
+            is_file = (
+                r.memory_type == "file"
+                if isinstance(r, MemoryRecord)
+                else r.get("memory_type") == "file"
+            )
+            ident = (
+                str(r.identifier or "")
+                if isinstance(r, MemoryRecord)
+                else str(r.get("identifier") or "")
+            )
+            hash_pairs.append((key[0], raw_ch))
+            if key[1] != raw_ch:
+                hash_pairs.append(key)
+            if is_file and ident:
+                file_candidates.append((key[0], ident, key))
+
+        existing_hashes = self.batch_existing_namespace_hashes(hash_pairs)
+        matched: set[tuple[str, str]] = set()
+        for r in records:
+            key = self.record_identity_key(r)
+            if not key[1]:
+                continue
+            raw_ch = (
+                str(r.content_hash or "")
+                if isinstance(r, MemoryRecord)
+                else str(r.get("content_hash") or "")
+            )
+            if key in existing_hashes or (key[0], raw_ch) in existing_hashes:
+                matched.add(key)
+
+        unresolved_files = [
+            (ns, ident, key) for ns, ident, key in file_candidates if key not in matched
+        ]
+        if not unresolved_files:
+            return matched
+
+        wanted_namespaces = {ns for ns, _, _ in unresolved_files}
+        unique_idents = sorted({ident for _, ident, _ in unresolved_files})
+        stored_file_keys: set[tuple[str, str]] = set()
+        for start in range(0, len(unique_idents), _SEARCH_BIND_CHUNK):
+            chunk = unique_idents[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            rows = self._conn.execute(
+                f"""SELECT namespace, identifier, source_uri, byte_offset, byte_length
+                    FROM memories
+                    WHERE memory_type = 'file' AND content_hash != ''
+                      AND identifier IN ({placeholders})""",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                row_ns = str(row["namespace"] or "")
+                if row_ns not in wanted_namespaces:
+                    continue
+                row_uri = str(row["source_uri"] or "")
+                if not row_uri:
+                    continue
+                stored_file_keys.add(
+                    (
+                        row_ns,
+                        compute_file_reference_hash(
+                            str(row["identifier"] or ""),
+                            row_uri,
+                            int(row["byte_offset"] or 0),
+                            int(row["byte_length"] or 0),
+                        ),
+                    )
+                )
+        for _, _, key in unresolved_files:
+            if key in stored_file_keys:
+                matched.add(key)
+        return matched
 
     def batch_existing_namespace_hashes(self, pairs: list[tuple[str, str]]) -> set[tuple[str, str]]:
         """Return the subset of `(namespace, content_hash)` pairs already in `memories`."""
@@ -1629,20 +1811,14 @@ class MemoryDB:
                     break
                 batch_seen.clear()
                 rows_dicts = [dict(row) for row in batch]
-                pairs = [
-                    (str(d.get("namespace") or ""), str(d.get("content_hash") or ""))
-                    for d in rows_dicts
-                    if d.get("content_hash")
-                ]
-                existing = self.batch_existing_namespace_hashes(pairs)
+                existing = self.batch_existing_record_identities(rows_dicts)
                 records: list[MemoryRecord] = []
                 for d in rows_dicts:
-                    ch = str(d.get("content_hash") or "")
-                    key = (str(d.get("namespace") or ""), ch)
-                    if ch and (key in existing or key in batch_seen):
+                    key = self.record_identity_key(d)
+                    if key[1] and (key in existing or key in batch_seen):
                         skipped += 1
                         continue
-                    if ch:
+                    if key[1]:
                         batch_seen.add(key)
                     # Build from the columns present; dataclass defaults fill the
                     # rest (missing v2 columns in v0.1 sources).

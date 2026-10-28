@@ -636,12 +636,18 @@ def test_file_identity_normalizes_reference_and_excludes_checksum(
 
 
 def test_file_identity_recognizes_legacy_hash(tmp_db: MemoryDB, fixture_file: Path):
-    """A pre-#100 hash is still recognized so an upgrade does not duplicate."""
+    """A pre-#100 hash is still recognized even when checksum or URI spelling changes."""
     from hotmem.db import MemoryRecord
     from hotmem.memory import legacy_file_content_hashes
 
-    ref = FileRef(source_uri=str(fixture_file), byte_offset=10, byte_length=20, source_format="bin")
-    legacy_hash = legacy_file_content_hashes("ds", ref)[0]
+    legacy_ref = FileRef(
+        source_uri=str(fixture_file),
+        byte_offset=10,
+        byte_length=20,
+        source_format="bin",
+        source_checksum="deadbeef" * 8,
+    )
+    legacy_hash = legacy_file_content_hashes("ds", legacy_ref)[0]
     tmp_db.insert_many_ignore(
         [
             MemoryRecord(
@@ -652,15 +658,26 @@ def test_file_identity_recognizes_legacy_hash(tmp_db: MemoryDB, fixture_file: Pa
                 content_hash=legacy_hash,
                 namespace="ns",
                 memory_type="file",
-                source_uri=ref.source_uri,
+                source_uri=legacy_ref.source_uri,
                 source_format="bin",
+                source_checksum=legacy_ref.source_checksum,
                 byte_offset=10,
                 byte_length=20,
             )
         ]
     )
 
-    memory_id, content_hash = add_file_backed(tmp_db, identifier="ds", file_ref=ref, namespace="ns")
+    # Re-add with no checksum and a "./" path component: still matches legacy-file.
+    dotted_no_checksum = FileRef(
+        source_uri=str(fixture_file.parent / "." / fixture_file.name),
+        byte_offset=10,
+        byte_length=20,
+        source_format="bin",
+        source_checksum=None,
+    )
+    memory_id, content_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=dotted_no_checksum, namespace="ns"
+    )
     assert memory_id == "legacy-file"
     assert content_hash == legacy_hash
     assert tmp_db.count() == 1
