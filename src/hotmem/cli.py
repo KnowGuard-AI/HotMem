@@ -802,6 +802,94 @@ def _task_sync_is_exact_retry(
     return False
 
 
+def _task_sync_outbox_open(path: _Path) -> sqlite3.Connection:
+    conn = _task_sync_state_connection(path)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS task_sync_outbox "
+        "(seq INTEGER PRIMARY KEY AUTOINCREMENT, stream TEXT NOT NULL, "
+        "scope TEXT NOT NULL, operation_key TEXT NOT NULL, payload TEXT NOT NULL, "
+        "UNIQUE(scope, operation_key))"
+    )
+    return conn
+
+
+def _task_sync_enqueue(path: _Path, stream: str, scope: str, payload: dict[str, Any]) -> None:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    key = payload["idempotency_key"]
+    with _task_sync_outbox_open(path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT payload FROM task_sync_outbox WHERE scope = ? AND operation_key = ?",
+            (scope, key),
+        ).fetchone()
+        if existing:
+            previous = json.loads(existing[0])
+            before = json.loads(previous.pop("fact"))
+            after = json.loads(payload["fact"])
+            current = {k: v for k, v in payload.items() if k != "fact"}
+            if previous != current or _task_sync_event_without_observed_at(before) != (
+                _task_sync_event_without_observed_at(after)
+            ):
+                raise ValueError("queued task event conflicts with an existing idempotency key")
+            return
+        conn.execute(
+            "INSERT INTO task_sync_outbox(stream, scope, operation_key, payload) "
+            "VALUES (?, ?, ?, ?)",
+            (stream, scope, key, encoded),
+        )
+
+
+def _task_sync_has_queued_event(path: _Path, scope: str) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with _task_sync_outbox_open(path) as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM task_sync_outbox WHERE scope = ? LIMIT 1", (scope,)
+                ).fetchone()
+                is not None
+            )
+    except (OSError, sqlite3.Error):
+        return False
+
+
+def _task_sync_flush_outbox(client: Any, path: _Path, stream: str, scope: str) -> int:
+    flushed = 0
+    while True:
+        with _task_sync_outbox_open(path) as conn:
+            row = conn.execute(
+                "SELECT seq, scope, payload FROM task_sync_outbox "
+                "WHERE stream = ? ORDER BY seq LIMIT 1",
+                (stream,),
+            ).fetchone()
+        if row is None:
+            return flushed
+        seq, owner, encoded = row
+        if owner != scope:
+            raise ValueError("an earlier queued event requires its original credential")
+        payload = json.loads(encoded)
+        try:
+            client.add(**payload)
+        except Exception as err:
+            event = json.loads(payload["fact"])
+            if not (
+                _task_sync_http_status(err) == 409
+                and _task_sync_is_exact_retry(
+                    client,
+                    payload["identifier"],
+                    event,
+                    session_id=payload["session_id"],
+                    source=payload["source"],
+                    tags=payload["tags"],
+                )
+            ):
+                raise
+        with _task_sync_outbox_open(path) as conn:
+            conn.execute("DELETE FROM task_sync_outbox WHERE seq = ? AND scope = ?", (seq, scope))
+        flushed += 1
+
+
 def _task_sync_process(
     client: Any,
     client_name: str,
@@ -813,10 +901,13 @@ def _task_sync_process(
     include_descriptions: bool = False,
     clock_path: _Path | None = None,
     clock_scope: str = "",
+    outbox_scope: str = "",
 ) -> dict[str, Any] | None:
     hook_event_name = payload.get("hook_event_name")
     identifier = _task_sync_identifier(task_list_id)
     if hook_event_name == "SessionStart":
+        if clock_path is not None:
+            _task_sync_flush_outbox(client, clock_path, clock_scope, outbox_scope)
         envelope = _task_sync_list_envelope(client, identifier)
         rows = envelope["memories"]
         if not rows:
@@ -873,6 +964,23 @@ def _task_sync_process(
             event_tags.append(f"model:{model}")
     effective_source = source or f"hook://{harness_id}/tasks"
     fact = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if clock_path is not None:
+        _task_sync_enqueue(
+            clock_path,
+            clock_scope,
+            outbox_scope,
+            {
+                "identifier": identifier,
+                "fact": fact,
+                "source": effective_source,
+                "tags": event_tags,
+                "harness_id": harness_id,
+                "session_id": session_id,
+                "idempotency_key": idempotency_key,
+            },
+        )
+        _task_sync_flush_outbox(client, clock_path, clock_scope, outbox_scope)
+        return None
     try:
         client.add(
             identifier,
@@ -1031,6 +1139,7 @@ def serve(
 @click.option("--source", "daemon_source", default=None, envvar="HOTMEM_SOURCE")
 @click.option("--store-id", "expected_store_id", default=None, envvar="HOTMEM_STORE_ID")
 @click.option("--tag", "tags", multiple=True, help="Canonical record tag (repeatable).")
+@click.option("--flush", "flush_only", is_flag=True, help="Retry queued events without stdin.")
 @click.option(
     "--include-task-descriptions",
     is_flag=True,
@@ -1046,11 +1155,27 @@ def task_sync(
     daemon_source: str | None,
     expected_store_id: str | None,
     tags: tuple[str, ...],
+    flush_only: bool,
     include_task_descriptions: bool,
 ):
     """Process one native client hook JSON payload from stdin (#125)."""
     payload: dict[str, Any] = {}
+    state_path = _task_sync_state_path()
+    stream = hashlib.sha256(
+        json.dumps([url, expected_store_id, daemon_namespace, task_list_id]).encode()
+    ).hexdigest()
+    scope = hashlib.sha256(json.dumps([stream, daemon_token or ""]).encode()).hexdigest()
     try:
+        if flush_only:
+            with _make_daemon_client(
+                url,
+                token=daemon_token,
+                namespace=daemon_namespace,
+                expected_store_id=expected_store_id,
+            ) as client:
+                count = _task_sync_flush_outbox(client, state_path, stream, scope)
+            click.echo(json.dumps({"flushed": count}))
+            return
         raw_payload = click.get_binary_stream("stdin").read(_TASK_SYNC_MAX_INPUT_BYTES + 1)
         if len(raw_payload) > _TASK_SYNC_MAX_INPUT_BYTES:
             raise ValueError("task hook payload exceeds the 1 MiB limit")
@@ -1076,10 +1201,9 @@ def task_sync(
                 tags=tags,
                 source=daemon_source,
                 include_descriptions=include_task_descriptions,
-                clock_path=_task_sync_state_path(),
-                clock_scope=hashlib.sha256(
-                    json.dumps([url, expected_store_id, daemon_namespace, task_list_id]).encode()
-                ).hexdigest(),
+                clock_path=state_path,
+                clock_scope=stream,
+                outbox_scope=scope,
             )
     except ValueError as err:
         if payload.get("hook_event_name") == "SessionStart":
@@ -1087,6 +1211,10 @@ def task_sync(
         else:
             raise click.ClickException(str(err)) from err
     except Exception as err:
+        if payload.get("hook_event_name") == "PostToolUse" and _task_sync_has_queued_event(
+            state_path, scope
+        ):
+            click.echo("HotMem task event remains queued for retry", err=True)
         _raise_cli_http_error(err)
     if output is not None:
         rendered = json.dumps(

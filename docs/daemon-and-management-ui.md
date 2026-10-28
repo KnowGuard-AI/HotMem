@@ -372,15 +372,21 @@ not require #98.
 
 Task events carry their observation order in the record, so snapshot/handoff
 round trips preserve task state even though the generic list's `rowid`
-tie-breaker is local. Hook processes on the same host coordinate timestamps
-through a private SQLite state file (`~/.hotmem/task-sync.sqlite3`, overridable
+tie-breaker is local. Hook processes using the same URL, store, namespace and
+task-list configuration on one host coordinate timestamps through a private SQLite state file (`~/.hotmem/task-sync.sqlite3`, overridable
 with `HOTMEM_TASK_SYNC_STATE`). A duplicate timestamp fails recall closed.
 Independent hosts must not write the same task list without coordinated clocks.
 Preserve the state file across restarts; task events remain in the HotMem store.
 
-Hook failures are surfaced and are not silently acknowledged, but HotMem does
-not provide a durable hook outbox. Replaying the same native event is safe via
-idempotency. Independent adapters must not concurrently mutate one task-list ID;
+Hook events are stored in the private local state file before delivery. If the
+daemon is unavailable, the hook reports the failure and retains the event; the
+next hook or `hotmem task-sync --client <client> --task-list-id <id> --url
+<url> --flush` retries queued events in order. Use the same URL, store ID,
+namespace and credential to replay; bearer tokens are never stored. The state
+file contains task text and is subject to local filesystem protection and
+retention. Preserve it until queued events have been delivered. Replaying an
+acknowledged event is safe via idempotency. Independent adapters must not
+concurrently mutate one task-list ID;
 use separate task-list IDs for unrelated workstreams. Long task histories are
 not compacted by this adapter, so the 1000-event completeness bound is an
 operational limit.

@@ -1284,3 +1284,87 @@ with patch.object(cli, "datetime", FixedClock):
     rows[1]["fact_text"] = json.dumps(event)
     with pytest.raises(ValueError, match="ambiguous task event order"):
         _task_sync_reduce(rows, "clock-test")
+
+
+def test_task_sync_outbox_recovers_after_daemon_outage(tmp_path: Path):
+    """Offline hooks survive process exit and flush in order without storing the token."""
+    import sqlite3
+
+    import httpx
+
+    class OutageClient(_FakeTaskSyncClient):
+        online = False
+
+        def add(self, identifier, fact, **kwargs):
+            if not self.online:
+                raise httpx.ConnectError("synthetic daemon offline")
+            return super().add(identifier, fact, **kwargs)
+
+    client = OutageClient()
+    runner = CliRunner()
+    args = [
+        "task-sync",
+        "--client",
+        "codex",
+        "--task-list-id",
+        "tech20/outbox",
+        "--url",
+        "http://hotmem.test",
+        "--token",
+        "synthetic-secret",
+    ]
+    state = tmp_path / "task-sync-state.sqlite3"
+    with mock.patch("hotmem.cli._make_daemon_client", return_value=client):
+        for event_id, status in (("offline-1", "pending"), ("offline-2", "completed")):
+            payload = _codex_plan_hook(event_id, [{"step": "Inspect", "status": status}])
+            result = runner.invoke(main, args, input=json.dumps(payload))
+            assert result.exit_code != 0
+        with sqlite3.connect(state) as conn:
+            assert conn.execute("SELECT count(*) FROM task_sync_outbox").fetchone()[0] == 2
+        assert b"synthetic-secret" not in state.read_bytes()
+        client.online = True
+        result = runner.invoke(main, [*args, "--flush"])
+        assert result.exit_code == 0, result.output
+        assert json.loads(result.output)["flushed"] == 2
+        assert [json.loads(row["fact_text"])["plan"][0]["status"] for row in client.rows] == [
+            "pending",
+            "completed",
+        ]
+        with sqlite3.connect(state) as conn:
+            assert conn.execute("SELECT count(*) FROM task_sync_outbox").fetchone()[0] == 0
+
+
+def test_task_sync_outbox_replay_against_real_daemon(tmp_path: Path):
+    """A queued write survives an ambiguous acknowledgement and a repeated flush."""
+    import sqlite3
+
+    from hotmem.cli import _task_sync_codex_event, _task_sync_enqueue, _task_sync_flush_outbox
+
+    event = _task_sync_codex_event(
+        _codex_plan_hook("daemon-outbox", [{"step": "Inspect", "status": "completed"}]),
+        "tech20/daemon-outbox",
+    )
+    assert event is not None
+    event["observed_at"] = "2026-10-27T12:00:00.000001Z"
+    payload = {
+        "identifier": "hotmem/task-sync/tech20/daemon-outbox",
+        "fact": json.dumps(event, sort_keys=True, separators=(",", ":")),
+        "source": "hook://codex-cli/tasks",
+        "tags": ["project:hotmem"],
+        "harness_id": "codex-cli",
+        "session_id": event["native_session_id"],
+        "idempotency_key": "real-daemon-queued-operation",
+    }
+    state_path = tmp_path / "outbox.sqlite3"
+    with _sidecar(tmp_path / "outbox-daemon") as (client, _):
+        _task_sync_enqueue(state_path, "stream", "writer", payload)
+        with pytest.raises(ValueError, match="original credential"):
+            _task_sync_flush_outbox(client, state_path, "stream", "other-writer")
+        client.add(
+            **payload
+        )  # Simulate a crash after the daemon committed but before local delete.
+        assert _task_sync_flush_outbox(client, state_path, "stream", "writer") == 1
+        assert _task_sync_flush_outbox(client, state_path, "stream", "writer") == 0
+        assert len(client.list(payload["identifier"])) == 1
+    with sqlite3.connect(state_path) as conn:
+        assert conn.execute("SELECT count(*) FROM task_sync_outbox").fetchone()[0] == 0
