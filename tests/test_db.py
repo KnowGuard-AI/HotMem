@@ -561,3 +561,55 @@ def test_legacy_migration_is_atomic_when_scoped_duplicates_exist(tmp_path):
         ).fetchone()
         assert index is None
         assert check.execute("PRAGMA user_version").fetchone()[0] == 5
+
+
+def test_legacy_database_rows_keep_identity_when_index_migrates(tmp_path):
+    """#100: existing rows survive the v6 index migration and scope later writes."""
+    db_path = tmp_path / "legacy-row.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            identifier TEXT NOT NULL,
+            fact_text TEXT DEFAULT '',
+            embedding BLOB,
+            embedding_dim INTEGER,
+            embedding_model TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            importance REAL DEFAULT 0.5,
+            metadata_json TEXT DEFAULT '{}',
+            content_hash TEXT DEFAULT '',
+            ttl_seconds INTEGER,
+            created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            namespace TEXT DEFAULT ''
+        )"""
+    )
+    conn.execute(
+        """CREATE UNIQUE INDEX idx_memories_content_hash_unique
+           ON memories(content_hash) WHERE content_hash != ''"""
+    )
+    conn.execute(
+        """INSERT INTO memories (id, identifier, fact_text, content_hash, namespace)
+           VALUES ('legacy', 'doc', 'same fact', 'legacy-hash', 'ns-a')"""
+    )
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    conn.close()
+
+    db = MemoryDB(db_path)
+    try:
+        assert db.get_memory("legacy")["content_hash"] == "legacy-hash"
+        db.insert(
+            id="fresh",
+            identifier="doc",
+            fact_text="same fact",
+            embedding=b"",
+            content_hash="legacy-hash",
+            namespace="ns-b",
+        )
+        assert db.count() == 2
+        assert db.batch_existing_namespace_hashes(
+            [("ns-a", "legacy-hash"), ("ns-b", "legacy-hash"), ("ns-c", "legacy-hash")]
+        ) == {("ns-a", "legacy-hash"), ("ns-b", "legacy-hash")}
+    finally:
+        db.close()
