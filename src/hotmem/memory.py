@@ -28,19 +28,17 @@ Extension: add hydration profiles (#40), bundle hydration (#52) here.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
-import posixpath
 import uuid
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 from hotmem.db import MemoryDB
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
+from hotmem.interchange import canonical
 from hotmem.provenance import (
     BackingFileMissingError,
     ChecksumMismatchError,
@@ -85,34 +83,9 @@ class HydratedContent:
     byte_length: int
 
 
-_FILE_IDENTITY_DOMAIN = "hotmem-file-ref-v1"
-
-
 def normalize_source_uri(source_uri: str) -> str:
-    """Normalize a reference syntactically without reading or resolving it.
-
-    Equivalent spellings of the same portable reference must produce the
-    same identity: ``./runbook.txt`` and ``runbook.txt``, or a ``file://``
-    URI and its filesystem path. Normalization never stats, opens, or
-    dereferences the target, and preserves URI schemes other than ``file``.
-    """
-    raw = str(source_uri).strip()
-    if not raw:
-        return ""
-    if raw.lower().startswith("file://"):
-        from hotmem.storage.local import _to_path
-
-        # Invalid local URIs are rejected by the storage adapter with a
-        # typed client error; identity normalization must not mask that.
-        with contextlib.suppress(UnicodeDecodeError, ValueError):
-            raw = _to_path(raw).as_posix()
-    if "://" in raw:
-        parts = urlsplit(raw)
-        path = posixpath.normpath(parts.path or "/")
-        return urlunsplit(
-            (parts.scheme.lower(), parts.netloc.lower(), path, parts.query, parts.fragment)
-        )
-    return posixpath.normpath(raw.replace("\\", "/"))
+    """Syntactic source-reference normalization (see canonical module)."""
+    return canonical.normalize_source_uri(source_uri)
 
 
 def compute_file_content_hash(identifier: str, ref: FileRef) -> str:
@@ -122,11 +95,9 @@ def compute_file_content_hash(identifier: str, ref: FileRef) -> str:
     optional ``source_checksum`` verifies bytes and is deliberately excluded:
     correcting or adding a checksum must not create a new logical memory.
     """
-    payload = (
-        f"{_FILE_IDENTITY_DOMAIN}:{identifier}:{normalize_source_uri(ref.source_uri)}:"
-        f"{ref.byte_offset}:{ref.byte_length}"
+    return canonical.compute_file_reference_hash(
+        identifier, ref.source_uri, ref.byte_offset, ref.byte_length
     )
-    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def legacy_file_content_hashes(identifier: str, ref: FileRef) -> tuple[str, ...]:

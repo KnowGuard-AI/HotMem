@@ -601,3 +601,24 @@ def test_hydrate_identity_is_namespace_scoped(tmp_db: MemoryDB, tmp_path: Path, 
     assert second.loaded == 0
     assert second.skipped_dupes == 3
     assert tmp_db.count() == 2
+
+
+def test_hydrate_file_record_without_hash_uses_reference_identity(tmp_db: MemoryDB, tmp_path: Path):
+    """#100: a hashless file record is identified by its reference, not inline text."""
+    from hotmem.interchange.canonical import compute_file_reference_hash
+
+    swap = tmp_path / "file-no-hash.jsonl"
+    record = {
+        "identifier": "dataset",
+        "memory_type": "file",
+        "source_uri": "./data.csv",
+        "byte_offset": 0,
+        "byte_length": 5,
+        "source_format": "csv",
+    }
+    swap.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    result = hydrate(tmp_db, swap)
+    assert result.loaded == 1
+    row = tmp_db.all_rows()[0]
+    assert row["content_hash"] == compute_file_reference_hash("dataset", "./data.csv", 0, 5)
