@@ -11,7 +11,9 @@ Interface:
         .insert_many_ignore(records) -> int
         .count() -> int
         .all_rows(include_embedding=False) -> list[Row]
-        .exists(content_hash: str) -> bool
+        .find_by_namespace_and_hash(namespace, content_hash) -> dict | None
+        .batch_existing_namespace_hashes(pairs) -> set[tuple[str, str]]
+        .exists(content_hash: str, *, namespace: str | None = None) -> bool
         .close() -> None
 
 Deps: hotmem.embed (for unpack_embedding), hotmem.trace
@@ -1422,9 +1424,10 @@ class MemoryDB:
     def batch_existing_hashes(self, hashes: list[str]) -> set[str]:
         """Return the subset of ``hashes`` already stored (chunked SELECT).
 
-        Database-backed deduplication for hydration paths: bounded memory
-        (chunk of at most ``_SEARCH_BIND_CHUNK`` bound parameters) instead of
-        loading the full destination hash set (interchange contract #67).
+        Hash-only lookup. Content hashes are unique only together with a
+        namespace (#100), so this is a coarse pre-filter; identity decisions
+        must use :meth:`batch_existing_namespace_hashes`. Empty hashes carry
+        no logical identity and are never reported as present.
         """
         unique = sorted({h for h in hashes if h})
         found: set[str] = set()
@@ -1438,11 +1441,27 @@ class MemoryDB:
             found.update(row["content_hash"] for row in rows)
         return found
 
-    def exists(self, content_hash: str) -> bool:
-        """Check if a memory with this content_hash already exists."""
-        row = self._conn.execute(
-            "SELECT 1 FROM memories WHERE content_hash = ? LIMIT 1", (content_hash,)
-        ).fetchone()
+    def exists(self, content_hash: str, *, namespace: str | None = None) -> bool:
+        """Check whether a non-empty content hash exists.
+
+        With ``namespace`` the lookup follows the logical identity contract
+        ``(namespace, content_hash)``. Without it the historical global
+        lookup is preserved for callers that intentionally ask a coarser
+        question. An empty hash never matches: it is the absence of logical
+        identity, not a shared value (#100).
+        """
+        if not content_hash:
+            return False
+        if namespace is None:
+            row = self._conn.execute(
+                "SELECT 1 FROM memories WHERE content_hash = ? LIMIT 1",
+                (content_hash,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT 1 FROM memories WHERE namespace = ? AND content_hash = ? LIMIT 1",
+                (namespace, content_hash),
+            ).fetchone()
         return row is not None
 
     def list_by_identifier(
@@ -1555,6 +1574,12 @@ class MemoryDB:
         schema state on the shared check_same_thread=False connection and works
         with WAL-mode source databases across SQLite versions.
 
+        Deduplication follows the logical identity contract (#100):
+        ``(namespace, content_hash)`` for non-empty hashes. Two identical
+        records in distinct namespaces both survive; a repeat in the same
+        namespace is skipped. Rows with an empty hash have no logical
+        identity and are deduplicated only by their primary key id.
+
         Returns (loaded, skipped_dupes).
         """
         resolved = Path(src_path).resolve()
@@ -1593,27 +1618,32 @@ class MemoryDB:
 
             # Database-backed dedup (interchange #67): per-batch chunked
             # SELECT instead of loading the entire destination hash set;
-            # a batch-local set catches intra-batch duplicates. Correct even
-            # on legacy DBs where the unique partial index is absent.
-            batch_seen: set[str] = set()
+            # a batch-local set catches intra-batch duplicates. Identity is
+            # scoped by namespace (#100), so the same content in another
+            # namespace is a distinct record. Empty hashes are not identity
+            # keys and never collide with each other.
+            batch_seen: set[tuple[str, str]] = set()
             while True:
                 batch = cursor.fetchmany(1000)
                 if not batch:
                     break
                 batch_seen.clear()
                 rows_dicts = [dict(row) for row in batch]
-                candidate_hashes = [
-                    d.get("content_hash", "") for d in rows_dicts if d.get("content_hash", "")
+                pairs = [
+                    (str(d.get("namespace") or ""), str(d.get("content_hash") or ""))
+                    for d in rows_dicts
+                    if d.get("content_hash")
                 ]
-                existing = self.batch_existing_hashes(candidate_hashes)
+                existing = self.batch_existing_namespace_hashes(pairs)
                 records: list[MemoryRecord] = []
                 for d in rows_dicts:
-                    ch = d.get("content_hash", "")
-                    if ch and (ch in existing or ch in batch_seen):
+                    ch = str(d.get("content_hash") or "")
+                    key = (str(d.get("namespace") or ""), ch)
+                    if ch and (key in existing or key in batch_seen):
                         skipped += 1
                         continue
                     if ch:
-                        batch_seen.add(ch)
+                        batch_seen.add(key)
                     # Build from the columns present; dataclass defaults fill the
                     # rest (missing v2 columns in v0.1 sources).
                     records.append(MemoryRecord(**{c: d[c] for c in select_cols}))

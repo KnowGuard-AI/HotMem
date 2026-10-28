@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from hotmem.db import MemoryDB, MemoryRecord
 from hotmem.embed import embed_text, pack_embedding
 
@@ -377,3 +379,185 @@ def test_list_by_identifier_excludes_expired(tmp_db: MemoryDB):
     )
     rows = tmp_db.list_by_identifier("chat", order="asc")
     assert [r["id"] for r in rows] == ["live"]
+
+
+def test_namespace_scoped_identity_coexists_and_same_scope_skips(tmp_db: MemoryDB):
+    """#100: content identity is (namespace, content_hash)."""
+    records = [
+        MemoryRecord(
+            id="a-1",
+            identifier="doc",
+            fact_text="same fact",
+            embedding=b"",
+            content_hash="shared-hash",
+            namespace="ns-a",
+        ),
+        MemoryRecord(
+            id="b-1",
+            identifier="doc",
+            fact_text="same fact",
+            embedding=b"",
+            content_hash="shared-hash",
+            namespace="ns-b",
+        ),
+        MemoryRecord(
+            id="a-2",
+            identifier="doc",
+            fact_text="same fact",
+            embedding=b"",
+            content_hash="shared-hash",
+            namespace="ns-a",
+        ),
+    ]
+
+    assert tmp_db.insert_many_ignore(records) == 2
+    assert tmp_db.count() == 2
+    assert tmp_db.get_memory("a-1") is not None
+    assert tmp_db.get_memory("b-1") is not None
+    assert tmp_db.get_memory("a-2") is None
+    assert tmp_db.exists("shared-hash")
+    assert tmp_db.exists("shared-hash", namespace="ns-a")
+    assert not tmp_db.exists("shared-hash", namespace="ns-c")
+
+
+def test_empty_content_hash_is_not_an_identity_key(tmp_db: MemoryDB):
+    """#100: empty hashes never match each other or an `exists` lookup."""
+    tmp_db.insert_many_ignore(
+        [
+            MemoryRecord(
+                id="empty-1",
+                identifier="a",
+                fact_text="fact a",
+                embedding=b"",
+                content_hash="",
+                namespace="ns",
+            ),
+            MemoryRecord(
+                id="empty-2",
+                identifier="b",
+                fact_text="fact b",
+                embedding=b"",
+                content_hash="",
+                namespace="ns",
+            ),
+        ]
+    )
+
+    assert tmp_db.count() == 2
+    assert not tmp_db.exists("")
+    assert not tmp_db.exists("", namespace="ns")
+    assert not tmp_db.find_by_namespace_and_hash("ns", "")
+    assert tmp_db.batch_existing_namespace_hashes([("ns", "")]) == set()
+
+
+def test_import_sqlite_respects_namespace_and_reports_same_scope_skip(tmp_path):
+    """#100: SQLite fast-path import must not collapse cross-namespace twins."""
+    src = MemoryDB(tmp_path / "src.sqlite")
+    dst = MemoryDB(tmp_path / "dst.sqlite")
+    try:
+        src.insert_many_ignore(
+            [
+                MemoryRecord(
+                    id="src-a",
+                    identifier="doc",
+                    fact_text="same fact",
+                    embedding=b"",
+                    content_hash="shared-hash",
+                    namespace="ns-a",
+                ),
+                MemoryRecord(
+                    id="src-b",
+                    identifier="doc",
+                    fact_text="same fact",
+                    embedding=b"",
+                    content_hash="shared-hash",
+                    namespace="ns-b",
+                ),
+            ]
+        )
+
+        assert dst.import_sqlite(tmp_path / "src.sqlite") == (2, 0)
+        assert dst.count() == 2
+        assert {row["namespace"] for row in dst.all_rows()} == {"ns-a", "ns-b"}
+
+        assert dst.import_sqlite(tmp_path / "src.sqlite") == (0, 2)
+        assert dst.count() == 2
+    finally:
+        src.close()
+        dst.close()
+
+
+def test_import_sqlite_keeps_empty_hash_rows_distinct(tmp_path):
+    src = MemoryDB(tmp_path / "src-empty.sqlite")
+    dst = MemoryDB(tmp_path / "dst-empty.sqlite")
+    try:
+        src.insert_many_ignore(
+            [
+                MemoryRecord(
+                    id="e1",
+                    identifier="a",
+                    fact_text="one",
+                    embedding=b"",
+                    content_hash="",
+                    namespace="ns",
+                ),
+                MemoryRecord(
+                    id="e2",
+                    identifier="b",
+                    fact_text="two",
+                    embedding=b"",
+                    content_hash="",
+                    namespace="ns",
+                ),
+            ]
+        )
+
+        assert dst.import_sqlite(tmp_path / "src-empty.sqlite") == (2, 0)
+        assert dst.import_sqlite(tmp_path / "src-empty.sqlite") == (0, 2)
+        assert dst.count() == 2
+    finally:
+        src.close()
+        dst.close()
+
+
+def test_legacy_migration_is_atomic_when_scoped_duplicates_exist(tmp_path):
+    """#100: an ambiguous legacy store fails deterministically and unchanged."""
+    db_path = tmp_path / "legacy-duplicates.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            identifier TEXT NOT NULL,
+            fact_text TEXT DEFAULT '',
+            embedding BLOB,
+            embedding_dim INTEGER,
+            embedding_model TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            importance REAL DEFAULT 0.5,
+            metadata_json TEXT DEFAULT '{}',
+            content_hash TEXT DEFAULT '',
+            ttl_seconds INTEGER,
+            created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            namespace TEXT DEFAULT ''
+        )"""
+    )
+    conn.executemany(
+        """INSERT INTO memories (id, identifier, fact_text, content_hash, namespace)
+           VALUES (?, 'doc', 'same fact', 'legacy-hash', 'ns')""",
+        [("dupe-1",), ("dupe-2",)],
+    )
+    conn.execute("PRAGMA user_version = 5")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(sqlite3.IntegrityError, match="duplicate"):
+        MemoryDB(db_path)
+
+    with sqlite3.connect(db_path) as check:
+        assert check.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 2
+        index = check.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' "
+            "AND name='idx_memories_content_hash_unique'"
+        ).fetchone()
+        assert index is None
+        assert check.execute("PRAGMA user_version").fetchone()[0] == 5

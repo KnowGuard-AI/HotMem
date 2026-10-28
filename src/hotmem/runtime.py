@@ -38,8 +38,9 @@ from hotmem.lifecycle import (
 )
 from hotmem.memory import (
     FileRef,
-    _file_ref_content_hash,
     add_file_backed,
+    compute_file_content_hash,
+    find_existing_file_record,
     get_memory_metadata,
     hydrate_memory,
 )
@@ -661,10 +662,11 @@ class HotMemRuntime:
                     source_format=source_format or "",
                     source_checksum=source_checksum,
                 )
-                content_hash = _file_ref_content_hash(identifier, ref)
-                existing_row = db.find_by_namespace_and_hash(target_namespace, content_hash)
+                content_hash = compute_file_content_hash(identifier, ref)
+                existing_row = find_existing_file_record(db, target_namespace, identifier, ref)
                 if existing_row is not None:
                     memory_id = str(existing_row["id"])
+                    content_hash = str(existing_row["content_hash"])
                     deduplicated = True
                     dedup_payload: dict[str, Any] = {
                         "id": memory_id,

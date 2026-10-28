@@ -10,6 +10,9 @@ Interface:
                           source_checksum (optional)
      HydratedContent (frozen dataclass): memory_id, content, verified,
                                          source_uri, byte_offset, byte_length
+     normalize_source_uri(source_uri) -> str   # syntactic, no dereference
+     compute_file_content_hash(identifier, file_ref) -> str   # logical digest
+     legacy_file_content_hashes(identifier, file_ref) -> tuple[str, ...]
      add_file_backed(db, identifier, file_ref, *, base_dir=..., summary=..., ...)
          -> tuple[memory_id, content_hash]
      get_memory_metadata(db, memory_id) -> dict | None    # no file I/O
@@ -25,13 +28,16 @@ Extension: add hydration profiles (#40), bundle hydration (#52) here.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import posixpath
 import uuid
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from hotmem.db import MemoryDB
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
@@ -79,13 +85,85 @@ class HydratedContent:
     byte_length: int
 
 
-def _file_ref_content_hash(identifier: str, ref: FileRef) -> str:
-    """Deterministic SHA-256 of the reference itself (no bytes read)."""
+_FILE_IDENTITY_DOMAIN = "hotmem-file-ref-v1"
+
+
+def normalize_source_uri(source_uri: str) -> str:
+    """Normalize a reference syntactically without reading or resolving it.
+
+    Equivalent spellings of the same portable reference must produce the
+    same identity: ``./runbook.txt`` and ``runbook.txt``, or a ``file://``
+    URI and its filesystem path. Normalization never stats, opens, or
+    dereferences the target, and preserves URI schemes other than ``file``.
+    """
+    raw = str(source_uri).strip()
+    if not raw:
+        return ""
+    if raw.lower().startswith("file://"):
+        from hotmem.storage.local import _to_path
+
+        # Invalid local URIs are rejected by the storage adapter with a
+        # typed client error; identity normalization must not mask that.
+        with contextlib.suppress(UnicodeDecodeError, ValueError):
+            raw = _to_path(raw).as_posix()
+    if "://" in raw:
+        parts = urlsplit(raw)
+        path = posixpath.normpath(parts.path or "/")
+        return urlunsplit(
+            (parts.scheme.lower(), parts.netloc.lower(), path, parts.query, parts.fragment)
+        )
+    return posixpath.normpath(raw.replace("\\", "/"))
+
+
+def compute_file_content_hash(identifier: str, ref: FileRef) -> str:
+    """Logical identity digest for a file-backed reference (#100).
+
+    Covers the identifier and normalized source reference tuple only. The
+    optional ``source_checksum`` verifies bytes and is deliberately excluded:
+    correcting or adding a checksum must not create a new logical memory.
+    """
     payload = (
-        f"{identifier}:{ref.source_uri}:{ref.byte_offset}:"
-        f"{ref.byte_length}:{ref.source_checksum or ''}"
+        f"{_FILE_IDENTITY_DOMAIN}:{identifier}:{normalize_source_uri(ref.source_uri)}:"
+        f"{ref.byte_offset}:{ref.byte_length}"
     )
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def legacy_file_content_hashes(identifier: str, ref: FileRef) -> tuple[str, ...]:
+    """Hashes written by pre-#100 file-backed writers, newest first.
+
+    The legacy formula included the raw (unnormalized) URI and the optional
+    checksum. Callers use these only as compatibility aliases when deciding
+    whether a reference is already stored; new rows always use
+    :func:`compute_file_content_hash`.
+    """
+    base = f"{identifier}:{ref.source_uri}:{ref.byte_offset}:{ref.byte_length}"
+    hashes = [hashlib.sha256(f"{base}:{ref.source_checksum or ''}".encode()).hexdigest()]
+    if ref.source_checksum:
+        hashes.append(hashlib.sha256(f"{base}:".encode()).hexdigest())
+    return tuple(hashes)
+
+
+def _file_ref_content_hash(identifier: str, ref: FileRef) -> str:
+    """Backward-compatible alias for :func:`compute_file_content_hash`."""
+    return compute_file_content_hash(identifier, ref)
+
+
+def find_existing_file_record(
+    db: MemoryDB,
+    namespace: str,
+    identifier: str,
+    ref: FileRef,
+) -> dict[str, Any] | None:
+    """Return an existing row for this reference, including legacy hashes."""
+    for content_hash in (
+        compute_file_content_hash(identifier, ref),
+        *legacy_file_content_hashes(identifier, ref),
+    ):
+        row = db.find_by_namespace_and_hash(namespace, content_hash)
+        if row is not None:
+            return row
+    return None
 
 
 def _resolve_uri(source_uri: str, base_dir: str | None) -> str:
@@ -134,8 +212,12 @@ def add_file_backed(
             raise FileNotFoundError(f"backing file not found: {file_ref.source_uri}")
 
         active = embedder if embedder is not None else DEFAULT_EMBEDDER
+        existing = find_existing_file_record(db, namespace, identifier, file_ref)
+        if existing is not None:
+            return str(existing["id"]), str(existing["content_hash"])
+
         memory_id = uuid.uuid4().hex
-        content_hash = _file_ref_content_hash(identifier, file_ref)
+        content_hash = compute_file_content_hash(identifier, file_ref)
 
         if summary:
             vec = active.embed(summary)

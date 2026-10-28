@@ -577,3 +577,121 @@ def test_typed_errors_are_provenance_errors():
 
     assert issubclass(ChecksumMismatchError, ProvenanceError)
     assert issubclass(BackingFileMissingError, ProvenanceError)
+
+
+# ── #100: namespace-scoped file-backed identity ──────────────────────────────
+
+
+def test_file_backed_identity_is_namespace_scoped(tmp_db: MemoryDB, fixture_file: Path):
+    """Identical references in two namespaces are two records; a same-scope
+    repeat is an idempotent hit that preserves the original id."""
+    from hotmem.db import MemoryRecord
+    from hotmem.memory import compute_file_content_hash
+
+    ref = FileRef(source_uri=str(fixture_file), byte_offset=10, byte_length=20, source_format="bin")
+    a_id, a_hash = add_file_backed(tmp_db, identifier="ds", file_ref=ref, namespace="ns-a")
+    b_id, b_hash = add_file_backed(tmp_db, identifier="ds", file_ref=ref, namespace="ns-b")
+
+    assert a_id != b_id
+    assert a_hash == b_hash == compute_file_content_hash("ds", ref)
+    assert tmp_db.count() == 2
+
+    repeat_id, repeat_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=ref, namespace="ns-a"
+    )
+    assert (repeat_id, repeat_hash) == (a_id, a_hash)
+    assert tmp_db.count() == 2
+    assert isinstance(tmp_db.get_memory(a_id), dict)
+    assert isinstance(tmp_db.get_memory(b_id), dict)
+    assert not isinstance(tmp_db.get_memory(a_id), MemoryRecord)
+
+
+def test_file_identity_normalizes_reference_and_excludes_checksum(
+    tmp_db: MemoryDB, fixture_file: Path
+):
+    """A syntactically equivalent reference and a checksum change keep identity."""
+    import hashlib
+
+    from hotmem.memory import compute_file_content_hash
+
+    plain = FileRef(
+        source_uri=str(fixture_file), byte_offset=10, byte_length=20, source_format="bin"
+    )
+    dotted = FileRef(
+        source_uri=str(fixture_file.parent / "." / fixture_file.name),
+        byte_offset=10,
+        byte_length=20,
+        source_format="bin",
+        source_checksum=hashlib.sha256(fixture_file.read_bytes()[10:30]).hexdigest(),
+    )
+
+    assert compute_file_content_hash("ds", plain) == compute_file_content_hash("ds", dotted)
+
+    first_id, first_hash = add_file_backed(tmp_db, identifier="ds", file_ref=plain, namespace="ns")
+    second_id, second_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=dotted, namespace="ns"
+    )
+    assert (second_id, second_hash) == (first_id, first_hash)
+    assert tmp_db.count() == 1
+
+
+def test_file_identity_recognizes_legacy_hash(tmp_db: MemoryDB, fixture_file: Path):
+    """A pre-#100 hash is still recognized so an upgrade does not duplicate."""
+    from hotmem.db import MemoryRecord
+    from hotmem.memory import legacy_file_content_hashes
+
+    ref = FileRef(source_uri=str(fixture_file), byte_offset=10, byte_length=20, source_format="bin")
+    legacy_hash = legacy_file_content_hashes("ds", ref)[0]
+    tmp_db.insert_many_ignore(
+        [
+            MemoryRecord(
+                id="legacy-file",
+                identifier="ds",
+                fact_text="",
+                embedding=b"",
+                content_hash=legacy_hash,
+                namespace="ns",
+                memory_type="file",
+                source_uri=ref.source_uri,
+                source_format="bin",
+                byte_offset=10,
+                byte_length=20,
+            )
+        ]
+    )
+
+    memory_id, content_hash = add_file_backed(tmp_db, identifier="ds", file_ref=ref, namespace="ns")
+    assert memory_id == "legacy-file"
+    assert content_hash == legacy_hash
+    assert tmp_db.count() == 1
+
+
+def test_http_file_identity_is_namespace_scoped(app_client: TestClient):
+    """#100: file-backed writes through HTTP are namespace-scoped and idempotent."""
+    fixture_path: Path = app_client.fixture_path  # type: ignore[attr-defined]
+    body = {
+        "identifier": "dataset",
+        "file_uri": fixture_path.name,
+        "byte_offset": 10,
+        "byte_length": 20,
+        "source_format": "bin",
+    }
+
+    a = app_client.post("/v1/add", json=body, headers={"X-HotMem-Namespace": "ns-a"})
+    b = app_client.post("/v1/add", json=body, headers={"X-HotMem-Namespace": "ns-b"})
+    assert a.status_code == b.status_code == 200
+    assert a.json()["content_hash"] == b.json()["content_hash"]
+    assert a.json()["memory_id"] != b.json()["memory_id"]
+
+    repeat = app_client.post("/v1/add", json=body, headers={"X-HotMem-Namespace": "ns-a"})
+    assert repeat.status_code == 200
+    assert repeat.json()["memory_id"] == a.json()["memory_id"]
+    assert repeat.json()["content_hash"] == a.json()["content_hash"]
+    assert repeat.json()["deduplicated"] is True
+
+    a_row = app_client.get(f"/v1/memory/{a.json()['memory_id']}").json()
+    b_row = app_client.get(f"/v1/memory/{b.json()['memory_id']}").json()
+    assert a_row["provenance"]["namespace"] == "ns-a"
+    assert b_row["provenance"]["namespace"] == "ns-b"
+    assert a_row["source_uri"] == fixture_path.name
+    assert b_row["source_uri"] == fixture_path.name
