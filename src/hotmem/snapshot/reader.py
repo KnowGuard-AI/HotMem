@@ -165,6 +165,7 @@ def hydrate_v2(
             "annotation_conflicts": 0,
         }
         pending: list[dict] = []
+        intra_batch_dups: list[dict] = []
         batch_seen: set[tuple[str, str]] = set()
 
         # Bounded-memory annotation context pass (#79): ids and evidence
@@ -177,20 +178,12 @@ def hydrate_v2(
             known_ids = package_ids | db.fetch_existing_ids(referenced_ids)
 
         def flush() -> None:
-            if not pending:
+            if not pending and not intra_batch_dups:
                 return
             existing = db.batch_existing_record_identities(pending)
             todo = [r for r in pending if db.record_identity_key(r) not in existing]
+            db_dups = [r for r in pending if db.record_identity_key(r) in existing]
             counters["skipped"] += len(pending) - len(todo)
-
-            merge_duplicate_annotations(
-                db,
-                [r for r in pending if db.record_identity_key(r) in existing],
-                counters,
-                # Per-batch autocommit path: no later commit exists to carry
-                # an all-duplicate batch's merge (durability, #79 review).
-                commit=True,
-            )
 
             records = []
             for rec in todo:
@@ -202,7 +195,17 @@ def hydrate_v2(
             loaded = db.insert_many_ignore(records)
             counters["loaded"] += loaded
             counters["skipped"] += len(records) - loaded
+
+            merge_duplicate_annotations(
+                db,
+                db_dups + intra_batch_dups,
+                counters,
+                # Per-batch autocommit path: no later commit exists to carry
+                # an all-duplicate batch's merge (durability, #79 review).
+                commit=True,
+            )
             pending.clear()
+            intra_batch_dups.clear()
             batch_seen.clear()
 
         with open(memories_path, encoding="utf-8") as f:
@@ -245,6 +248,10 @@ def hydrate_v2(
                 dedup_key = db.record_identity_key(rec)
                 if dedup_key[1] and dedup_key in batch_seen:
                     counters["skipped"] += 1
+                    if isinstance(rec.get("metadata"), dict) and "annotations" in (
+                        rec["metadata"] or {}
+                    ):
+                        intra_batch_dups.append(rec)
                     continue
                 if dedup_key[1]:
                     batch_seen.add(dedup_key)

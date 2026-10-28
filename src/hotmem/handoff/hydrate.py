@@ -195,8 +195,16 @@ def hydrate_handoff(
             if not records:
                 return
             existing = db.batch_existing_record_identities(records)
-            todo = [r for r in records if db.record_identity_key(r) not in existing]
-            counters["skipped"] += len(records) - len(todo)
+            seen: set[tuple[str, str]] = set()
+            todo: list[dict[str, Any]] = []
+            for r in records:
+                key = db.record_identity_key(r)
+                if key[1] and (key in existing or key in seen):
+                    counters["skipped"] += 1
+                    continue
+                if key[1]:
+                    seen.add(key)
+                todo.append(r)
 
             rows = []
             for rec in todo:

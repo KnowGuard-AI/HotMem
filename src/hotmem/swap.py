@@ -181,6 +181,7 @@ def _flush_batch(
     db: MemoryDB,
     pending: list[dict],
     *,
+    intra_batch_dups: list[dict] | None = None,
     counters: dict,
     embedder: Embedder | None = None,
 ) -> None:
@@ -192,20 +193,12 @@ def _flush_batch(
     (reused/rebuilt/missing/failed, issue #78) live in ``counters``.
     ``embedder`` owns rebuilds (``None`` = the call-time hash default).
     Annotation-only changes on content-hash duplicates merge in-batch (#79):
-    disjoint items combine, conflicts are retained — never last-write-wins.
+    disjoint items combine, conflicts are retained -- never last-write-wins.
     """
     existing = db.batch_existing_record_identities(pending)
     todo = [r for r in pending if db.record_identity_key(r) not in existing]
+    db_dups = [r for r in pending if db.record_identity_key(r) in existing]
     counters["skipped"] += len(pending) - len(todo)
-
-    merge_duplicate_annotations(
-        db,
-        [r for r in pending if db.record_identity_key(r) in existing],
-        counters,
-        # Per-batch autocommit path: no later commit exists to carry an
-        # all-duplicate batch's merge (durability, #79 review).
-        commit=True,
-    )
 
     records: list[MemoryRecord] = []
     for rec in todo:
@@ -216,6 +209,15 @@ def _flush_batch(
     loaded = db.insert_many_ignore(records)
     counters["loaded"] += loaded
     counters["skipped"] += len(records) - loaded
+
+    merge_duplicate_annotations(
+        db,
+        db_dups + (intra_batch_dups or []),
+        counters,
+        # Per-batch autocommit path: no later commit exists to carry an
+        # all-duplicate batch's merge (durability, #79 review).
+        commit=True,
+    )
 
 
 def hydrate(
@@ -267,12 +269,20 @@ def hydrate(
             "annotation_conflicts": 0,
         }
         pending: list[dict] = []
+        intra_batch_dups: list[dict] = []
         batch_seen: set[tuple[str, str]] = set()
 
         def flush() -> None:
-            if pending:
-                _flush_batch(db, pending, counters=counters, embedder=embedder)
+            if pending or intra_batch_dups:
+                _flush_batch(
+                    db,
+                    pending,
+                    intra_batch_dups=intra_batch_dups,
+                    counters=counters,
+                    embedder=embedder,
+                )
                 pending.clear()
+                intra_batch_dups.clear()
                 batch_seen.clear()
 
         try:
@@ -312,6 +322,10 @@ def hydrate(
                     dedup_key = db.record_identity_key(rec)
                     if dedup_key[1] and dedup_key in batch_seen:
                         counters["skipped"] += 1
+                        if isinstance(rec.get("metadata"), dict) and "annotations" in (
+                            rec["metadata"] or {}
+                        ):
+                            intra_batch_dups.append(rec)
                         continue
                     if dedup_key[1]:
                         batch_seen.add(dedup_key)

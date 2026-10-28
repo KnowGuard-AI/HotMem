@@ -339,6 +339,7 @@ def hydrate_package(
             "annotation_conflicts": 0,
         }
         pending: list[dict] = []
+        intra_batch_dups: list[dict] = []
         batch_seen: set[tuple[str, str]] = set()
 
         package_ids, referenced_ids, has_annotations = _scan_annotation_context(verified.stream())
@@ -350,17 +351,12 @@ def hydrate_package(
             known_ids = package_ids | db.fetch_existing_ids(referenced_ids)
 
         def flush() -> None:
-            if not pending:
+            if not pending and not intra_batch_dups:
                 return
             existing = db.batch_existing_record_identities(pending)
             todo = [r for r in pending if db.record_identity_key(r) not in existing]
+            db_dups = [r for r in pending if db.record_identity_key(r) in existing]
             counters["skipped"] += len(pending) - len(todo)
-
-            merge_duplicate_annotations(
-                db,
-                [r for r in pending if db.record_identity_key(r) in existing],
-                counters,
-            )
 
             records = []
             for rec in todo:
@@ -372,7 +368,14 @@ def hydrate_package(
             inserted = db.insert_many_ignore(records, _commit=False)
             counters["loaded"] += inserted
             counters["skipped"] += len(records) - inserted  # residual OR IGNOREs
+
+            merge_duplicate_annotations(
+                db,
+                db_dups + intra_batch_dups,
+                counters,
+            )
             pending.clear()
+            intra_batch_dups.clear()
             batch_seen.clear()
 
         try:
@@ -424,6 +427,10 @@ def hydrate_package(
                 dedup_key = db.record_identity_key(rec)
                 if dedup_key[1] and dedup_key in batch_seen:
                     counters["skipped"] += 1
+                    if isinstance(rec.get("metadata"), dict) and "annotations" in (
+                        rec["metadata"] or {}
+                    ):
+                        intra_batch_dups.append(rec)
                     continue
                 if dedup_key[1]:
                     batch_seen.add(dedup_key)
