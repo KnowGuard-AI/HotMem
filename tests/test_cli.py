@@ -1323,9 +1323,17 @@ def test_task_sync_outbox_recovers_after_daemon_outage(tmp_path: Path):
             assert conn.execute("SELECT count(*) FROM task_sync_outbox").fetchone()[0] == 2
         assert b"synthetic-secret" not in state.read_bytes()
         client.online = True
+        result = runner.invoke(
+            main,
+            args,
+            input=json.dumps({"hook_event_name": "SessionStart", "session_id": "reader"}),
+        )
+        assert result.exit_code == 0, result.output
+        context = json.loads(result.output)["hookSpecificOutput"]["additionalContext"]
+        assert '"status":"completed"' in context
         result = runner.invoke(main, [*args, "--flush"])
         assert result.exit_code == 0, result.output
-        assert json.loads(result.output)["flushed"] == 2
+        assert json.loads(result.output)["flushed"] == 0
         assert [json.loads(row["fact_text"])["plan"][0]["status"] for row in client.rows] == [
             "pending",
             "completed",
