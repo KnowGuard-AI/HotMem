@@ -368,21 +368,28 @@ def add_memory(
     importance: float = 0.5,
     metadata: dict | None = None,
     ttl_seconds: int | None = None,
+    namespace: str = "",
     embedder: Embedder | None = None,
 ) -> tuple[str, str]:
     """Insert one memory into the DB using the canonical add contract.
 
-    Centralizes the uuid → content_hash → embed → pack → insert sequence so
-    callers (server, mcp, playground, examples) cannot drift apart.
-    ``embedder`` owns the write embedding (issue #78; ``None`` = the hash
-    default — bit-identical to the previous behavior). Returns
+    Centralizes the uuid -> content_hash -> embed -> pack -> insert sequence
+    so callers (server, mcp, playground, examples) cannot drift apart.
+    Deduplicates on ``(namespace, content_hash)`` (#100) so a repeated call
+    in the same namespace preserves the original row id and attribution
+    instead of replacing it via ``INSERT OR REPLACE``. ``embedder`` owns the
+    write embedding (issue #78; ``None`` = the hash default). Returns
     (memory_id, content_hash).
     """
     import uuid
 
+    content_hash = compute_content_hash(identifier, fact)
+    existing = db.find_by_namespace_and_hash(namespace, content_hash)
+    if existing is not None:
+        return str(existing["id"]), str(existing["content_hash"])
+
     active = embedder if embedder is not None else DEFAULT_EMBEDDER
     memory_id = uuid.uuid4().hex
-    content_hash = compute_content_hash(identifier, fact)
     vec = active.embed(fact)
     blob = pack_embedding(vec)
     db.insert(
@@ -397,6 +404,7 @@ def add_memory(
         metadata_json=json.dumps(metadata or {}),
         content_hash=content_hash,
         ttl_seconds=ttl_seconds,
+        namespace=namespace,
     )
     return memory_id, content_hash
 

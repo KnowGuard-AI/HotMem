@@ -729,3 +729,37 @@ def test_hydrate_sqlite_propagates_target_namespace(tmp_db: MemoryDB, tmp_path: 
     repeat = hydrate(tmp_db, tmp_path / "source.sqlite", target_namespace="scoped-ns")
     assert repeat.loaded == 0
     assert repeat.skipped_dupes == 1
+
+
+def test_add_memory_and_playground_preserve_identity_on_same_scope_repeat(tmp_db: MemoryDB):
+    """#100: add_memory and _DirectBackend.add preserve original id and source on repeat."""
+    from hotmem.playground import _DirectBackend
+    from hotmem.swap import add_memory
+
+    first_id, first_hash = add_memory(
+        tmp_db, "doc", "same fact", source="writer-1", namespace="ns-a"
+    )
+    second_id, second_hash = add_memory(
+        tmp_db, "doc", "same fact", source="writer-2", namespace="ns-a"
+    )
+    other_id, other_hash = add_memory(
+        tmp_db, "doc", "same fact", source="writer-2", namespace="ns-b"
+    )
+
+    assert (second_id, second_hash) == (first_id, first_hash)
+    assert other_id != first_id
+    assert other_hash == first_hash
+    assert tmp_db.get_memory(first_id)["source"] == "writer-1"
+    assert tmp_db.get_memory(other_id)["source"] == "writer-2"
+
+    pg = _DirectBackend(":memory:")
+    try:
+        p1 = pg.add("doc", "pg fact", source="pg-1", namespace="ns-a")
+        p2 = pg.add("doc", "pg fact", source="pg-2", namespace="ns-a")
+        p3 = pg.add("doc", "pg fact", source="pg-2", namespace="ns-b")
+        assert p2["memory_id"] == p1["memory_id"]
+        assert p2.get("deduplicated") is True
+        assert p3["memory_id"] != p1["memory_id"]
+        assert pg._db.get_memory(p1["memory_id"])["source"] == "pg-1"
+    finally:
+        pg.close()

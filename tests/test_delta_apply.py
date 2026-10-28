@@ -369,3 +369,50 @@ def test_chained_deltas_apply_cleanly(tmp_path: Path):
     write_package(source, tmp_path / "final")
     hydrate_package(fresh, tmp_path / "final")
     assert state_fingerprint(fresh.all_rows()) == state_fingerprint(receiver.all_rows())
+
+
+def test_apply_delta_rejects_same_namespace_content_hash_collision_with_different_id(
+    tmp_path: Path,
+):
+    """#100: delta apply must not silently delete an existing record when a new record_id
+    collides on (namespace, content_hash)."""
+    source = _make_source(tmp_path)
+    base_pkg = tmp_path / "base"
+    write_package(source, base_pkg)
+
+    receiver = MemoryDB(tmp_path / "receiver.sqlite")
+    hydrate_package(receiver, base_pkg)
+
+    fact_new = "collision fact in team namespace"
+    content_hash = compute_content_hash("ident-collide", fact_new)
+
+    # Producer adds record_id="source-id" in namespace "team".
+    source.insert(
+        id="source-id",
+        identifier="ident-collide",
+        fact_text=fact_new,
+        embedding=pack_embedding(embed_text(fact_new)),
+        embedding_model="hotmem-hash-v1",
+        content_hash=content_hash,
+        namespace="team",
+    )
+    delta_dir = tmp_path / "delta-collide"
+    produce_delta(source, base_pkg, delta_dir)
+
+    # Receiver independently already has the same (namespace, content_hash) under "receiver-id".
+    receiver.insert(
+        id="receiver-id",
+        identifier="ident-collide",
+        fact_text=fact_new,
+        embedding=pack_embedding(embed_text(fact_new)),
+        embedding_model="hotmem-hash-v1",
+        content_hash=content_hash,
+        namespace="team",
+    )
+
+    with pytest.raises(DeltaConflictError) as exc_info:
+        apply_delta(receiver, delta_dir)
+    assert any(c.record_id == "source-id" for c in exc_info.value.conflicts)
+    # Original receiver record is preserved, not clobbered by INSERT OR REPLACE.
+    assert receiver.get_memory("receiver-id") is not None
+    assert receiver.get_memory("source-id") is None
