@@ -229,7 +229,7 @@ def replay_into(db: MemoryDB, target_db: MemoryDB) -> int:
 
     Replays ``memory.created`` events and inserts them via bounded
     ``insert_many_ignore`` batches (no per-record commits). Returns the
-    number of records actually applied — records whose
+    number of records actually applied -- records whose
     ``(namespace, content_hash)`` already exists in the target are skipped and
     NOT counted (#73/#100): the return value is truthful applied work, not
     attempted work. Rows with an empty hash have no identity and rely on

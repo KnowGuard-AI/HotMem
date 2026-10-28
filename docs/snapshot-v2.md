@@ -161,9 +161,9 @@ Hydration semantics (shared with the interchange contract,
 - Results report `loaded`, `skipped_dupes`, and `invalid` (records that
   parsed but failed validation and were not stored). Deduplication follows
   the logical identity contract: `(namespace, content_hash)` for non-empty
-  hashes (`docs/okf/interchange-v1.md` §3.1). Repeating a restore in the same
+  hashes (`docs/okf/interchange-v1.md` section 3.1). Repeating a restore in the same
   namespace reports skips; identical records in another namespace are stored.
-  Structural corruption — digest/size mismatch, unparseable line — remains a
+  Structural corruption -- digest/size mismatch, unparseable line -- remains a
   hard error.
 - Manifest-listed paths are confinement-checked: absolute paths, `..`
   traversal, and symlink escapes fail verification before any file is read.

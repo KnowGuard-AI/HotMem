@@ -42,7 +42,7 @@ One JSON object per line. Fields are **required**, **conditionally required**,
   `SHA-256("<identifier>:<fact_text>")`; file-backed records use
   `SHA-256("hotmem-file-ref-v1:<identifier>:<normalized_source_uri>:<byte_offset>:<byte_length>")`.
   `content_hash` is one half of logical identity; the other half is
-  `namespace` (§3.1). Hydration keeps the first record it sees for a given
+  `namespace` (section 3.1). Hydration keeps the first record it sees for a given
   `(namespace, content_hash)` and reports later records as duplicates.
 - `memory_type`: `"fact"` (inline content) or `"file"` (byte-range reference).
   Readers treat any value other than `"file"` as inline.
@@ -96,7 +96,7 @@ older artifacts keep verifying.
 
 Three digest layers, computed in this order:
 
-1. **Record**: `(namespace, content_hash)` (above) — per-record logical
+1. **Record**: `(namespace, content_hash)` (above) -- per-record logical
    identity and the deduplication key.
 2. **Logical** (`logical_id` in the manifest): `SHA-256` of the concatenation
    of all record `content_hash` values in sorted order. This is the same
@@ -132,9 +132,10 @@ exist once per namespace.
 
 Source-reference normalization is syntactic and never reads, stats, or
 dereferences the target. `file://` URIs are reduced to their filesystem path,
-`.`/`..` components are collapsed, backslashes become `/`, and URI scheme and
-authority are lowercased. A remote/opaque URI is preserved except for those
-syntactic normalizations.
+`.`/`..` components are collapsed, backslashes become `/`, Windows drive
+letters are uppercased, paths inside `base_dir` are relativized to `base_dir`,
+and non-`file` URI scheme and authority are lowercased. A remote/opaque URI is
+preserved except for those syntactic normalizations.
 
 Rules:
 
@@ -157,21 +158,22 @@ Rules:
   actionable error instead of dropping data or silently weakening
   uniqueness. Pre-#100 file hashes (raw URI plus checksum) and pre-#100 bundle
   attachment hashes (byte digest) remain recognized as compatibility aliases
-  on write/re-import, so an upgrade does not duplicate them.
+  across writes, hydration, and SQLite imports via normalized reference-tuple
+  matching, so an upgrade does not duplicate them.
 - **Surfaces**: every ingestion path uses this pair or delegates to one that
   does:
 
 | Surface | Disposition |
 | --- | --- |
 | SQLite single/bulk insert and the v6 unique index | Uses `(namespace, content_hash)`; empty hashes excluded |
-| `MemoryDB.exists` / namespace batch lookup | Namespace-scoped; empty hashes never match |
-| SQLite fast-path import | Namespace-aware batch dedup; same-scope repeats skip |
-| Legacy JSONL / JSONL.GZ, Snapshot v2, interchange package | Namespace-aware batch dedup before insert |
-| Handoff hydration, bundles, annotations | Namespace-aware dedup/merge; bundle legacy byte hashes recognized |
+| `MemoryDB.exists` / `batch_existing_record_identities` | Namespace-scoped (with reference-tuple matching for legacy file rows); empty hashes never match |
+| SQLite fast-path import (`import_sqlite`) | Namespace-aware batch dedup and `target_namespace` propagation; same-scope repeats skip |
+| Legacy JSONL / JSONL.GZ, Snapshot v2, interchange package | Namespace-aware batch dedup before insert; intra-batch and cross-batch duplicate annotations merge cumulatively |
+| Handoff hydration, bundles, annotations | Namespace-aware dedup/merge; bundle write-scope guard inspects `metadata.json` and record namespaces |
 | Event replay | Inserts are deduplicated by the scoped unique index |
-| HTTP, embedded/relay MCP, CLI, Python clients, TypeScript SDK | Delegate to the runtime or transport the same identity; no independent hash policy |
+| HTTP, embedded/relay MCP, CLI, Python clients, TypeScript SDK, `swap.add_memory`, `Playground` | Delegate to the runtime or check `(namespace, content_hash)` before insert; preserve original row id and attribution |
 | OKF and mem0 importers | Emit canonical records consumed by the hydrate paths above |
-| Delta apply | Keyed by record `id`, does not deduplicate on `content_hash`; unaffected |
+| Delta apply | Keyed by record `id` with CAS check; rejects a new `record_id` that collides with another row's `(namespace, content_hash)` as a conflict |
 | Low-level `batch_existing_hashes` / `fetch_metadata_by_hashes` | Coarse hash-only helpers; never the final identity decision |
 
   `MemoryDB.fetch_metadata_by_namespace_hashes` is the scoped lookup used by

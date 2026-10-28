@@ -579,7 +579,7 @@ def test_typed_errors_are_provenance_errors():
     assert issubclass(BackingFileMissingError, ProvenanceError)
 
 
-# ── #100: namespace-scoped file-backed identity ──────────────────────────────
+# -- #100: namespace-scoped file-backed identity -----------------------------
 
 
 def test_file_backed_identity_is_namespace_scoped(tmp_db: MemoryDB, fixture_file: Path):

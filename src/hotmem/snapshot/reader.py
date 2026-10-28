@@ -169,7 +169,7 @@ def hydrate_v2(
         batch_seen: set[tuple[str, str]] = set()
 
         # Bounded-memory annotation context pass (#79): ids and evidence
-        # references only — never records — so streaming stays O(batch).
+        # references only -- never records -- so streaming stays O(batch).
         # See hydrate_package._scan_annotation_context for the rationale.
         with open(memories_path, encoding="utf-8") as f:
             package_ids, referenced_ids, has_annotations = _scan_annotation_context(f)

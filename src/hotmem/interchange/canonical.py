@@ -65,7 +65,7 @@ def write_canonical(f, record: dict[str, Any]) -> None:
 
 
 def compute_content_hash(identifier: str, fact_text: str) -> str:
-    """SHA-256 of identifier + fact_text — the inline content digest.
+    """SHA-256 of identifier + fact_text -- the inline content digest.
 
     This digest is deterministic and portable across HotMem versions. It is
     not, by itself, a logical identity: identity is ``(namespace,

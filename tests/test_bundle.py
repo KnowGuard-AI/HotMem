@@ -597,7 +597,7 @@ def test_attachment_uses_relative_uri(tmp_db: MemoryDB, tmp_path: Path):
     assert "data.csv" in uri
 
 
-# ── #100: namespace-scoped bundle identity ──────────────────────────────────
+# -- #100: namespace-scoped bundle identity ----------------------------------
 
 
 def test_bundle_attachments_follow_file_identity_and_skip_on_repeat(

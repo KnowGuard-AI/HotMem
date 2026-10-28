@@ -346,7 +346,7 @@ def hydrate_package(
         known_ids: set[str] | None = None
         if has_annotations:
             # A reference resolves against the package ids or the ids the
-            # target already stores — one chunked existence query for the
+            # target already stores -- one chunked existence query for the
             # referenced subset, never a full-store scan.
             known_ids = package_ids | db.fetch_existing_ids(referenced_ids)
 
