@@ -902,7 +902,13 @@ def _handle_snapshot(state: _ServerState, arguments: dict[str, Any]) -> CallTool
 def _handle_hydrate(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
     """Restore through the shared verify-before-hydrate format dispatch."""
     swap = arguments.get("file") or state.swap_path or "swap.jsonl"
-    result = snapshot_hydrate(state.db, swap, embedder=state.embedder)
+    target_ns = getattr(state, "namespace", "") or None
+    result = snapshot_hydrate(
+        state.db,
+        swap,
+        embedder=state.embedder,
+        target_namespace=target_ns,
+    )
     return _ok(
         {
             "loaded": result.loaded,
@@ -998,7 +1004,13 @@ def _handle_handoff_hydrate(state: _ServerState, arguments: dict[str, Any]) -> C
     from hotmem.handoff.verify import HandoffError
 
     try:
-        result = hydrate_handoff(state.db, str(arguments["package"]), embedder=state.embedder)
+        target_ns = getattr(state, "namespace", "") or None
+        result = hydrate_handoff(
+            state.db,
+            str(arguments["package"]),
+            embedder=state.embedder,
+            target_namespace=target_ns,
+        )
     except HandoffError as err:
         return _error(f"hydration not applied — verification failed ({err.reason}): {err}")
     return _ok(

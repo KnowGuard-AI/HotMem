@@ -1742,7 +1742,12 @@ class MemoryDB:
                 break
         return filtered
 
-    def import_sqlite(self, src_path: str | Path) -> tuple[int, int]:
+    def import_sqlite(
+        self,
+        src_path: str | Path,
+        *,
+        target_namespace: str | None = None,
+    ) -> tuple[int, int]:
         """Merge memories from another HotMem SQLite database (fast-path).
 
         Opens the source on a SEPARATE connection and only ever SELECTs from it,
@@ -1811,6 +1816,10 @@ class MemoryDB:
                     break
                 batch_seen.clear()
                 rows_dicts = [dict(row) for row in batch]
+                if target_namespace is not None:
+                    for d in rows_dicts:
+                        if not d.get("namespace"):
+                            d["namespace"] = target_namespace
                 existing = self.batch_existing_record_identities(rows_dicts)
                 records: list[MemoryRecord] = []
                 for d in rows_dicts:
@@ -1822,7 +1831,10 @@ class MemoryDB:
                         batch_seen.add(key)
                     # Build from the columns present; dataclass defaults fill the
                     # rest (missing v2 columns in v0.1 sources).
-                    records.append(MemoryRecord(**{c: d[c] for c in select_cols}))
+                    record_fields = {c: d[c] for c in select_cols}
+                    if d.get("namespace"):
+                        record_fields["namespace"] = str(d["namespace"])
+                    records.append(MemoryRecord(**record_fields))
                 if records:
                     inserted = self.insert_many_ignore(records)
                     loaded += inserted

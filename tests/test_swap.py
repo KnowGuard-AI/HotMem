@@ -698,3 +698,34 @@ def test_hydrate_file_record_deduplicates_across_legacy_and_canonical_hashes(
     assert second.loaded == 0
     assert second.skipped_dupes == 1
     assert tmp_db.count() == 1
+
+
+def test_hydrate_sqlite_propagates_target_namespace(tmp_db: MemoryDB, tmp_path: Path):
+    """#100: swap.hydrate passes target_namespace to SQLite fast-path imports."""
+    from hotmem.db import MemoryRecord
+
+    src = MemoryDB(tmp_path / "source.sqlite")
+    try:
+        src.insert_many_ignore(
+            [
+                MemoryRecord(
+                    id="sqlite-u1",
+                    identifier="doc",
+                    fact_text="fact from sqlite",
+                    embedding=b"",
+                    content_hash=compute_content_hash("doc", "fact from sqlite"),
+                    namespace="",
+                )
+            ]
+        )
+    finally:
+        src.close()
+
+    res = hydrate(tmp_db, tmp_path / "source.sqlite", target_namespace="scoped-ns")
+    assert res.loaded == 1
+    assert res.skipped_dupes == 0
+    assert tmp_db.get_memory("sqlite-u1")["namespace"] == "scoped-ns"
+
+    repeat = hydrate(tmp_db, tmp_path / "source.sqlite", target_namespace="scoped-ns")
+    assert repeat.loaded == 0
+    assert repeat.skipped_dupes == 1

@@ -249,7 +249,7 @@ def hydrate(
         return HydrateResult(loaded=0, skipped_dupes=0)
 
     if swap_path.suffix.lower() in (".sqlite", ".db"):
-        loaded, skipped = db.import_sqlite(swap_path)
+        loaded, skipped = db.import_sqlite(swap_path, target_namespace=target_namespace)
         return HydrateResult(loaded=loaded, skipped_dupes=skipped)
 
     with Timer() as t:

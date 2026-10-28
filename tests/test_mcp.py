@@ -650,3 +650,21 @@ def test_embedded_add_identity_is_namespace_scoped(state: _ServerState):
     assert state.db.count() == 2
     assert state.db.get_memory(a["memory_id"])["namespace"] == "ns-a"
     assert state.db.get_memory(b["memory_id"])["namespace"] == "ns-b"
+
+
+def test_embedded_hydrate_propagates_state_namespace(state: _ServerState, tmp_path: Path):
+    """#100: embedded MCP hydrate applies state.namespace to unscoped records."""
+    swap = tmp_path / "unscoped.jsonl"
+    swap.write_text(
+        json.dumps({"id": "mcp-hyd-1", "identifier": "doc", "fact_text": "mcp fact"}) + "\n",
+        encoding="utf-8",
+    )
+    state.namespace = "mcp-scope"
+    first = _text(_handle_hydrate(state, {"file": str(swap)}))
+    assert first["loaded"] == 1
+    assert first["skipped_dupes"] == 0
+    assert state.db.get_memory("mcp-hyd-1")["namespace"] == "mcp-scope"
+
+    second = _text(_handle_hydrate(state, {"file": str(swap)}))
+    assert second["loaded"] == 0
+    assert second["skipped_dupes"] == 1

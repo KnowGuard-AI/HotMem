@@ -613,3 +613,44 @@ def test_legacy_database_rows_keep_identity_when_index_migrates(tmp_path):
         ) == {("ns-a", "legacy-hash"), ("ns-b", "legacy-hash")}
     finally:
         db.close()
+
+
+def test_import_sqlite_applies_target_namespace_to_unscoped_rows(tmp_path):
+    """#100: import_sqlite fills target_namespace on unscoped rows and preserves explicit ones."""
+    src = MemoryDB(tmp_path / "src-unscoped.sqlite")
+    dst = MemoryDB(tmp_path / "dst-target.sqlite")
+    try:
+        src.insert_many_ignore(
+            [
+                MemoryRecord(
+                    id="u1",
+                    identifier="doc",
+                    fact_text="unscoped fact",
+                    embedding=b"",
+                    content_hash="hash-u1",
+                    namespace="",
+                ),
+                MemoryRecord(
+                    id="e1",
+                    identifier="doc",
+                    fact_text="explicit fact",
+                    embedding=b"",
+                    content_hash="hash-e1",
+                    namespace="explicit-ns",
+                ),
+            ]
+        )
+
+        assert dst.import_sqlite(
+            tmp_path / "src-unscoped.sqlite", target_namespace="target-ns"
+        ) == (2, 0)
+        assert dst.get_memory("u1")["namespace"] == "target-ns"
+        assert dst.get_memory("e1")["namespace"] == "explicit-ns"
+
+        # Repeating into the same target_namespace skips both.
+        assert dst.import_sqlite(
+            tmp_path / "src-unscoped.sqlite", target_namespace="target-ns"
+        ) == (0, 2)
+    finally:
+        src.close()
+        dst.close()
