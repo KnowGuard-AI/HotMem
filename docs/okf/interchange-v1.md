@@ -142,7 +142,9 @@ Rules:
   the original row id, provenance, tags, and metadata. Later writers do not
   replace the original record.
 - **Different namespaces, same content**: both records are stored, exported,
-  and hydrated independently.
+  and hydrated independently. `id` remains a store-wide primary key, so
+  logically distinct records must carry distinct ids (the runtime generates
+  a new id per write; importers preserve ids from the artifact).
 - **Empty `content_hash`**: there is no logical identity. The SQLite unique
   index is partial (`WHERE content_hash != ''`), and empty hashes never match
   each other or an `exists` lookup. Such rows are deduplicated only by their
