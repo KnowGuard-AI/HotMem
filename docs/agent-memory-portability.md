@@ -16,7 +16,8 @@ file and decompressed digests, record counts, schema compatibility, and
 path confinement — completes before any target write, and the restore is
 transactional: a corrupt package leaves the target untouched. Equivalent
 contents always produce the same logical identity regardless of
-compression or export time, repeated restores load zero records, and
+compression or export time, repeated restores into the same namespace load
+zero records, identical records in distinct namespaces remain distinct, and
 compatible stored embeddings are reused without re-embedding. The
 normative contract lives in `docs/okf/interchange-v1.md`; a reproducible
 end-to-end walkthrough runs at

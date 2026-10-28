@@ -247,7 +247,7 @@ rules** across retrieval (`search`, `list`, `get_memory`, `hydrate`,
   - Standard MCP stdio transport does **not** automatically expose a host's native conversation ID or automatic transcript capture. When `--session` / `HOTMEM_SESSION_ID` is passed to `hotmem mcp --url ...`, its lifetime is scoped to that relay process instance unless overridden per tool call. Do not assign one permanent static session ID across unrelated conversations; see **Native Client Task Synchronization (#125)** for per-hook native session wiring.
 - **Writer preservation, retries, and observed activity:**
   - Reader context on `/v1/search`, `/v1/memories`, `/v1/memory/{id}`, and `/v1/memory/{id}/hydrate` never mutates stored writer provenance or tags.
-  - Content-hash deduplication preserves the original writer's stored record and tags while recording subsequent attempts in scoped `memory.deduplicated` events.
+  - Namespace-scoped logical identity `(namespace, content_hash)` preserves the original writer's stored record and tags while recording subsequent same-scope attempts in scoped `memory.deduplicated` events. Identical content in another namespace is a distinct record.
   - Idempotency-key retries (`X-HotMem-Idempotency-Key`) include `tags`, `harness_id`, `source`, `namespace`, and `metadata` in the request fingerprint; changed context or tags under a repeated key fail with `409 idempotency_key_conflict`.
   - Activity (`GET /v1/events`) reports only genuine HotMem-observed, permission-scoped operations (`memory.created`, `memory.deduplicated`, `snapshot.imported`, `handoff.applied`, etc.) and reuses existing `ttl_seconds` and event retention mechanisms without client-presence polling.
 

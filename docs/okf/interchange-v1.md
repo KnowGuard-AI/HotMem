@@ -36,13 +36,19 @@ One JSON object per line. Fields are **required**, **conditionally required**,
 - `id`: record identity within a stream. Importers derive it deterministically
   (for example the OKF importer hashes `concept_id + content_hash`); the
   runtime dump uses the stored row id. `id` is **not** part of logical
-  identity — `content_hash` is.
+  identity.
 - `identifier`: the logical name the memory is filed under.
-- `content_hash`: `SHA-256("<identifier>:<fact_text>")` hex. Two records with
-  equal `content_hash` are the same memory; hydration keeps the first and
-  reports the rest as duplicates.
+- `content_hash`: the record's content digest. Inline records use
+  `SHA-256("<identifier>:<fact_text>")`; file-backed records use
+  `SHA-256("hotmem-file-ref-v1:<identifier>:<normalized_source_uri>:<byte_offset>:<byte_length>")`.
+  `content_hash` is one half of logical identity; the other half is
+  `namespace` (§3.1). Hydration keeps the first record it sees for a given
+  `(namespace, content_hash)` and reports later records as duplicates.
 - `memory_type`: `"fact"` (inline content) or `"file"` (byte-range reference).
   Readers treat any value other than `"file"` as inline.
+- `source_checksum`: optional **byte-integrity evidence** for the referenced
+  range. It is verified on hydration only and is never part of logical
+  identity: adding or correcting a checksum must not create a new memory.
 - `fact_text` / `fact_summary`: prompt-ready content, or its summary when only
   a reference is carried.
 - `embedding` / `embedding_dim` / `embedding_model`: base64 float32 blob plus
@@ -90,13 +96,14 @@ older artifacts keep verifying.
 
 Three digest layers, computed in this order:
 
-1. **Record**: `content_hash` (above) — per-record logical identity and the
-   deduplication key.
+1. **Record**: `(namespace, content_hash)` (above) — per-record logical
+   identity and the deduplication key.
 2. **Logical** (`logical_id` in the manifest): `SHA-256` of the concatenation
    of all record `content_hash` values in sorted order. This is the same
    algorithm as Snapshot v2 `snapshot_id`
-   (`hotmem.snapshot.format.compute_snapshot_id`); equivalent contents always
-   produce an equal `logical_id`.
+   (`hotmem.snapshot.format.compute_snapshot_id`); equivalent content sets
+   always produce an equal `logical_id`. This content-set digest does not
+   encode namespaces (#100); it is not a per-record identity check.
 3. **File**: per-file `{size, sha256}` of the bytes actually stored, plus
    `decompressed_sha256` for compressed payloads.
 
@@ -104,6 +111,59 @@ Logical identity **excludes**: compression, record order in the payload,
 export timestamps, host, tool version, and derived embeddings. Two packages
 with the same `logical_id` are interchangeable regardless of how they were
 compressed or when they were exported.
+
+### 3.1 Namespace-scoped identity contract (#100)
+
+Logical identity is the pair:
+
+```
+(namespace, content_hash)
+```
+
+`namespace` is a portable data scope, not authentication or authorization.
+It participates in uniqueness and deduplication but is deliberately not
+folded into `content_hash`, so the same inline fact or file reference can
+exist once per namespace.
+
+| Kind | Values that establish identity | Values that only verify content |
+| --- | --- | --- |
+| Inline | `namespace`, `content_hash = SHA-256(identifier + ":" + fact_text)` | none |
+| File-backed | `namespace`, `content_hash = SHA-256("hotmem-file-ref-v1:" + identifier + ":" + normalized_source_uri + ":" + byte_offset + ":" + byte_length)` | `source_checksum` (SHA-256 of the referenced byte range) |
+
+Source-reference normalization is syntactic and never reads, stats, or
+dereferences the target. `file://` URIs are reduced to their filesystem path,
+`.`/`..` components are collapsed, backslashes become `/`, and URI scheme and
+authority are lowercased. A remote/opaque URI is preserved except for those
+syntactic normalizations.
+
+Rules:
+
+- **Same scope, same identity**: hydration/storage reports a skip and keeps
+  the original row id, provenance, tags, and metadata. Later writers do not
+  replace the original record.
+- **Different namespaces, same content**: both records are stored, exported,
+  and hydrated independently.
+- **Empty `content_hash`**: there is no logical identity. The SQLite unique
+  index is partial (`WHERE content_hash != ''`), and empty hashes never match
+  each other or an `exists` lookup. Such rows are deduplicated only by their
+  primary-key `id`.
+- **Legacy content hashes**: hashes written before #100 are opaque identity
+  tokens and are preserved. Existing databases migrate the uniqueness scope
+  from global `content_hash` to `(namespace, content_hash)` when the partial
+  index is absent (schema v6). If a legacy database already contains duplicate
+  `(namespace, content_hash)` rows, migration fails atomically with an
+  actionable error instead of dropping data or silently weakening
+  uniqueness. Pre-#100 file hashes (raw URI plus checksum) and pre-#100 bundle
+  attachment hashes (byte digest) remain recognized as compatibility aliases
+  on write/re-import, so an upgrade does not duplicate them.
+- **Surfaces**: SQLite single/bulk insert, `exists`, hash-batch lookups,
+  SQLite fast-path import, legacy JSONL/JSONL.GZ, Snapshot v2, interchange
+  package, handoff hydration, bundles, annotations, events replay, HTTP,
+  embedded and relay MCP, CLI, Python clients, and the TypeScript SDK all use
+  this pair or delegate to an ingestion path that does. The low-level
+  `MemoryDB.batch_existing_hashes` remains a coarse hash-only pre-filter and
+  is never the final identity decision. Delta apply is keyed by record `id`
+  and does not deduplicate on `content_hash`, so it is unaffected.
 
 ## 4. Compression and transport
 
@@ -212,9 +272,11 @@ event log (`occurred_at`) and attachment portability stays with Snapshot v2.
 ## 7. Hydration semantics
 
 - `loaded`: records inserted.
-- `skipped_dupes`: records whose `content_hash` already exists in the target
-  (or earlier in the same payload). Idempotent: re-hydrating a package into
-  the same instance reports `loaded == 0`.
+- `skipped_dupes`: records whose `(namespace, content_hash)` already exists in
+  the target (or earlier in the same payload). Idempotent: re-hydrating a
+  package into the same namespace reports `loaded == 0`. Identical records in
+  another namespace are loaded, not skipped. Records with an empty
+  `content_hash` have no identity and are not deduplicated by hash.
 - `invalid`: records that parsed but failed validation and were **not**
   inserted (for example: no usable text and no compatible embedding).
 - **Hard failures** — hydration halts and the target remains unchanged:
