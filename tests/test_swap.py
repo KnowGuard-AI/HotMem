@@ -573,3 +573,31 @@ def test_swap_unicode_and_lf_roundtrip(
     assert db_gz.all_rows()[0]["fact_text"] == fact
     db_plain.close()
     db_gz.close()
+
+
+@pytest.mark.parametrize("suffix", [".jsonl", ".jsonl.gz"])
+def test_hydrate_identity_is_namespace_scoped(tmp_db: MemoryDB, tmp_path: Path, suffix: str):
+    """#100: legacy JSONL/JSONL.GZ keeps namespace twins and skips same-scope repeats."""
+    import gzip
+
+    swap = tmp_path / f"scoped{suffix}"
+    lines = [
+        json.dumps({"identifier": "doc", "fact_text": "same fact", "namespace": "ns-a"}),
+        json.dumps({"identifier": "doc", "fact_text": "same fact", "namespace": "ns-b"}),
+        json.dumps({"identifier": "doc", "fact_text": "same fact", "namespace": "ns-a"}),
+    ]
+    if suffix.endswith(".gz"):
+        with gzip.open(swap, "wt", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    else:
+        swap.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    first = hydrate(tmp_db, swap)
+    assert first.loaded == 2
+    assert first.skipped_dupes == 1
+    assert {row["namespace"] for row in tmp_db.all_rows()} == {"ns-a", "ns-b"}
+
+    second = hydrate(tmp_db, swap)
+    assert second.loaded == 0
+    assert second.skipped_dupes == 3
+    assert tmp_db.count() == 2

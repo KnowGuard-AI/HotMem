@@ -60,10 +60,12 @@ def write_canonical(f, record: dict[str, Any]) -> None:
 
 
 def compute_content_hash(identifier: str, fact_text: str) -> str:
-    """SHA-256 of identifier + fact_text — the per-record logical identity.
+    """SHA-256 of identifier + fact_text — the inline content digest.
 
-    Canonical, portable, and stable across HotMem versions. Two records with
-    the same hash are the same memory; hydration deduplicates on it.
+    This digest is deterministic and portable across HotMem versions. It is
+    not, by itself, a logical identity: identity is ``(namespace,
+    content_hash)`` (#100), so the same fact may exist once in each
+    namespace. The formula is unchanged from pre-#100 artifacts.
     """
     return hashlib.sha256(f"{identifier}:{fact_text}".encode()).hexdigest()
 
@@ -72,8 +74,10 @@ def logical_id(content_hashes: list[str]) -> str:
     """Deterministic logical identity of a record set (interchange-v1 §3).
 
     SHA-256 over the sorted content_hash concatenation: equal for equivalent
-    contents regardless of record order, compression, export time, or
-    embeddings. Same algorithm as Snapshot v2's ``snapshot_id``.
+    content sets regardless of record order, compression, export time, or
+    embeddings. This is a content-set digest, not the per-record identity
+    tuple; it does not encode namespaces (#100). Same algorithm as Snapshot
+    v2's ``snapshot_id``.
     """
     return sha256_bytes("".join(sorted(content_hashes)).encode())
 

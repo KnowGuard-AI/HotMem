@@ -595,3 +595,80 @@ def test_attachment_uses_relative_uri(tmp_db: MemoryDB, tmp_path: Path):
     # Should be a relative path, not absolute.
     assert not Path(uri).is_absolute(), f"expected relative URI, got {uri}"
     assert "data.csv" in uri
+
+
+# ── #100: namespace-scoped bundle identity ──────────────────────────────────
+
+
+def test_bundle_attachments_follow_file_identity_and_skip_on_repeat(
+    tmp_db: MemoryDB, full_bundle: Path
+):
+    """Same bundle repeat is idempotent; attachments use reference identity."""
+    first = read_bundle(tmp_db, full_bundle)
+    assert first.loaded == 7
+    assert first.skipped_dupes == 0
+
+    second = read_bundle(tmp_db, full_bundle)
+    assert second.loaded == 0
+    assert second.skipped_dupes == 7
+    assert tmp_db.count() == 7
+
+    file_rows = [r for r in tmp_db.all_rows() if r["memory_type"] == "file"]
+    assert len(file_rows) == 2
+    for row in file_rows:
+        assert row["content_hash"] != ""
+        assert row["source_uri"].startswith("attachments/")
+
+
+def test_bundle_attachment_twins_survive_in_distinct_namespaces(
+    tmp_db: MemoryDB, full_bundle: Path
+):
+    """The same bundle content in two namespaces produces two record sets."""
+    metadata = full_bundle / "metadata.json"
+    original = json.loads(metadata.read_text(encoding="utf-8"))
+
+    first = read_bundle(tmp_db, full_bundle)
+    assert first.loaded == 7
+    metadata.write_text(json.dumps({**original, "namespace": "reports-b"}), encoding="utf-8")
+    second = read_bundle(tmp_db, full_bundle)
+    assert second.loaded == 7
+    assert tmp_db.count() == 14
+    assert {r["namespace"] for r in tmp_db.all_rows()} == {"reports", "reports-b"}
+
+    metadata.write_text(json.dumps(original), encoding="utf-8")
+    again = read_bundle(tmp_db, full_bundle)
+    assert again.loaded == 0
+    assert again.skipped_dupes == 7
+    assert tmp_db.count() == 14
+
+
+def test_bundle_attachment_legacy_byte_hash_is_recognized(tmp_db: MemoryDB, full_bundle: Path):
+    """A bundle attachment stored under the pre-#100 byte hash is not duplicated."""
+    import hashlib
+
+    from hotmem.db import MemoryRecord
+
+    att = full_bundle / "attachments" / "invoice.csv"
+    legacy_hash = hashlib.sha256(att.read_bytes()).hexdigest()
+    tmp_db.insert_many_ignore(
+        [
+            MemoryRecord(
+                id="legacy-attachment",
+                identifier=f"{full_bundle.name}:invoice.csv",
+                fact_text="",
+                embedding=b"",
+                content_hash=legacy_hash,
+                namespace="reports",
+                memory_type="file",
+                source_uri="attachments/invoice.csv",
+                source_format="csv",
+                byte_offset=0,
+                byte_length=len(att.read_bytes()),
+            )
+        ]
+    )
+
+    result = read_bundle(tmp_db, full_bundle)
+    assert result.skipped_dupes == 1
+    assert result.loaded == 6
+    assert tmp_db.count() == 7

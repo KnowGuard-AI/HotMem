@@ -2,7 +2,8 @@
 
 Purpose:
     Load memories from a swap file (JSONL) into the database, and export
-    the current database state back to a swap file. Deduplicates on content_hash.
+    the current database state back to a swap file. Deduplicates on the
+    namespace-scoped logical identity ``(namespace, content_hash)`` (#100).
 
     Hydration runs every record through the shared interchange normalization
     (hotmem.interchange, issue #67): all v2 fields survive the round-trip,
@@ -231,7 +232,8 @@ def hydrate(
     """Load memories from a swap file into the database.
 
     Accepts JSONL, JSONL.GZ, or a HotMem SQLite database (.sqlite/.db).
-    Deduplicates by content_hash - skips rows that already exist in the DB.
+    Deduplicates by ``(namespace, content_hash)`` - skips rows that already
+    exist in the same namespace; identical records in another namespace load.
     For SQLite sources, embeddings are reused as-is (fast-path, no recompute).
 
     Every record goes through the shared interchange normalization (issue

@@ -137,7 +137,8 @@ def hydrate_v2(
 ) -> HydrateResult:
     """Verify the manifest and load all memories into the DB.
 
-    Deduplicates by ``content_hash`` (skips rows that already exist). Never
+    Deduplicates by ``(namespace, content_hash)`` (skips rows that already
+    exist in the same namespace). Never
     touches backing files for file-backed memories — references are preserved.
     Uses stored embeddings only when compatible (descriptor/dim/blob);
     otherwise re-embeds fact_text or fact_summary under ``embedder`` (issue

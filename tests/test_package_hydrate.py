@@ -410,3 +410,33 @@ def test_midstream_corruption_rolls_back_everything(tmp_path: Path, src_db: Memo
         hydrate_package(target, out)
     assert _fingerprint(target) == before  # zero rows from the good prefix
     target.close()
+
+
+def test_restore_identity_is_namespace_scoped_and_repeat_is_idempotent(tmp_path: Path):
+    """#100: package restore keeps namespace twins and skips same-scope repeats."""
+    src = MemoryDB(tmp_path / "src-scoped.sqlite")
+    content_hash = compute_content_hash("doc", "same fact")
+    for ns, memory_id in (("ns-a", "a"), ("ns-b", "b")):
+        src.insert(
+            id=memory_id,
+            identifier="doc",
+            fact_text="same fact",
+            embedding=pack_embedding(embed_text("same fact")),
+            content_hash=content_hash,
+            namespace=ns,
+        )
+    out = tmp_path / "scoped.pkg"
+    write_package(src, out)
+    src.close()
+
+    target = MemoryDB(tmp_path / "target-scoped.sqlite")
+    first = hydrate_package(target, out)
+    assert first.loaded == 2
+    assert first.skipped_dupes == 0
+    assert {row["namespace"] for row in target.all_rows()} == {"ns-a", "ns-b"}
+
+    second = hydrate_package(target, out)
+    assert second.loaded == 0
+    assert second.skipped_dupes == 2
+    assert target.count() == 2
+    target.close()
