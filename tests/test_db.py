@@ -319,6 +319,30 @@ def test_list_by_identifier_chronological(tmp_db: MemoryDB):
     assert [r["id"] for r in desc] == ["second", "first"]
 
 
+def test_list_by_identifier_same_timestamp_uses_insertion_order(tmp_db: MemoryDB):
+    for memory_id in ("first", "second", "third"):
+        tmp_db.insert(
+            id=memory_id,
+            identifier="chat",
+            fact_text=f"state {memory_id}",
+            embedding=pack_embedding(embed_text(f"state {memory_id}")),
+            created_at="2026-01-01T00:00:00Z",
+        )
+
+    assert [r["id"] for r in tmp_db.list_by_identifier("chat", order="asc")] == [
+        "first",
+        "second",
+        "third",
+    ]
+    assert [r["id"] for r in tmp_db.list_by_identifier("chat", order="desc")] == [
+        "third",
+        "second",
+        "first",
+    ]
+    filtered = tmp_db.list_by_identifier("chat", order="desc", row_filter=lambda row: True)
+    assert [r["id"] for r in filtered] == ["third", "second", "first"]
+
+
 def test_list_by_identifier_limit(tmp_db: MemoryDB):
     blob = pack_embedding(embed_text("fact"))
     for i in range(5):

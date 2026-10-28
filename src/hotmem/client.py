@@ -223,6 +223,21 @@ class HotMemClient:
         resp.raise_for_status()
         return resp.content
 
+    def list_with_disclosure(
+        self,
+        identifier: str,
+        *,
+        order: str = "asc",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Return the complete exact-identifier envelope, including disclosure counts."""
+        resp = self._client.get(
+            "/v1/memories",
+            params={"identifier": identifier, "order": order, "limit": limit},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def list(
         self,
         identifier: str,
@@ -230,13 +245,8 @@ class HotMemClient:
         order: str = "asc",
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Return memories for an identifier in created_at order."""
-        resp = self._client.get(
-            "/v1/memories",
-            params={"identifier": identifier, "order": order, "limit": limit},
-        )
-        resp.raise_for_status()
-        return resp.json()["memories"]
+        """Return visible memories for an identifier in deterministic list order."""
+        return self.list_with_disclosure(identifier, order=order, limit=limit)["memories"]
 
     def hydrate(self, file: str | None = None) -> dict[str, Any]:
         """Trigger swap file or v2 directory hydration."""
@@ -567,6 +577,21 @@ class AsyncHotMemClient:
         resp.raise_for_status()
         return resp.content
 
+    async def list_with_disclosure(
+        self,
+        identifier: str,
+        *,
+        order: str = "asc",
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Return the complete exact-identifier envelope, including disclosure counts."""
+        resp = await self._client.get(
+            "/v1/memories",
+            params={"identifier": identifier, "order": order, "limit": limit},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     async def list(
         self,
         identifier: str,
@@ -574,13 +599,8 @@ class AsyncHotMemClient:
         order: str = "asc",
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Return memories for an identifier in created_at order."""
-        resp = await self._client.get(
-            "/v1/memories",
-            params={"identifier": identifier, "order": order, "limit": limit},
-        )
-        resp.raise_for_status()
-        return resp.json()["memories"]
+        """Return visible memories for an identifier in deterministic list order."""
+        return (await self.list_with_disclosure(identifier, order=order, limit=limit))["memories"]
 
     async def hydrate(self, file: str | None = None) -> dict[str, Any]:
         """Trigger swap file or v2 directory hydration."""

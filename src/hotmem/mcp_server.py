@@ -82,6 +82,15 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "required": ["query"],
     },
+    "list_memories": {
+        "type": "object",
+        "properties": {
+            "identifier": {"type": "string"},
+            "order": {"type": "string", "enum": ["asc", "desc"]},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+        },
+        "required": ["identifier"],
+    },
     "memory_health": {
         "type": "object",
         "properties": {},
@@ -196,65 +205,8 @@ def create_server(
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        """Declare the tools exposed by this MCP server."""
-        return [
-            Tool(
-                name="add_memory",
-                description="Store a fact in HotMem memory.",
-                inputSchema=_TOOL_SCHEMAS["add_memory"],
-            ),
-            Tool(
-                name="search_memories",
-                description="Search HotMem and return ranked, LLM-ready message objects.",
-                inputSchema=_TOOL_SCHEMAS["search_memories"],
-            ),
-            Tool(
-                name="memory_health",
-                description="Return HotMem status: memory count, uptime, and database path.",
-                inputSchema=_TOOL_SCHEMAS["memory_health"],
-            ),
-            Tool(
-                name="snapshot",
-                description=(
-                    "Export memories to a verified Snapshot v2 directory or JSONL/JSONL.GZ."
-                ),
-                inputSchema=_TOOL_SCHEMAS["snapshot"],
-            ),
-            Tool(
-                name="hydrate",
-                description="Restore a verified snapshot directory or JSONL/JSONL.GZ into HotMem.",
-                inputSchema=_TOOL_SCHEMAS["hydrate"],
-            ),
-            Tool(
-                name="handoff_prepare",
-                description=(
-                    "Prepare a hotmem-handoff-v1 package from a source export "
-                    "(#101). Requires explicit consent; capture is never implicit."
-                ),
-                inputSchema=_TOOL_SCHEMAS["handoff_prepare"],
-            ),
-            Tool(
-                name="handoff_inspect",
-                description=(
-                    "Read-only inspection of a handoff package: identity, counts, "
-                    "coverage, omissions, redactions, or the failure reason."
-                ),
-                inputSchema=_TOOL_SCHEMAS["handoff_inspect"],
-            ),
-            Tool(
-                name="handoff_verify",
-                description="Fail-closed verification of a handoff package.",
-                inputSchema=_TOOL_SCHEMAS["handoff_verify"],
-            ),
-            Tool(
-                name="handoff_hydrate",
-                description=(
-                    "Hydrate a verified handoff package into this HotMem instance "
-                    "(atomic, idempotent)."
-                ),
-                inputSchema=_TOOL_SCHEMAS["handoff_hydrate"],
-            ),
-        ]
+        """Declare the same additive tool contract in embedded and relay modes."""
+        return _build_tool_list()
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
@@ -266,6 +218,8 @@ def create_server(
                 return _handle_add_memory(active_state, arguments)
             if name == "search_memories":
                 return _handle_search_memories(active_state, arguments)
+            if name == "list_memories":
+                return _handle_list_memories(active_state, arguments)
             if name == "memory_health":
                 return _handle_memory_health(active_state, arguments)
             if name == "snapshot":
@@ -363,18 +317,26 @@ def _build_tool_list() -> list[Tool]:
             inputSchema=_TOOL_SCHEMAS["search_memories"],
         ),
         Tool(
+            name="list_memories",
+            description=(
+                "List memories for an exact identifier in deterministic chronological "
+                "order without semantic ranking."
+            ),
+            inputSchema=_TOOL_SCHEMAS["list_memories"],
+        ),
+        Tool(
             name="memory_health",
             description="Return HotMem status: memory count, uptime, and database path.",
             inputSchema=_TOOL_SCHEMAS["memory_health"],
         ),
         Tool(
             name="snapshot",
-            description="Export all memories to a JSONL swap file.",
+            description=("Export memories to a verified Snapshot v2 directory or JSONL/JSONL.GZ."),
             inputSchema=_TOOL_SCHEMAS["snapshot"],
         ),
         Tool(
             name="hydrate",
-            description="Load memories from a JSONL swap file into HotMem.",
+            description="Restore a verified Snapshot v2 directory or JSONL/JSONL.GZ into HotMem.",
             inputSchema=_TOOL_SCHEMAS["hydrate"],
         ),
         Tool(
@@ -567,6 +529,12 @@ def create_relay_server(
                 resp = await owned_client._client.post("/v1/search", json=payload)
                 resp.raise_for_status()
                 return _ok(resp.json())
+
+            if name == "list_memories":
+                identifier, order, limit = _parse_list_memories_arguments(arguments)
+                return _ok(
+                    await owned_client.list_with_disclosure(identifier, order=order, limit=limit)
+                )
 
             if name == "memory_health":
                 res = await owned_client.health()
@@ -846,6 +814,40 @@ def _handle_add_memory(state: _ServerState, arguments: dict[str, Any]) -> CallTo
         payload["deduplicated"] = True
     _trace.info("tool", "added memory", detail={"memory_id": memory_id})
     return _ok(payload)
+
+
+def _parse_list_memories_arguments(arguments: dict[str, Any]) -> tuple[str, str, int]:
+    identifier = arguments.get("identifier")
+    if not isinstance(identifier, str) or not identifier:
+        raise ValueError("identifier must be a non-empty string")
+    order = arguments.get("order", "asc")
+    if not isinstance(order, str) or order not in {"asc", "desc"}:
+        raise ValueError("order must be 'asc' or 'desc'")
+    limit = arguments.get("limit", 100)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+        raise ValueError("limit must be an integer between 1 and 1000")
+    return identifier, order, limit
+
+
+def _handle_list_memories(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
+    """List exact-identifier memories with the embedded namespace applied when configured."""
+    identifier, order, limit = _parse_list_memories_arguments(arguments)
+    namespace = getattr(state, "namespace", "") or ""
+    row_filter = (lambda row: row.get("namespace") == namespace) if namespace else None
+    with Timer() as t:
+        memories = state.db.list_by_identifier(
+            identifier,
+            order=order,
+            limit=limit,
+            row_filter=row_filter,
+        )
+    return _ok(
+        {
+            "memories": memories,
+            "count": len(memories),
+            "trace_ms": round(t.ms, 2),
+        }
+    )
 
 
 def _handle_search_memories(state: _ServerState, arguments: dict[str, Any]) -> CallToolResult:
