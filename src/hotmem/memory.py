@@ -83,12 +83,21 @@ class HydratedContent:
     byte_length: int
 
 
-def normalize_source_uri(source_uri: str) -> str:
+def normalize_source_uri(
+    source_uri: str,
+    *,
+    base_dir: str | Path | None = None,
+) -> str:
     """Syntactic source-reference normalization (see canonical module)."""
-    return canonical.normalize_source_uri(source_uri)
+    return canonical.normalize_source_uri(source_uri, base_dir=base_dir)
 
 
-def compute_file_content_hash(identifier: str, ref: FileRef) -> str:
+def compute_file_content_hash(
+    identifier: str,
+    ref: FileRef,
+    *,
+    base_dir: str | Path | None = None,
+) -> str:
     """Logical identity digest for a file-backed reference (#100).
 
     Covers the identifier and normalized source reference tuple only. The
@@ -96,7 +105,11 @@ def compute_file_content_hash(identifier: str, ref: FileRef) -> str:
     correcting or adding a checksum must not create a new logical memory.
     """
     return canonical.compute_file_reference_hash(
-        identifier, ref.source_uri, ref.byte_offset, ref.byte_length
+        identifier,
+        ref.source_uri,
+        ref.byte_offset,
+        ref.byte_length,
+        base_dir=base_dir,
     )
 
 
@@ -115,9 +128,14 @@ def legacy_file_content_hashes(identifier: str, ref: FileRef) -> tuple[str, ...]
     return tuple(hashes)
 
 
-def _file_ref_content_hash(identifier: str, ref: FileRef) -> str:
+def _file_ref_content_hash(
+    identifier: str,
+    ref: FileRef,
+    *,
+    base_dir: str | Path | None = None,
+) -> str:
     """Backward-compatible alias for :func:`compute_file_content_hash`."""
-    return compute_file_content_hash(identifier, ref)
+    return compute_file_content_hash(identifier, ref, base_dir=base_dir)
 
 
 def find_existing_file_record(
@@ -125,9 +143,12 @@ def find_existing_file_record(
     namespace: str,
     identifier: str,
     ref: FileRef,
+    *,
+    base_dir: str | Path | None = None,
 ) -> dict[str, Any] | None:
     """Return an existing row for this reference, including legacy hashes."""
     for content_hash in (
+        compute_file_content_hash(identifier, ref, base_dir=base_dir),
         compute_file_content_hash(identifier, ref),
         *legacy_file_content_hashes(identifier, ref),
     ):
@@ -183,12 +204,12 @@ def add_file_backed(
             raise FileNotFoundError(f"backing file not found: {file_ref.source_uri}")
 
         active = embedder if embedder is not None else DEFAULT_EMBEDDER
-        existing = find_existing_file_record(db, namespace, identifier, file_ref)
+        existing = find_existing_file_record(db, namespace, identifier, file_ref, base_dir=base_dir)
         if existing is not None:
             return str(existing["id"]), str(existing["content_hash"])
 
         memory_id = uuid.uuid4().hex
-        content_hash = compute_file_content_hash(identifier, file_ref)
+        content_hash = compute_file_content_hash(identifier, file_ref, base_dir=base_dir)
 
         if summary:
             vec = active.embed(summary)

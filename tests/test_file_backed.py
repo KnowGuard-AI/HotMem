@@ -695,3 +695,103 @@ def test_http_file_identity_is_namespace_scoped(app_client: TestClient):
     assert b_row["provenance"]["namespace"] == "ns-b"
     assert a_row["source_uri"] == fixture_path.name
     assert b_row["source_uri"] == fixture_path.name
+
+
+def test_normalize_source_uri_handles_windows_remote_and_base_dir(
+    tmp_db: MemoryDB, fixture_file: Path
+):
+    """#100: syntactic URI normalization handles file://, Windows drives, and base_dir."""
+    from hotmem.interchange.canonical import compute_file_reference_hash, normalize_source_uri
+
+    assert normalize_source_uri("file://C:/path%20with%20space.txt") == "C:/path with space.txt"
+    assert normalize_source_uri("file:///c:/path%20with%20space.txt") == "C:/path with space.txt"
+    assert normalize_source_uri("C:\\path with space.txt") == "C:/path with space.txt"
+    assert (
+        normalize_source_uri("file://remote-host/share/a%23b.txt")
+        == "file://remote-host/share/a%23b.txt"
+    )
+    assert normalize_source_uri("file:////tmp/a.bin") == "/tmp/a.bin"
+    assert normalize_source_uri("//tmp/a.bin") == "/tmp/a.bin"
+
+    base_dir = str(fixture_file.parent)
+    rel_ref = FileRef(
+        source_uri=fixture_file.name, byte_offset=10, byte_length=20, source_format="bin"
+    )
+    abs_ref = FileRef(
+        source_uri=str(fixture_file), byte_offset=10, byte_length=20, source_format="bin"
+    )
+    uri_ref = FileRef(
+        source_uri=fixture_file.as_uri(), byte_offset=10, byte_length=20, source_format="bin"
+    )
+
+    first_id, first_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=rel_ref, base_dir=base_dir, namespace="ns"
+    )
+    second_id, second_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=abs_ref, base_dir=base_dir, namespace="ns"
+    )
+    third_id, third_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=uri_ref, base_dir=base_dir, namespace="ns"
+    )
+    assert (second_id, second_hash) == (first_id, first_hash)
+    assert (third_id, third_hash) == (first_id, first_hash)
+    assert first_hash == compute_file_reference_hash("ds", fixture_file.name, 10, 20)
+    assert tmp_db.count() == 1
+
+
+def test_export_host_path_redaction_recomputes_file_content_hash(tmp_path: Path):
+    """#100: when export sanitizes an absolute source_uri, content_hash matches the portable URI."""
+    import json
+
+    from hotmem.interchange.canonical import compute_file_reference_hash
+    from hotmem.policy import CallerCredential, PolicyConfig
+    from hotmem.runtime import HotMemRuntime
+
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    backing = mount / "data.bin"
+    backing.write_bytes(b"0123456789abcdef")
+
+    db = MemoryDB(mount / "hotmem.sqlite")
+    # Insert with base_dir=None so stored content_hash uses the absolute host path.
+    add_file_backed(
+        db,
+        identifier="ds",
+        file_ref=FileRef(
+            source_uri=str(backing), byte_offset=0, byte_length=8, source_format="bin"
+        ),
+        namespace="team-a",
+    )
+    db.close()
+
+    policy = PolicyConfig(
+        store_id="store-100",
+        require_auth=True,
+        redact_host_paths=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-export",
+                caller_id="exporter",
+                store_id="store-100",
+                namespaces=("team-a",),
+                operations=("read", "export"),
+            )
+        ],
+    )
+    rt = HotMemRuntime(db_path=mount / "hotmem.sqlite", base_dir=mount, policy=policy)
+    rt.start()
+    try:
+        ctx = rt.resolve_caller(
+            token="tok-export",
+            requested_store_id="store-100",
+            session_id="sess-1",
+            harness_id="pytest",
+            namespace="team-a",
+        )
+        out_jsonl = mount / "export.jsonl"
+        rt.snapshot(ctx, target=str(out_jsonl))
+        exported = json.loads(out_jsonl.read_text(encoding="utf-8").strip())
+        assert exported["source_uri"] == "data.bin"
+        assert exported["content_hash"] == compute_file_reference_hash("ds", "data.bin", 0, 8)
+    finally:
+        rt.stop()

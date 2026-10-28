@@ -622,3 +622,20 @@ def test_hydrate_file_record_without_hash_uses_reference_identity(tmp_db: Memory
     assert result.loaded == 1
     row = tmp_db.all_rows()[0]
     assert row["content_hash"] == compute_file_reference_hash("dataset", "./data.csv", 0, 5)
+
+
+def test_normalize_record_strips_whitespace_content_hash(tmp_db: MemoryDB, tmp_path: Path):
+    """#100: whitespace-only content_hash is treated as missing and recomputed."""
+    swap = tmp_path / "whitespace-hash.jsonl"
+    record = {
+        "identifier": "doc",
+        "fact_text": "hello",
+        "content_hash": "   ",
+        "namespace": "ns-a",
+    }
+    swap.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    result = hydrate(tmp_db, swap)
+    assert result.loaded == 1
+    row = tmp_db.all_rows()[0]
+    assert row["content_hash"] == compute_content_hash("doc", "hello")

@@ -662,8 +662,10 @@ class HotMemRuntime:
                     source_format=source_format or "",
                     source_checksum=source_checksum,
                 )
-                content_hash = compute_file_content_hash(identifier, ref)
-                existing_row = find_existing_file_record(db, target_namespace, identifier, ref)
+                content_hash = compute_file_content_hash(identifier, ref, base_dir=self.base_dir)
+                existing_row = find_existing_file_record(
+                    db, target_namespace, identifier, ref, base_dir=self.base_dir
+                )
                 if existing_row is not None:
                     memory_id = str(existing_row["id"])
                     content_hash = str(existing_row["content_hash"])
@@ -1315,9 +1317,21 @@ class HotMemRuntime:
                 if embed_text:
                     disclosed["embedding"] = pack_embedding(self.embedder.embed(embed_text))
             if ctx.redact_host_paths_enabled and disclosed.get("source_uri"):
-                disclosed["source_uri"] = ctx.sanitize_source_uri(
+                sanitized_uri = ctx.sanitize_source_uri(
                     disclosed.get("source_uri"), base_dir=self.base_dir
                 )
+                if sanitized_uri != disclosed.get("source_uri"):
+                    disclosed["source_uri"] = sanitized_uri
+                    if disclosed.get("memory_type") == "file":
+                        disclosed["content_hash"] = compute_file_content_hash(
+                            str(disclosed.get("identifier") or ""),
+                            FileRef(
+                                source_uri=sanitized_uri,
+                                byte_offset=int(disclosed.get("byte_offset") or 0),
+                                byte_length=int(disclosed.get("byte_length") or 0),
+                                source_format=str(disclosed.get("source_format") or ""),
+                            ),
+                        )
             return disclosed
 
         export_scope: dict[str, Any] | None = None

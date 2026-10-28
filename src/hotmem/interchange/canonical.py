@@ -10,8 +10,8 @@ Interface:
       canonical_dumps(record) -> str
       canonical_line(record) -> str
       compute_content_hash(identifier, fact_text) -> str
-      normalize_source_uri(source_uri) -> str
-      compute_file_reference_hash(identifier, source_uri, offset, length) -> str
+      normalize_source_uri(source_uri, *, base_dir=None) -> str
+      compute_file_reference_hash(identifier, source_uri, offset, length, *, base_dir=None) -> str
       logical_id(content_hashes) -> str
       sha256_bytes(data) -> str
       sha256_file(path) -> str
@@ -78,44 +78,72 @@ def compute_content_hash(identifier: str, fact_text: str) -> str:
 _FILE_IDENTITY_DOMAIN = "hotmem-file-ref-v1"
 
 
-def normalize_source_uri(source_uri: str) -> str:
+def normalize_source_uri(
+    source_uri: str,
+    *,
+    base_dir: str | Path | None = None,
+) -> str:
     """Normalize a reference syntactically without reading or resolving it.
 
     Equivalent spellings of the same portable reference produce the same
-    identity: ``./runbook.txt`` and ``runbook.txt``, or a ``file://`` URI and
-    its filesystem path. Normalization never stats, opens, or dereferences the
-    target, and preserves URI schemes other than ``file``.
+    identity: ``./runbook.txt`` and ``runbook.txt``, a ``file://`` URI and
+    its filesystem path, or an absolute path inside ``base_dir`` and its
+    ``base_dir``-relative path. Normalization never stats, opens, or
+    dereferences the target, and preserves URI schemes other than ``file``.
     """
     raw = str(source_uri).strip()
     if not raw:
         return ""
     if raw.lower().startswith("file://"):
         legacy = raw[len("file://") :]
-        if not (
-            len(legacy) >= 3 and legacy[0].isalpha() and legacy[1] == ":" and legacy[2] in "/\\"
-        ):
+        if len(legacy) >= 3 and legacy[0].isalpha() and legacy[1] == ":" and legacy[2] in "/\\":
+            with contextlib.suppress(UnicodeDecodeError):
+                legacy = unquote(legacy, encoding="utf-8", errors="strict")
+            raw = legacy
+        else:
             parts = urlsplit(raw)
             authority = parts.netloc
             if authority and authority.lower() != "localhost":
                 if len(authority) == 2 and authority[0].isalpha() and authority[1] == ":":
-                    raw = authority + parts.path
-                else:
-                    raw = raw
+                    candidate = authority + parts.path
+                    with contextlib.suppress(UnicodeDecodeError):
+                        candidate = unquote(candidate, encoding="utf-8", errors="strict")
+                    raw = candidate
             else:
-                raw = parts.path
-            with contextlib.suppress(UnicodeDecodeError):
-                raw = unquote(raw, encoding="utf-8", errors="strict")
-            if len(raw) >= 3 and raw[0] == "/" and raw[1].isalpha() and raw[2] == ":":
-                raw = raw[1:]
-        else:
-            raw = legacy
+                candidate = parts.path
+                with contextlib.suppress(UnicodeDecodeError):
+                    candidate = unquote(candidate, encoding="utf-8", errors="strict")
+                if (
+                    len(candidate) >= 3
+                    and candidate[0] == "/"
+                    and candidate[1].isalpha()
+                    and candidate[2] == ":"
+                ):
+                    candidate = candidate[1:]
+                raw = candidate
     if "://" in raw:
         parts = urlsplit(raw)
         path = posixpath.normpath(parts.path or "/")
+        if path.startswith("//"):
+            path = "/" + path.lstrip("/")
         return urlunsplit(
             (parts.scheme.lower(), parts.netloc.lower(), path, parts.query, parts.fragment)
         )
-    return posixpath.normpath(raw.replace("\\", "/"))
+    norm = posixpath.normpath(raw.replace("\\", "/"))
+    if norm.startswith("//"):
+        norm = "/" + norm.lstrip("/")
+    if len(norm) >= 2 and norm[0].isalpha() and norm[1] == ":":
+        norm = norm[0].upper() + norm[1:]
+    if base_dir is not None:
+        base_norm = normalize_source_uri(str(base_dir)).rstrip("/")
+        if base_norm and base_norm != ".":
+            if norm == base_norm:
+                return "."
+            if norm.startswith(base_norm + "/"):
+                rel = norm[len(base_norm) + 1 :]
+                if rel and not rel.startswith(".."):
+                    return rel
+    return norm
 
 
 def compute_file_reference_hash(
@@ -123,16 +151,16 @@ def compute_file_reference_hash(
     source_uri: str,
     byte_offset: int,
     byte_length: int,
+    *,
+    base_dir: str | Path | None = None,
 ) -> str:
     """Logical content digest for a file-backed reference (#100).
 
     Covers the identifier and normalized source reference tuple only. Byte
     checksums verify content and are deliberately excluded from identity.
     """
-    payload = (
-        f"{_FILE_IDENTITY_DOMAIN}:{identifier}:{normalize_source_uri(source_uri)}:"
-        f"{byte_offset}:{byte_length}"
-    )
+    norm_uri = normalize_source_uri(source_uri, base_dir=base_dir)
+    payload = f"{_FILE_IDENTITY_DOMAIN}:{identifier}:{norm_uri}:{byte_offset}:{byte_length}"
     return hashlib.sha256(payload.encode()).hexdigest()
 
 

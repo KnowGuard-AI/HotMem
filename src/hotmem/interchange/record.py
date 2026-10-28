@@ -133,7 +133,7 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
 
     memory_type = "file" if raw.get("memory_type") == "file" else "fact"
 
-    content_hash = raw.get("content_hash")
+    content_hash = _as_str(raw.get("content_hash")).strip()
     if not content_hash:
         if memory_type == "file":
             content_hash = compute_file_reference_hash(
