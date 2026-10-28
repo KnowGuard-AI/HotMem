@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path as _Path
 from typing import Any
@@ -228,12 +229,46 @@ def _task_sync_identifier(task_list_id: str) -> str:
     return f"hotmem/task-sync/{task_list_id}"
 
 
-def _task_sync_observed_at() -> str:
+def _task_sync_state_path() -> _Path:
+    override = os.environ.get("HOTMEM_TASK_SYNC_STATE")
+    return (
+        _Path(override).expanduser() if override else _Path.home() / ".hotmem" / "task-sync.sqlite3"
+    )
+
+
+def _task_sync_state_connection(path: _Path) -> sqlite3.Connection:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        os.close(fd)
+    return sqlite3.connect(path, timeout=5)
+
+
+def _task_sync_observed_at(state_path: _Path | None = None, scope: str = "") -> str:
     global _TASK_SYNC_LAST_OBSERVED_US
     now_us = int(datetime.now(UTC).timestamp() * 1_000_000)
-    if now_us <= _TASK_SYNC_LAST_OBSERVED_US:
-        now_us = _TASK_SYNC_LAST_OBSERVED_US + 1
-    _TASK_SYNC_LAST_OBSERVED_US = now_us
+    if state_path is None:
+        now_us = max(now_us, _TASK_SYNC_LAST_OBSERVED_US + 1)
+        _TASK_SYNC_LAST_OBSERVED_US = now_us
+    else:
+        with _task_sync_state_connection(state_path) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS task_sync_clocks "
+                "(scope TEXT PRIMARY KEY, last_us INTEGER NOT NULL)"
+            )
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT last_us FROM task_sync_clocks WHERE scope = ?", (scope,)
+            ).fetchone()
+            now_us = max(now_us, (row[0] if row else 0) + 1)
+            conn.execute(
+                "INSERT INTO task_sync_clocks(scope, last_us) VALUES (?, ?) "
+                "ON CONFLICT(scope) DO UPDATE SET last_us = excluded.last_us",
+                (scope, now_us),
+            )
     observed = datetime.fromtimestamp(now_us / 1_000_000, tz=UTC)
     return observed.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
@@ -493,6 +528,7 @@ def _task_sync_reduce(rows: list[dict[str, Any]], task_list_id: str) -> dict[str
             "task history reached the 1000-record recall bound; completeness is unknown"
         )
     parsed_events: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    seen_observed_at: set[str] = set()
     for index, row in enumerate(rows):
         try:
             event = json.loads(row["fact_text"])
@@ -502,6 +538,11 @@ def _task_sync_reduce(rows: list[dict[str, Any]], task_list_id: str) -> dict[str
             raise ValueError("task history contains an unsupported event format")
         if event.get("task_list_id") != task_list_id:
             raise ValueError("task history contains a mismatched task-list ID")
+        observed_at = event.get("observed_at")
+        if isinstance(observed_at, str) and observed_at:
+            if observed_at in seen_observed_at:
+                raise ValueError("ambiguous task event order: duplicate observation timestamp")
+            seen_observed_at.add(observed_at)
         parsed_events.append((_task_sync_event_sort_key(event, index), event))
     parsed_events.sort(key=lambda item: item[0])
 
@@ -770,6 +811,8 @@ def _task_sync_process(
     tags: tuple[str, ...] = (),
     source: str | None = None,
     include_descriptions: bool = False,
+    clock_path: _Path | None = None,
+    clock_scope: str = "",
 ) -> dict[str, Any] | None:
     hook_event_name = payload.get("hook_event_name")
     identifier = _task_sync_identifier(task_list_id)
@@ -810,7 +853,7 @@ def _task_sync_process(
     if event is None:
         return None
     session_id = _task_sync_required_string(payload, "session_id")
-    event["observed_at"] = _task_sync_observed_at()
+    event["observed_at"] = _task_sync_observed_at(clock_path, clock_scope)
     idempotency_key = hashlib.sha256(
         "\0".join(
             (
@@ -1033,6 +1076,10 @@ def task_sync(
                 tags=tags,
                 source=daemon_source,
                 include_descriptions=include_task_descriptions,
+                clock_path=_task_sync_state_path(),
+                clock_scope=hashlib.sha256(
+                    json.dumps([url, expected_store_id, daemon_namespace, task_list_id]).encode()
+                ).hexdigest(),
             )
     except ValueError as err:
         if payload.get("hook_event_name") == "SessionStart":

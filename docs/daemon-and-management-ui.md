@@ -372,8 +372,11 @@ not require #98.
 
 Task events carry their observation order in the record, so snapshot/handoff
 round trips preserve task state even though the generic list's `rowid`
-tie-breaker is local. The observed timestamp is generated on the hook host; an
-extreme clock rollback remains an operational assumption.
+tie-breaker is local. Hook processes on the same host coordinate timestamps
+through a private SQLite state file (`~/.hotmem/task-sync.sqlite3`, overridable
+with `HOTMEM_TASK_SYNC_STATE`). A duplicate timestamp fails recall closed.
+Independent hosts must not write the same task list without coordinated clocks.
+Preserve the state file across restarts; task events remain in the HotMem store.
 
 Hook failures are surfaced and are not silently acknowledged, but HotMem does
 not provide a durable hook outbox. Replaying the same native event is safe via

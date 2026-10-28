@@ -27,11 +27,12 @@ from hotmem.ui import PlainRenderer
 
 
 @pytest.fixture(autouse=True)
-def _force_plain(monkeypatch: pytest.MonkeyPatch):
+def _force_plain(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Every test in this file runs against the PlainRenderer."""
     import hotmem.ui as ui
 
     monkeypatch.setattr(ui, "_use_rich", lambda: False)
+    monkeypatch.setenv("HOTMEM_TASK_SYNC_STATE", str(tmp_path / "task-sync-state.sqlite3"))
 
 
 # ── status ─────────────────────────────────────────────────────────────
@@ -1243,3 +1244,43 @@ def test_task_sync_codex_failed_plan_is_not_persisted():
     failed["tool_response"] = "Plan update failed: invalid status"
     assert _task_sync_process(client, "codex", "tech20/failed", failed) is None
     assert client.add_calls == []
+
+
+def test_task_sync_cross_process_clock_order(tmp_path: Path):
+    """Two hook processes preserve ordering even when the host clock does not advance."""
+    from hotmem.cli import _task_sync_codex_event, _task_sync_reduce
+
+    script = r"""
+from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import patch
+import sys
+import hotmem.cli as cli
+class FixedClock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime(2026, 10, 27, 12, 0, 0, tzinfo=UTC)
+with patch.object(cli, "datetime", FixedClock):
+    print(cli._task_sync_observed_at(Path(sys.argv[1]), "shared"))
+"""
+    path = tmp_path / "task-sync.sqlite3"
+    timestamps = [
+        subprocess.check_output([sys.executable, "-c", script, str(path)], text=True).strip()
+        for _ in range(2)
+    ]
+    assert timestamps[0] < timestamps[1]
+    rows = []
+    for index, status in enumerate(("pending", "completed")):
+        payload = _codex_plan_hook(f"clock-event-{index}", [{"step": "Inspect", "status": status}])
+        event = _task_sync_codex_event(payload, "clock-test")
+        assert event is not None
+        event["observed_at"] = timestamps[index]
+        rows.append({"fact_text": json.dumps(event)})
+    assert (
+        _task_sync_reduce(list(reversed(rows)), "clock-test")["tasks"][0]["status"] == "completed"
+    )
+    event = json.loads(rows[1]["fact_text"])
+    event["observed_at"] = timestamps[0]
+    rows[1]["fact_text"] = json.dumps(event)
+    with pytest.raises(ValueError, match="ambiguous task event order"):
+        _task_sync_reduce(rows, "clock-test")
