@@ -327,13 +327,30 @@ class HotMemRuntime:
                 for p in path.iterdir()
                 if p.is_file() and (p.name == "memories.jsonl" or p.name == "memories.jsonl.gz")
             )
-            if not artifacts and not ctx.can_access_namespace(default_namespace, operation="write"):
-                raise PolicyError(
-                    403,
-                    "scope_denied",
-                    f"caller {ctx.caller_id!r} cannot hydrate bundle into "
-                    f"namespace {default_namespace!r}",
-                )
+            if not artifacts:
+                from hotmem.bundle import detect_bundle, parse_bundle
+
+                if detect_bundle(path):
+                    bundle_records, _ = parse_bundle(path, embedder=self.embedder)
+                    bundle_namespaces = {
+                        str(r.namespace) if getattr(r, "namespace", "") else default_namespace
+                        for r in bundle_records
+                    } or {default_namespace}
+                    for effective_ns in sorted(bundle_namespaces):
+                        if not ctx.can_access_namespace(effective_ns, operation="write"):
+                            raise PolicyError(
+                                403,
+                                "scope_denied",
+                                f"caller {ctx.caller_id!r} cannot hydrate bundle into "
+                                f"namespace {effective_ns!r}",
+                            )
+                elif not ctx.can_access_namespace(default_namespace, operation="write"):
+                    raise PolicyError(
+                        403,
+                        "scope_denied",
+                        f"caller {ctx.caller_id!r} cannot hydrate bundle into "
+                        f"namespace {default_namespace!r}",
+                    )
         else:
             return
         for artifact in artifacts:

@@ -679,3 +679,52 @@ def test_bundle_attachment_legacy_byte_hash_is_recognized(tmp_db: MemoryDB, full
     file_uris = {r["source_uri"] for r in tmp_db.all_rows() if r["memory_type"] == "file"}
     assert "attachments/invoice.csv" in file_uris
     assert "attachments/invoice_copy.csv" in file_uris
+
+
+def test_runtime_hydrate_rejects_bundle_with_unauthorized_metadata_namespace(
+    tmp_path: Path, full_bundle: Path
+):
+    """#100: _guard_hydrate_scope rejects a bundle with an unauthorized metadata namespace."""
+    import shutil
+
+    import pytest
+
+    from hotmem.policy import CallerCredential, PolicyConfig, PolicyError
+    from hotmem.runtime import HotMemRuntime
+
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    bundle_in_mount = mount / "bundle"
+    shutil.copytree(full_bundle, bundle_in_mount)
+
+    policy = PolicyConfig(
+        store_id="store-100",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-team-a",
+                caller_id="writer-a",
+                store_id="store-100",
+                namespaces=("team-a",),
+                operations=("read", "write", "hydrate"),
+            )
+        ],
+    )
+    rt = HotMemRuntime(db_path=mount / "hotmem.sqlite", base_dir=mount, policy=policy)
+    rt.open()
+    try:
+        ctx = rt.resolve_caller(
+            token="tok-team-a",
+            requested_store_id="store-100",
+            session_id="sess-1",
+            harness_id="pytest",
+            namespace="team-a",
+        )
+        # full_bundle/metadata.json declares namespace="reports", which writer-a cannot write.
+        with pytest.raises(PolicyError) as exc_info:
+            rt.hydrate_snapshot(ctx, target="bundle")
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.error == "scope_denied"
+        assert rt._require_db().count() == 0
+    finally:
+        rt.close()

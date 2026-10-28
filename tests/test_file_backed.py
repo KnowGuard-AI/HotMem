@@ -784,7 +784,6 @@ def test_export_host_path_redaction_recomputes_file_content_hash(tmp_path: Path)
     policy = PolicyConfig(
         store_id="store-100",
         require_auth=True,
-        redact_host_paths=True,
         credentials=[
             CallerCredential.from_token(
                 token="tok-export",
@@ -796,7 +795,7 @@ def test_export_host_path_redaction_recomputes_file_content_hash(tmp_path: Path)
         ],
     )
     rt = HotMemRuntime(db_path=mount / "hotmem.sqlite", base_dir=mount, policy=policy)
-    rt.start()
+    rt.open()
     try:
         ctx = rt.resolve_caller(
             token="tok-export",
@@ -811,4 +810,4 @@ def test_export_host_path_redaction_recomputes_file_content_hash(tmp_path: Path)
         assert exported["source_uri"] == "data.bin"
         assert exported["content_hash"] == compute_file_reference_hash("ds", "data.bin", 0, 8)
     finally:
-        rt.stop()
+        rt.close()
