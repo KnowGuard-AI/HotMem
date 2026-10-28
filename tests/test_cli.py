@@ -1368,3 +1368,66 @@ def test_task_sync_outbox_replay_against_real_daemon(tmp_path: Path):
         assert len(client.list(payload["identifier"])) == 1
     with sqlite3.connect(state_path) as conn:
         assert conn.execute("SELECT count(*) FROM task_sync_outbox").fetchone()[0] == 0
+
+
+def test_task_sync_outbox_offline_to_real_daemon(tmp_path: Path):
+    """Separate hook processes queue offline and recover against a started daemon."""
+    import httpx
+
+    from hotmem.cli import _task_sync_reduce
+    from hotmem.client import HotMemClient
+
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    url = f"http://127.0.0.1:{port}"
+    args = _installed_cli(
+        "task-sync", "--client", "codex", "--task-list-id", "offline/e2e", "--url", url
+    )
+    for event_id, status in (("e2e-1", "pending"), ("e2e-2", "completed")):
+        payload = _codex_plan_hook(event_id, [{"step": "Inspect", "status": status}])
+        result = subprocess.run(
+            args, input=json.dumps(payload), capture_output=True, text=True, timeout=10
+        )
+        assert result.returncode != 0
+        assert "remains queued" in result.stderr
+
+    mount = tmp_path / "outbox-e2e-mount"
+    proc = subprocess.Popen(
+        _installed_cli(
+            "serve",
+            "--mount",
+            str(mount),
+            "--port",
+            str(port),
+            "--host",
+            "127.0.0.1",
+            "--embedder",
+            "hash",
+            "--reranker",
+            "none",
+        ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        with HotMemClient(url) as client:
+            deadline = time.monotonic() + 15
+            while True:
+                if proc.poll() is not None or time.monotonic() > deadline:
+                    pytest.fail("isolated daemon did not start")
+                try:
+                    if client.health()["status"] == "ok":
+                        break
+                except httpx.HTTPError:
+                    time.sleep(0.05)
+            flushed = subprocess.run([*args, "--flush"], capture_output=True, text=True, timeout=10)
+            assert flushed.returncode == 0, flushed.stderr
+            assert json.loads(flushed.stdout)["flushed"] == 2
+            rows = client.list("hotmem/task-sync/offline/e2e")
+            assert len(rows) == 2
+            assert _task_sync_reduce(rows, "offline/e2e")["tasks"][0]["status"] == "completed"
+            again = subprocess.run([*args, "--flush"], capture_output=True, text=True, timeout=10)
+            assert json.loads(again.stdout)["flushed"] == 0
+    finally:
+        _stop_sidecar(proc)
