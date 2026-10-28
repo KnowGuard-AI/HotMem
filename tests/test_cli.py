@@ -1427,6 +1427,14 @@ def test_task_sync_outbox_offline_to_real_daemon(tmp_path: Path):
             rows = client.list("hotmem/task-sync/offline/e2e")
             assert len(rows) == 2
             assert _task_sync_reduce(rows, "offline/e2e")["tasks"][0]["status"] == "completed"
+            repeated_payload = _codex_plan_hook(
+                "e2e-2", [{"step": "Inspect", "status": "completed"}]
+            )
+            repeated = subprocess.run(
+                args, input=json.dumps(repeated_payload), capture_output=True, text=True, timeout=10
+            )
+            assert repeated.returncode == 0, repeated.stderr
+            assert len(client.list("hotmem/task-sync/offline/e2e")) == 2
             again = subprocess.run([*args, "--flush"], capture_output=True, text=True, timeout=10)
             assert json.loads(again.stdout)["flushed"] == 0
     finally:
