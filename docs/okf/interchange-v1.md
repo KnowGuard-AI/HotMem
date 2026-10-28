@@ -158,14 +158,24 @@ Rules:
   uniqueness. Pre-#100 file hashes (raw URI plus checksum) and pre-#100 bundle
   attachment hashes (byte digest) remain recognized as compatibility aliases
   on write/re-import, so an upgrade does not duplicate them.
-- **Surfaces**: SQLite single/bulk insert, `exists`, hash-batch lookups,
-  SQLite fast-path import, legacy JSONL/JSONL.GZ, Snapshot v2, interchange
-  package, handoff hydration, bundles, annotations, events replay, HTTP,
-  embedded and relay MCP, CLI, Python clients, and the TypeScript SDK all use
-  this pair or delegate to an ingestion path that does. The low-level
-  `MemoryDB.batch_existing_hashes` remains a coarse hash-only pre-filter and
-  is never the final identity decision. Delta apply is keyed by record `id`
-  and does not deduplicate on `content_hash`, so it is unaffected.
+- **Surfaces**: every ingestion path uses this pair or delegates to one that
+  does:
+
+| Surface | Disposition |
+| --- | --- |
+| SQLite single/bulk insert and the v6 unique index | Uses `(namespace, content_hash)`; empty hashes excluded |
+| `MemoryDB.exists` / namespace batch lookup | Namespace-scoped; empty hashes never match |
+| SQLite fast-path import | Namespace-aware batch dedup; same-scope repeats skip |
+| Legacy JSONL / JSONL.GZ, Snapshot v2, interchange package | Namespace-aware batch dedup before insert |
+| Handoff hydration, bundles, annotations | Namespace-aware dedup/merge; bundle legacy byte hashes recognized |
+| Event replay | Inserts are deduplicated by the scoped unique index |
+| HTTP, embedded/relay MCP, CLI, Python clients, TypeScript SDK | Delegate to the runtime or transport the same identity; no independent hash policy |
+| OKF and mem0 importers | Emit canonical records consumed by the hydrate paths above |
+| Delta apply | Keyed by record `id`, does not deduplicate on `content_hash`; unaffected |
+| Low-level `batch_existing_hashes` / `fetch_metadata_by_hashes` | Coarse hash-only helpers; never the final identity decision |
+
+  `MemoryDB.fetch_metadata_by_namespace_hashes` is the scoped lookup used by
+  annotation merging.
 
 ## 4. Compression and transport
 
