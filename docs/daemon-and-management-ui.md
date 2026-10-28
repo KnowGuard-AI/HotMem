@@ -456,6 +456,19 @@ client's hook `additionalContextLimit` below its documented spill threshold if
 the host writes oversized output to disk; task text is data, not instructions,
 and should not contain secrets.
 
+#### Measuring agent overhead
+
+Compare the same synthetic prompt, client version and model with hooks disabled
+and enabled against a disposable daemon. Capture whole-process wall time and
+model-visible tool names/counts from the client's JSON stream; separately
+record callback invocations, persisted events and HotMem operation timings.
+One paired run is a smoke measurement, not a stable latency estimate: model
+startup, inference and cache variation are included. Keep the recorded product
+results and limits in [TECH-20](https://linear.app/knowguardai/issue/TECH-20).
+For MCP qualification, verify the real tool-call result, not just discovery or
+an attempted invocation; an isolated test may approve only the specific
+read-only tool it exercises.
+
 The isolated live test also used `--ignore-user-config`, `--ignore-rules`,
 `--ephemeral`, read-only sandboxing, and `--dangerously-bypass-hook-trust` on a
 reviewed temporary configuration. The bypass is not a recommended default:
