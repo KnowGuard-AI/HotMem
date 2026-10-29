@@ -38,8 +38,9 @@ from hotmem.lifecycle import (
 )
 from hotmem.memory import (
     FileRef,
-    _file_ref_content_hash,
     add_file_backed,
+    compute_file_content_hash,
+    find_existing_file_record,
     get_memory_metadata,
     hydrate_memory,
 )
@@ -326,13 +327,30 @@ class HotMemRuntime:
                 for p in path.iterdir()
                 if p.is_file() and (p.name == "memories.jsonl" or p.name == "memories.jsonl.gz")
             )
-            if not artifacts and not ctx.can_access_namespace(default_namespace, operation="write"):
-                raise PolicyError(
-                    403,
-                    "scope_denied",
-                    f"caller {ctx.caller_id!r} cannot hydrate bundle into "
-                    f"namespace {default_namespace!r}",
-                )
+            if not artifacts:
+                from hotmem.bundle import detect_bundle, parse_bundle
+
+                if detect_bundle(path):
+                    bundle_records, _ = parse_bundle(path, embedder=self.embedder)
+                    bundle_namespaces = {
+                        str(r.namespace) if getattr(r, "namespace", "") else default_namespace
+                        for r in bundle_records
+                    } or {default_namespace}
+                    for effective_ns in sorted(bundle_namespaces):
+                        if not ctx.can_access_namespace(effective_ns, operation="write"):
+                            raise PolicyError(
+                                403,
+                                "scope_denied",
+                                f"caller {ctx.caller_id!r} cannot hydrate bundle into "
+                                f"namespace {effective_ns!r}",
+                            )
+                elif not ctx.can_access_namespace(default_namespace, operation="write"):
+                    raise PolicyError(
+                        403,
+                        "scope_denied",
+                        f"caller {ctx.caller_id!r} cannot hydrate bundle into "
+                        f"namespace {default_namespace!r}",
+                    )
         else:
             return
         for artifact in artifacts:
@@ -661,10 +679,13 @@ class HotMemRuntime:
                     source_format=source_format or "",
                     source_checksum=source_checksum,
                 )
-                content_hash = _file_ref_content_hash(identifier, ref)
-                existing_row = db.find_by_namespace_and_hash(target_namespace, content_hash)
+                content_hash = compute_file_content_hash(identifier, ref, base_dir=self.base_dir)
+                existing_row = find_existing_file_record(
+                    db, target_namespace, identifier, ref, base_dir=self.base_dir
+                )
                 if existing_row is not None:
                     memory_id = str(existing_row["id"])
+                    content_hash = str(existing_row["content_hash"])
                     deduplicated = True
                     dedup_payload: dict[str, Any] = {
                         "id": memory_id,
@@ -1313,9 +1334,21 @@ class HotMemRuntime:
                 if embed_text:
                     disclosed["embedding"] = pack_embedding(self.embedder.embed(embed_text))
             if ctx.redact_host_paths_enabled and disclosed.get("source_uri"):
-                disclosed["source_uri"] = ctx.sanitize_source_uri(
+                sanitized_uri = ctx.sanitize_source_uri(
                     disclosed.get("source_uri"), base_dir=self.base_dir
                 )
+                if sanitized_uri != disclosed.get("source_uri"):
+                    disclosed["source_uri"] = sanitized_uri
+                    if disclosed.get("memory_type") == "file":
+                        disclosed["content_hash"] = compute_file_content_hash(
+                            str(disclosed.get("identifier") or ""),
+                            FileRef(
+                                source_uri=sanitized_uri,
+                                byte_offset=int(disclosed.get("byte_offset") or 0),
+                                byte_length=int(disclosed.get("byte_length") or 0),
+                                source_format=str(disclosed.get("source_format") or ""),
+                            ),
+                        )
             return disclosed
 
         export_scope: dict[str, Any] | None = None

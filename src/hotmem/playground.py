@@ -56,9 +56,19 @@ class _DirectBackend:
         from hotmem.embed import DEFAULT_EMBEDDER, pack_embedding
         from hotmem.swap import compute_content_hash
 
+        namespace = str(kwargs.get("namespace") or "")
+        content_hash = compute_content_hash(identifier, fact)
+        existing = self._db.find_by_namespace_and_hash(namespace, content_hash)
+        if existing is not None:
+            return {
+                "memory_id": str(existing["id"]),
+                "content_hash": str(existing["content_hash"]),
+                "deduplicated": True,
+                "trace_ms": 0.0,
+            }
+
         active = self._embedder if self._embedder is not None else DEFAULT_EMBEDDER
         memory_id = uuid.uuid4().hex
-        content_hash = compute_content_hash(identifier, fact)
         vec = active.embed(fact)
         blob = pack_embedding(vec)
         self._db.insert(
@@ -71,6 +81,7 @@ class _DirectBackend:
             source=kwargs.get("source", ""),
             importance=kwargs.get("importance", 0.5),
             content_hash=content_hash,
+            namespace=namespace,
         )
         return {"memory_id": memory_id, "content_hash": content_hash, "trace_ms": 0.0}
 

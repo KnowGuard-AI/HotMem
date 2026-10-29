@@ -686,3 +686,35 @@ def test_crlf_corrupted_or_truncated_payload_fails_closed_before_mutation(tmp_pa
     assert target_db.count() == 1
     assert target_db.get_memory(seed_id) is not None
     target_db.close()
+
+
+def test_v2_identity_is_namespace_scoped_and_repeat_is_idempotent(tmp_path: Path):
+    """#100: export/restore keeps namespace twins and skips same-scope repeats."""
+    from hotmem.interchange.canonical import compute_content_hash
+
+    src = MemoryDB(tmp_path / "src-scoped.sqlite")
+    content_hash = compute_content_hash("doc", "same fact")
+    for ns, memory_id in (("ns-a", "a"), ("ns-b", "b")):
+        src.insert(
+            id=memory_id,
+            identifier="doc",
+            fact_text="same fact",
+            embedding=pack_embedding(embed_text("same fact")),
+            content_hash=content_hash,
+            namespace=ns,
+        )
+    snap = tmp_path / "snap-scoped"
+    write_snapshot_v2(src, snap)
+    src.close()
+
+    dst = MemoryDB(tmp_path / "dst-scoped.sqlite")
+    first = hydrate(dst, snap)
+    assert first.loaded == 2
+    assert first.skipped_dupes == 0
+    assert {row["namespace"] for row in dst.all_rows()} == {"ns-a", "ns-b"}
+
+    second = hydrate(dst, snap)
+    assert second.loaded == 0
+    assert second.skipped_dupes == 2
+    assert dst.count() == 2
+    dst.close()

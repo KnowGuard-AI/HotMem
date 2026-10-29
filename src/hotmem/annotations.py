@@ -454,4 +454,5 @@ def merge_duplicate_annotations(
         db.update_metadata_json(
             target_row["id"], json.dumps(merged_meta, sort_keys=True), commit=commit
         )
+        target_row["metadata"] = merged_meta
         counters["annotations_merged"] += outcome.merged_items

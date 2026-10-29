@@ -694,3 +694,52 @@ def test_committed_mapping_fixture_is_valid_and_round_trips(tmp_path: Path):
     assert stored["annotations"]["producers"]["org.example.enricher"]["version"] == "1.2.0"
     source.close()
     target.close()
+
+
+def test_intra_batch_and_multiple_duplicate_annotations_merge_cumulatively(tmp_path: Path):
+    """#100: duplicate records within the same batch merge annotations cumulatively."""
+    from hotmem.swap import hydrate as swap_hydrate
+
+    swap = tmp_path / "intra-batch-annot.jsonl"
+    lines = [
+        json.dumps(
+            {
+                "id": "rec-1",
+                "identifier": "vendor-x",
+                "fact_text": "same fact",
+                "namespace": "team-a",
+                "metadata": _meta(_envelope(items=[{"id": "item-1", "type": "Entity"}])),
+            }
+        ),
+        json.dumps(
+            {
+                "id": "rec-2",
+                "identifier": "vendor-x",
+                "fact_text": "same fact",
+                "namespace": "team-a",
+                "metadata": _meta(_envelope(items=[{"id": "item-2", "type": "Alias"}])),
+            }
+        ),
+        json.dumps(
+            {
+                "id": "rec-3",
+                "identifier": "vendor-x",
+                "fact_text": "same fact",
+                "namespace": "team-a",
+                "metadata": _meta(_envelope(items=[{"id": "item-3", "type": "Note"}])),
+            }
+        ),
+    ]
+    swap.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    db = MemoryDB(tmp_path / "intra-target.sqlite")
+    try:
+        res = swap_hydrate(db, swap)
+        assert res.loaded == 1
+        assert res.skipped_dupes == 2
+        assert res.annotations_merged == 2
+        stored = json.loads(db.get_memory("rec-1")["metadata_json"])
+        item_ids = [i["id"] for i in stored["annotations"]["namespaces"]["org.example.entities"]]
+        assert item_ids == ["item-1", "item-2", "item-3"]
+    finally:
+        db.close()

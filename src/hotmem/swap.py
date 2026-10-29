@@ -2,7 +2,8 @@
 
 Purpose:
     Load memories from a swap file (JSONL) into the database, and export
-    the current database state back to a swap file. Deduplicates on content_hash.
+    the current database state back to a swap file. Deduplicates on the
+    namespace-scoped logical identity ``(namespace, content_hash)`` (#100).
 
     Hydration runs every record through the shared interchange normalization
     (hotmem.interchange, issue #67): all v2 fields survive the round-trip,
@@ -180,6 +181,7 @@ def _flush_batch(
     db: MemoryDB,
     pending: list[dict],
     *,
+    intra_batch_dups: list[dict] | None = None,
     counters: dict,
     embedder: Embedder | None = None,
 ) -> None:
@@ -191,23 +193,12 @@ def _flush_batch(
     (reused/rebuilt/missing/failed, issue #78) live in ``counters``.
     ``embedder`` owns rebuilds (``None`` = the call-time hash default).
     Annotation-only changes on content-hash duplicates merge in-batch (#79):
-    disjoint items combine, conflicts are retained — never last-write-wins.
+    disjoint items combine, conflicts are retained -- never last-write-wins.
     """
-    pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in pending]
-    existing = db.batch_existing_namespace_hashes(pairs)
-    todo = [
-        r for r in pending if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
-    ]
+    existing = db.batch_existing_record_identities(pending)
+    todo = [r for r in pending if db.record_identity_key(r) not in existing]
+    db_dups = [r for r in pending if db.record_identity_key(r) in existing]
     counters["skipped"] += len(pending) - len(todo)
-
-    merge_duplicate_annotations(
-        db,
-        [r for r in pending if (str(r.get("namespace") or ""), r["content_hash"]) in existing],
-        counters,
-        # Per-batch autocommit path: no later commit exists to carry an
-        # all-duplicate batch's merge (durability, #79 review).
-        commit=True,
-    )
 
     records: list[MemoryRecord] = []
     for rec in todo:
@@ -218,6 +209,15 @@ def _flush_batch(
     loaded = db.insert_many_ignore(records)
     counters["loaded"] += loaded
     counters["skipped"] += len(records) - loaded
+
+    merge_duplicate_annotations(
+        db,
+        db_dups + (intra_batch_dups or []),
+        counters,
+        # Per-batch autocommit path: no later commit exists to carry an
+        # all-duplicate batch's merge (durability, #79 review).
+        commit=True,
+    )
 
 
 def hydrate(
@@ -231,7 +231,8 @@ def hydrate(
     """Load memories from a swap file into the database.
 
     Accepts JSONL, JSONL.GZ, or a HotMem SQLite database (.sqlite/.db).
-    Deduplicates by content_hash - skips rows that already exist in the DB.
+    Deduplicates by ``(namespace, content_hash)`` - skips rows that already
+    exist in the same namespace; identical records in another namespace load.
     For SQLite sources, embeddings are reused as-is (fast-path, no recompute).
 
     Every record goes through the shared interchange normalization (issue
@@ -250,7 +251,7 @@ def hydrate(
         return HydrateResult(loaded=0, skipped_dupes=0)
 
     if swap_path.suffix.lower() in (".sqlite", ".db"):
-        loaded, skipped = db.import_sqlite(swap_path)
+        loaded, skipped = db.import_sqlite(swap_path, target_namespace=target_namespace)
         return HydrateResult(loaded=loaded, skipped_dupes=skipped)
 
     with Timer() as t:
@@ -268,12 +269,20 @@ def hydrate(
             "annotation_conflicts": 0,
         }
         pending: list[dict] = []
+        intra_batch_dups: list[dict] = []
         batch_seen: set[tuple[str, str]] = set()
 
         def flush() -> None:
-            if pending:
-                _flush_batch(db, pending, counters=counters, embedder=embedder)
+            if pending or intra_batch_dups:
+                _flush_batch(
+                    db,
+                    pending,
+                    intra_batch_dups=intra_batch_dups,
+                    counters=counters,
+                    embedder=embedder,
+                )
                 pending.clear()
+                intra_batch_dups.clear()
                 batch_seen.clear()
 
         try:
@@ -310,11 +319,16 @@ def hydrate(
                         counters["invalid"] += 1
                         continue
 
-                    dedup_key = (str(rec.get("namespace") or ""), rec["content_hash"])
-                    if dedup_key in batch_seen:
+                    dedup_key = db.record_identity_key(rec)
+                    if dedup_key[1] and dedup_key in batch_seen:
                         counters["skipped"] += 1
+                        if isinstance(rec.get("metadata"), dict) and "annotations" in (
+                            rec["metadata"] or {}
+                        ):
+                            intra_batch_dups.append(rec)
                         continue
-                    batch_seen.add(dedup_key)
+                    if dedup_key[1]:
+                        batch_seen.add(dedup_key)
                     pending.append(rec)
                     if len(pending) >= HYDRATE_BATCH:
                         flush()
@@ -368,21 +382,28 @@ def add_memory(
     importance: float = 0.5,
     metadata: dict | None = None,
     ttl_seconds: int | None = None,
+    namespace: str = "",
     embedder: Embedder | None = None,
 ) -> tuple[str, str]:
     """Insert one memory into the DB using the canonical add contract.
 
-    Centralizes the uuid → content_hash → embed → pack → insert sequence so
-    callers (server, mcp, playground, examples) cannot drift apart.
-    ``embedder`` owns the write embedding (issue #78; ``None`` = the hash
-    default — bit-identical to the previous behavior). Returns
+    Centralizes the uuid -> content_hash -> embed -> pack -> insert sequence
+    so callers (server, mcp, playground, examples) cannot drift apart.
+    Deduplicates on ``(namespace, content_hash)`` (#100) so a repeated call
+    in the same namespace preserves the original row id and attribution
+    instead of replacing it via ``INSERT OR REPLACE``. ``embedder`` owns the
+    write embedding (issue #78; ``None`` = the hash default). Returns
     (memory_id, content_hash).
     """
     import uuid
 
+    content_hash = compute_content_hash(identifier, fact)
+    existing = db.find_by_namespace_and_hash(namespace, content_hash)
+    if existing is not None:
+        return str(existing["id"]), str(existing["content_hash"])
+
     active = embedder if embedder is not None else DEFAULT_EMBEDDER
     memory_id = uuid.uuid4().hex
-    content_hash = compute_content_hash(identifier, fact)
     vec = active.embed(fact)
     blob = pack_embedding(vec)
     db.insert(
@@ -397,6 +418,7 @@ def add_memory(
         metadata_json=json.dumps(metadata or {}),
         content_hash=content_hash,
         ttl_seconds=ttl_seconds,
+        namespace=namespace,
     )
     return memory_id, content_hash
 

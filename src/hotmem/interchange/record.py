@@ -30,7 +30,7 @@ import uuid
 from typing import Any
 
 from hotmem.annotations import validate_metadata
-from hotmem.interchange.canonical import compute_content_hash
+from hotmem.interchange.canonical import compute_content_hash, compute_file_reference_hash
 
 # Every key any writer dialect has ever emitted. Anything else is an unknown
 # producer field (forward-compat) and is preserved via metadata.
@@ -131,11 +131,19 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
     identifier = _as_str(raw.get("identifier"))
     fact_text = _as_str(raw.get("fact_text"))
 
-    content_hash = raw.get("content_hash")
-    if not content_hash:
-        content_hash = compute_content_hash(identifier, fact_text)
-
     memory_type = "file" if raw.get("memory_type") == "file" else "fact"
+
+    content_hash = _as_str(raw.get("content_hash")).strip()
+    if not content_hash:
+        if memory_type == "file":
+            content_hash = compute_file_reference_hash(
+                identifier,
+                _as_str(raw.get("source_uri")),
+                _as_int(raw.get("byte_offset")) or 0,
+                _as_int(raw.get("byte_length")) or 0,
+            )
+        else:
+            content_hash = compute_content_hash(identifier, fact_text)
 
     embedding = raw.get("embedding") or raw.get("embedding_b64") or None
     if isinstance(embedding, bytes | bytearray):

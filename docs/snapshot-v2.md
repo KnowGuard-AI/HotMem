@@ -56,7 +56,10 @@ export time (`created_at`) and `hotmem_version`, which are informational.
   `permitted_namespaces`, `share_approvals`, `exported_count`,
   `omitted_count`, and `store_id`. It is never part of `overall_sha256`.
 - `snapshot_id`: `SHA-256` of the sorted `content_hash` list. Deterministic
-  for identical DB contents regardless of insert order.
+  for identical content sets regardless of insert order. It is a content-set
+  digest, not the per-record identity tuple: namespaces are not encoded
+  (#100), so two stores with the same hashes in different namespaces share a
+  `snapshot_id` even though their records are distinct.
 - `created_at` / `hotmem_version`: informational provenance of the export.
   They are not covered by any digest, so re-exporting the same DB changes
   `manifest.json` bytes but never changes `snapshot_id`.
@@ -155,9 +158,12 @@ Hydration semantics (shared with the interchange contract,
   blob decodes to exactly 256 bytes. Otherwise the record is re-embedded from
   `fact_text` (inline) or `fact_summary` (file-backed); a file-backed record
   with no summary gets an empty embedding (NULL-embedding convention, #38).
-- Results report `loaded`, `skipped_dupes` (content-hash duplicates), and
-  `invalid` (records that parsed but failed validation and were not stored).
-  Structural corruption — digest/size mismatch, unparseable line — remains a
+- Results report `loaded`, `skipped_dupes`, and `invalid` (records that
+  parsed but failed validation and were not stored). Deduplication follows
+  the logical identity contract: `(namespace, content_hash)` for non-empty
+  hashes (`docs/okf/interchange-v1.md` section 3.1). Repeating a restore in the same
+  namespace reports skips; identical records in another namespace are stored.
+  Structural corruption -- digest/size mismatch, unparseable line -- remains a
   hard error.
 - Manifest-listed paths are confinement-checked: absolute paths, `..`
   traversal, and symlink escapes fail verification before any file is read.

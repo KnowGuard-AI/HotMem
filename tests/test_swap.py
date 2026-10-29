@@ -573,3 +573,193 @@ def test_swap_unicode_and_lf_roundtrip(
     assert db_gz.all_rows()[0]["fact_text"] == fact
     db_plain.close()
     db_gz.close()
+
+
+@pytest.mark.parametrize("suffix", [".jsonl", ".jsonl.gz"])
+def test_hydrate_identity_is_namespace_scoped(tmp_db: MemoryDB, tmp_path: Path, suffix: str):
+    """#100: legacy JSONL/JSONL.GZ keeps namespace twins and skips same-scope repeats."""
+    import gzip
+
+    swap = tmp_path / f"scoped{suffix}"
+    lines = [
+        json.dumps({"identifier": "doc", "fact_text": "same fact", "namespace": "ns-a"}),
+        json.dumps({"identifier": "doc", "fact_text": "same fact", "namespace": "ns-b"}),
+        json.dumps({"identifier": "doc", "fact_text": "same fact", "namespace": "ns-a"}),
+    ]
+    if suffix.endswith(".gz"):
+        with gzip.open(swap, "wt", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    else:
+        swap.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    first = hydrate(tmp_db, swap)
+    assert first.loaded == 2
+    assert first.skipped_dupes == 1
+    assert {row["namespace"] for row in tmp_db.all_rows()} == {"ns-a", "ns-b"}
+
+    second = hydrate(tmp_db, swap)
+    assert second.loaded == 0
+    assert second.skipped_dupes == 3
+    assert tmp_db.count() == 2
+
+
+def test_hydrate_file_record_without_hash_uses_reference_identity(tmp_db: MemoryDB, tmp_path: Path):
+    """#100: a hashless file record is identified by its reference, not inline text."""
+    from hotmem.interchange.canonical import compute_file_reference_hash
+
+    swap = tmp_path / "file-no-hash.jsonl"
+    record = {
+        "identifier": "dataset",
+        "memory_type": "file",
+        "source_uri": "./data.csv",
+        "byte_offset": 0,
+        "byte_length": 5,
+        "source_format": "csv",
+    }
+    swap.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    result = hydrate(tmp_db, swap)
+    assert result.loaded == 1
+    row = tmp_db.all_rows()[0]
+    assert row["content_hash"] == compute_file_reference_hash("dataset", "./data.csv", 0, 5)
+
+
+def test_normalize_record_strips_whitespace_content_hash(tmp_db: MemoryDB, tmp_path: Path):
+    """#100: whitespace-only content_hash is treated as missing and recomputed."""
+    swap = tmp_path / "whitespace-hash.jsonl"
+    record = {
+        "identifier": "doc",
+        "fact_text": "hello",
+        "content_hash": "   ",
+        "namespace": "ns-a",
+    }
+    swap.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    result = hydrate(tmp_db, swap)
+    assert result.loaded == 1
+    row = tmp_db.all_rows()[0]
+    assert row["content_hash"] == compute_content_hash("doc", "hello")
+
+
+def test_hydrate_file_record_deduplicates_across_legacy_and_canonical_hashes(
+    tmp_db: MemoryDB, tmp_path: Path
+):
+    """#100: hydration deduplicates file records across pre-#100 and canonical hashes."""
+    import hashlib
+
+    from hotmem.interchange.canonical import compute_file_reference_hash
+
+    legacy_hash = hashlib.sha256(b"dataset:data.csv:0:5:deadbeef").hexdigest()
+    canonical_hash = compute_file_reference_hash("dataset", "data.csv", 0, 5)
+
+    swap = tmp_path / "file-cross-era.jsonl"
+    lines = [
+        json.dumps(
+            {
+                "id": "file-legacy",
+                "identifier": "dataset",
+                "memory_type": "file",
+                "source_uri": "data.csv",
+                "byte_offset": 0,
+                "byte_length": 5,
+                "source_format": "csv",
+                "source_checksum": "deadbeef",
+                "content_hash": legacy_hash,
+                "namespace": "ns-a",
+            }
+        ),
+        # Intra-batch twin with canonical hash and "./" URI spelling in same namespace.
+        json.dumps(
+            {
+                "id": "file-canonical-same-batch",
+                "identifier": "dataset",
+                "memory_type": "file",
+                "source_uri": "./data.csv",
+                "byte_offset": 0,
+                "byte_length": 5,
+                "source_format": "csv",
+                "content_hash": canonical_hash,
+                "namespace": "ns-a",
+            }
+        ),
+    ]
+    swap.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    first = hydrate(tmp_db, swap)
+    assert first.loaded == 1
+    assert first.skipped_dupes == 1
+    assert tmp_db.count() == 1
+    assert tmp_db.get_memory("file-legacy") is not None
+
+    # Second hydrate with only the canonical-hash record against the stored legacy row.
+    swap_canon = tmp_path / "file-canonical-only.jsonl"
+    swap_canon.write_text(lines[1] + "\n", encoding="utf-8")
+    second = hydrate(tmp_db, swap_canon)
+    assert second.loaded == 0
+    assert second.skipped_dupes == 1
+    assert tmp_db.count() == 1
+
+
+def test_hydrate_sqlite_propagates_target_namespace(tmp_db: MemoryDB, tmp_path: Path):
+    """#100: swap.hydrate passes target_namespace to SQLite fast-path imports."""
+    from hotmem.db import MemoryRecord
+
+    src = MemoryDB(tmp_path / "source.sqlite")
+    try:
+        src.insert_many_ignore(
+            [
+                MemoryRecord(
+                    id="sqlite-u1",
+                    identifier="doc",
+                    fact_text="fact from sqlite",
+                    embedding=b"",
+                    content_hash=compute_content_hash("doc", "fact from sqlite"),
+                    namespace="",
+                )
+            ]
+        )
+    finally:
+        src.close()
+
+    res = hydrate(tmp_db, tmp_path / "source.sqlite", target_namespace="scoped-ns")
+    assert res.loaded == 1
+    assert res.skipped_dupes == 0
+    assert tmp_db.get_memory("sqlite-u1")["namespace"] == "scoped-ns"
+
+    repeat = hydrate(tmp_db, tmp_path / "source.sqlite", target_namespace="scoped-ns")
+    assert repeat.loaded == 0
+    assert repeat.skipped_dupes == 1
+
+
+def test_add_memory_and_playground_preserve_identity_on_same_scope_repeat(tmp_db: MemoryDB):
+    """#100: add_memory and _DirectBackend.add preserve original id and source on repeat."""
+    from hotmem.playground import _DirectBackend
+    from hotmem.swap import add_memory
+
+    first_id, first_hash = add_memory(
+        tmp_db, "doc", "same fact", source="writer-1", namespace="ns-a"
+    )
+    second_id, second_hash = add_memory(
+        tmp_db, "doc", "same fact", source="writer-2", namespace="ns-a"
+    )
+    other_id, other_hash = add_memory(
+        tmp_db, "doc", "same fact", source="writer-2", namespace="ns-b"
+    )
+
+    assert (second_id, second_hash) == (first_id, first_hash)
+    assert other_id != first_id
+    assert other_hash == first_hash
+    assert tmp_db.get_memory(first_id)["source"] == "writer-1"
+    assert tmp_db.get_memory(other_id)["source"] == "writer-2"
+
+    pg = _DirectBackend(":memory:")
+    try:
+        p1 = pg.add("doc", "pg fact", source="pg-1", namespace="ns-a")
+        p2 = pg.add("doc", "pg fact", source="pg-2", namespace="ns-a")
+        p3 = pg.add("doc", "pg fact", source="pg-2", namespace="ns-b")
+        assert p2["memory_id"] == p1["memory_id"]
+        assert p2.get("deduplicated") is True
+        assert p3["memory_id"] != p1["memory_id"]
+        assert pg._db.get_memory(p1["memory_id"])["source"] == "pg-1"
+    finally:
+        pg.close()

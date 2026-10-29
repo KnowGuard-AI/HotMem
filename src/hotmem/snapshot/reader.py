@@ -137,7 +137,8 @@ def hydrate_v2(
 ) -> HydrateResult:
     """Verify the manifest and load all memories into the DB.
 
-    Deduplicates by ``content_hash`` (skips rows that already exist). Never
+    Deduplicates by ``(namespace, content_hash)`` (skips rows that already
+    exist in the same namespace). Never
     touches backing files for file-backed memories — references are preserved.
     Uses stored embeddings only when compatible (descriptor/dim/blob);
     otherwise re-embeds fact_text or fact_summary under ``embedder`` (issue
@@ -164,10 +165,11 @@ def hydrate_v2(
             "annotation_conflicts": 0,
         }
         pending: list[dict] = []
+        intra_batch_dups: list[dict] = []
         batch_seen: set[tuple[str, str]] = set()
 
         # Bounded-memory annotation context pass (#79): ids and evidence
-        # references only — never records — so streaming stays O(batch).
+        # references only -- never records -- so streaming stays O(batch).
         # See hydrate_package._scan_annotation_context for the rationale.
         with open(memories_path, encoding="utf-8") as f:
             package_ids, referenced_ids, has_annotations = _scan_annotation_context(f)
@@ -176,29 +178,12 @@ def hydrate_v2(
             known_ids = package_ids | db.fetch_existing_ids(referenced_ids)
 
         def flush() -> None:
-            if not pending:
+            if not pending and not intra_batch_dups:
                 return
-            pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in pending]
-            existing = db.batch_existing_namespace_hashes(pairs)
-            todo = [
-                r
-                for r in pending
-                if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
-            ]
+            existing = db.batch_existing_record_identities(pending)
+            todo = [r for r in pending if db.record_identity_key(r) not in existing]
+            db_dups = [r for r in pending if db.record_identity_key(r) in existing]
             counters["skipped"] += len(pending) - len(todo)
-
-            merge_duplicate_annotations(
-                db,
-                [
-                    r
-                    for r in pending
-                    if (str(r.get("namespace") or ""), r["content_hash"]) in existing
-                ],
-                counters,
-                # Per-batch autocommit path: no later commit exists to carry
-                # an all-duplicate batch's merge (durability, #79 review).
-                commit=True,
-            )
 
             records = []
             for rec in todo:
@@ -210,7 +195,17 @@ def hydrate_v2(
             loaded = db.insert_many_ignore(records)
             counters["loaded"] += loaded
             counters["skipped"] += len(records) - loaded
+
+            merge_duplicate_annotations(
+                db,
+                db_dups + intra_batch_dups,
+                counters,
+                # Per-batch autocommit path: no later commit exists to carry
+                # an all-duplicate batch's merge (durability, #79 review).
+                commit=True,
+            )
             pending.clear()
+            intra_batch_dups.clear()
             batch_seen.clear()
 
         with open(memories_path, encoding="utf-8") as f:
@@ -250,11 +245,16 @@ def hydrate_v2(
                 if validate_record(rec):
                     counters["invalid"] += 1
                     continue
-                dedup_key = (str(rec.get("namespace") or ""), rec["content_hash"])
-                if dedup_key in batch_seen:
+                dedup_key = db.record_identity_key(rec)
+                if dedup_key[1] and dedup_key in batch_seen:
                     counters["skipped"] += 1
+                    if isinstance(rec.get("metadata"), dict) and "annotations" in (
+                        rec["metadata"] or {}
+                    ):
+                        intra_batch_dups.append(rec)
                     continue
-                batch_seen.add(dedup_key)
+                if dedup_key[1]:
+                    batch_seen.add(dedup_key)
                 pending.append(rec)
                 if len(pending) >= HYDRATE_BATCH:
                     flush()

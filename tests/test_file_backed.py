@@ -577,3 +577,237 @@ def test_typed_errors_are_provenance_errors():
 
     assert issubclass(ChecksumMismatchError, ProvenanceError)
     assert issubclass(BackingFileMissingError, ProvenanceError)
+
+
+# -- #100: namespace-scoped file-backed identity -----------------------------
+
+
+def test_file_backed_identity_is_namespace_scoped(tmp_db: MemoryDB, fixture_file: Path):
+    """Identical references in two namespaces are two records; a same-scope
+    repeat is an idempotent hit that preserves the original id."""
+    from hotmem.db import MemoryRecord
+    from hotmem.memory import compute_file_content_hash
+
+    ref = FileRef(source_uri=str(fixture_file), byte_offset=10, byte_length=20, source_format="bin")
+    a_id, a_hash = add_file_backed(tmp_db, identifier="ds", file_ref=ref, namespace="ns-a")
+    b_id, b_hash = add_file_backed(tmp_db, identifier="ds", file_ref=ref, namespace="ns-b")
+
+    assert a_id != b_id
+    assert a_hash == b_hash == compute_file_content_hash("ds", ref)
+    assert tmp_db.count() == 2
+
+    repeat_id, repeat_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=ref, namespace="ns-a"
+    )
+    assert (repeat_id, repeat_hash) == (a_id, a_hash)
+    assert tmp_db.count() == 2
+    assert isinstance(tmp_db.get_memory(a_id), dict)
+    assert isinstance(tmp_db.get_memory(b_id), dict)
+    assert not isinstance(tmp_db.get_memory(a_id), MemoryRecord)
+
+
+def test_file_identity_normalizes_reference_and_excludes_checksum(
+    tmp_db: MemoryDB, fixture_file: Path
+):
+    """A syntactically equivalent reference and a checksum change keep identity."""
+    import hashlib
+
+    from hotmem.memory import compute_file_content_hash
+
+    plain = FileRef(
+        source_uri=str(fixture_file), byte_offset=10, byte_length=20, source_format="bin"
+    )
+    dotted = FileRef(
+        source_uri=str(fixture_file.parent / "." / fixture_file.name),
+        byte_offset=10,
+        byte_length=20,
+        source_format="bin",
+        source_checksum=hashlib.sha256(fixture_file.read_bytes()[10:30]).hexdigest(),
+    )
+
+    assert compute_file_content_hash("ds", plain) == compute_file_content_hash("ds", dotted)
+
+    first_id, first_hash = add_file_backed(tmp_db, identifier="ds", file_ref=plain, namespace="ns")
+    second_id, second_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=dotted, namespace="ns"
+    )
+    assert (second_id, second_hash) == (first_id, first_hash)
+    assert tmp_db.count() == 1
+
+
+def test_file_identity_recognizes_legacy_hash(tmp_db: MemoryDB, fixture_file: Path):
+    """A pre-#100 hash is still recognized even when checksum or URI spelling changes."""
+    from hotmem.db import MemoryRecord
+    from hotmem.memory import legacy_file_content_hashes
+
+    legacy_ref = FileRef(
+        source_uri=str(fixture_file),
+        byte_offset=10,
+        byte_length=20,
+        source_format="bin",
+        source_checksum="deadbeef" * 8,
+    )
+    legacy_hash = legacy_file_content_hashes("ds", legacy_ref)[0]
+    tmp_db.insert_many_ignore(
+        [
+            MemoryRecord(
+                id="legacy-file",
+                identifier="ds",
+                fact_text="",
+                embedding=b"",
+                content_hash=legacy_hash,
+                namespace="ns",
+                memory_type="file",
+                source_uri=legacy_ref.source_uri,
+                source_format="bin",
+                source_checksum=legacy_ref.source_checksum,
+                byte_offset=10,
+                byte_length=20,
+            )
+        ]
+    )
+
+    # Re-add with no checksum and a "./" path component: still matches legacy-file.
+    dotted_no_checksum = FileRef(
+        source_uri=str(fixture_file.parent / "." / fixture_file.name),
+        byte_offset=10,
+        byte_length=20,
+        source_format="bin",
+        source_checksum=None,
+    )
+    memory_id, content_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=dotted_no_checksum, namespace="ns"
+    )
+    assert memory_id == "legacy-file"
+    assert content_hash == legacy_hash
+    assert tmp_db.count() == 1
+
+
+def test_http_file_identity_is_namespace_scoped(app_client: TestClient):
+    """#100: file-backed writes through HTTP are namespace-scoped and idempotent."""
+    fixture_path: Path = app_client.fixture_path  # type: ignore[attr-defined]
+    body = {
+        "identifier": "dataset",
+        "file_uri": fixture_path.name,
+        "byte_offset": 10,
+        "byte_length": 20,
+        "source_format": "bin",
+    }
+
+    a = app_client.post("/v1/add", json=body, headers={"X-HotMem-Namespace": "ns-a"})
+    b = app_client.post("/v1/add", json=body, headers={"X-HotMem-Namespace": "ns-b"})
+    assert a.status_code == b.status_code == 200
+    assert a.json()["content_hash"] == b.json()["content_hash"]
+    assert a.json()["memory_id"] != b.json()["memory_id"]
+
+    repeat = app_client.post("/v1/add", json=body, headers={"X-HotMem-Namespace": "ns-a"})
+    assert repeat.status_code == 200
+    assert repeat.json()["memory_id"] == a.json()["memory_id"]
+    assert repeat.json()["content_hash"] == a.json()["content_hash"]
+    assert repeat.json()["deduplicated"] is True
+
+    a_row = app_client.get(f"/v1/memory/{a.json()['memory_id']}").json()
+    b_row = app_client.get(f"/v1/memory/{b.json()['memory_id']}").json()
+    assert a_row["provenance"]["namespace"] == "ns-a"
+    assert b_row["provenance"]["namespace"] == "ns-b"
+    assert a_row["source_uri"] == fixture_path.name
+    assert b_row["source_uri"] == fixture_path.name
+
+
+def test_normalize_source_uri_handles_windows_remote_and_base_dir(
+    tmp_db: MemoryDB, fixture_file: Path
+):
+    """#100: syntactic URI normalization handles file://, Windows drives, and base_dir."""
+    from hotmem.interchange.canonical import compute_file_reference_hash, normalize_source_uri
+
+    assert normalize_source_uri("file://C:/path%20with%20space.txt") == "C:/path with space.txt"
+    assert normalize_source_uri("file:///c:/path%20with%20space.txt") == "C:/path with space.txt"
+    assert normalize_source_uri("C:\\path with space.txt") == "C:/path with space.txt"
+    assert (
+        normalize_source_uri("file://remote-host/share/a%23b.txt")
+        == "file://remote-host/share/a%23b.txt"
+    )
+    assert normalize_source_uri("file:////tmp/a.bin") == "/tmp/a.bin"
+    assert normalize_source_uri("//tmp/a.bin") == "/tmp/a.bin"
+
+    base_dir = str(fixture_file.parent)
+    rel_ref = FileRef(
+        source_uri=fixture_file.name, byte_offset=10, byte_length=20, source_format="bin"
+    )
+    abs_ref = FileRef(
+        source_uri=str(fixture_file), byte_offset=10, byte_length=20, source_format="bin"
+    )
+    uri_ref = FileRef(
+        source_uri=fixture_file.as_uri(), byte_offset=10, byte_length=20, source_format="bin"
+    )
+
+    first_id, first_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=rel_ref, base_dir=base_dir, namespace="ns"
+    )
+    second_id, second_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=abs_ref, base_dir=base_dir, namespace="ns"
+    )
+    third_id, third_hash = add_file_backed(
+        tmp_db, identifier="ds", file_ref=uri_ref, base_dir=base_dir, namespace="ns"
+    )
+    assert (second_id, second_hash) == (first_id, first_hash)
+    assert (third_id, third_hash) == (first_id, first_hash)
+    assert first_hash == compute_file_reference_hash("ds", fixture_file.name, 10, 20)
+    assert tmp_db.count() == 1
+
+
+def test_export_host_path_redaction_recomputes_file_content_hash(tmp_path: Path):
+    """#100: when export sanitizes an absolute source_uri, content_hash matches the portable URI."""
+    import json
+
+    from hotmem.interchange.canonical import compute_file_reference_hash
+    from hotmem.policy import CallerCredential, PolicyConfig
+    from hotmem.runtime import HotMemRuntime
+
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    backing = mount / "data.bin"
+    backing.write_bytes(b"0123456789abcdef")
+
+    db = MemoryDB(mount / "hotmem.sqlite")
+    # Insert with base_dir=None so stored content_hash uses the absolute host path.
+    add_file_backed(
+        db,
+        identifier="ds",
+        file_ref=FileRef(
+            source_uri=str(backing), byte_offset=0, byte_length=8, source_format="bin"
+        ),
+        namespace="team-a",
+    )
+    db.close()
+
+    policy = PolicyConfig(
+        store_id="store-100",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-export",
+                caller_id="exporter",
+                store_id="store-100",
+                namespaces=("team-a",),
+                operations=("read", "export"),
+            )
+        ],
+    )
+    rt = HotMemRuntime(db_path=mount / "hotmem.sqlite", base_dir=mount, policy=policy)
+    rt.open()
+    try:
+        ctx = rt.resolve_caller(
+            token="tok-export",
+            requested_store_id="store-100",
+            session_id="sess-1",
+            harness_id="pytest",
+            namespace="team-a",
+        )
+        out_jsonl = mount / "export.jsonl"
+        rt.snapshot(ctx, target=str(out_jsonl))
+        exported = json.loads(out_jsonl.read_text(encoding="utf-8").strip())
+        assert exported["source_uri"] == "data.bin"
+        assert exported["content_hash"] == compute_file_reference_hash("ds", "data.bin", 0, 8)
+    finally:
+        rt.close()

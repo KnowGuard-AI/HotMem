@@ -595,3 +595,136 @@ def test_attachment_uses_relative_uri(tmp_db: MemoryDB, tmp_path: Path):
     # Should be a relative path, not absolute.
     assert not Path(uri).is_absolute(), f"expected relative URI, got {uri}"
     assert "data.csv" in uri
+
+
+# -- #100: namespace-scoped bundle identity ----------------------------------
+
+
+def test_bundle_attachments_follow_file_identity_and_skip_on_repeat(
+    tmp_db: MemoryDB, full_bundle: Path
+):
+    """Same bundle repeat is idempotent; attachments use reference identity."""
+    first = read_bundle(tmp_db, full_bundle)
+    assert first.loaded == 7
+    assert first.skipped_dupes == 0
+
+    second = read_bundle(tmp_db, full_bundle)
+    assert second.loaded == 0
+    assert second.skipped_dupes == 7
+    assert tmp_db.count() == 7
+
+    file_rows = [r for r in tmp_db.all_rows() if r["memory_type"] == "file"]
+    assert len(file_rows) == 2
+    for row in file_rows:
+        assert row["content_hash"] != ""
+        assert row["source_uri"].startswith("attachments/")
+
+
+def test_bundle_attachment_twins_survive_in_distinct_namespaces(
+    tmp_db: MemoryDB, full_bundle: Path
+):
+    """The same bundle content in two namespaces produces two record sets."""
+    metadata = full_bundle / "metadata.json"
+    original = json.loads(metadata.read_text(encoding="utf-8"))
+
+    first = read_bundle(tmp_db, full_bundle)
+    assert first.loaded == 7
+    metadata.write_text(json.dumps({**original, "namespace": "reports-b"}), encoding="utf-8")
+    second = read_bundle(tmp_db, full_bundle)
+    assert second.loaded == 7
+    assert tmp_db.count() == 14
+    assert {r["namespace"] for r in tmp_db.all_rows()} == {"reports", "reports-b"}
+
+    metadata.write_text(json.dumps(original), encoding="utf-8")
+    again = read_bundle(tmp_db, full_bundle)
+    assert again.loaded == 0
+    assert again.skipped_dupes == 7
+    assert tmp_db.count() == 14
+
+
+def test_bundle_attachment_legacy_byte_hash_is_recognized(tmp_db: MemoryDB, full_bundle: Path):
+    """A bundle attachment stored under the pre-#100 byte hash is not duplicated,
+    while another attachment with identical bytes and a distinct reference is kept."""
+    import hashlib
+
+    from hotmem.db import MemoryRecord
+
+    att = full_bundle / "attachments" / "invoice.csv"
+    twin_att = full_bundle / "attachments" / "invoice_copy.csv"
+    twin_att.write_bytes(att.read_bytes())
+
+    legacy_hash = hashlib.sha256(att.read_bytes()).hexdigest()
+    tmp_db.insert_many_ignore(
+        [
+            MemoryRecord(
+                id="legacy-attachment",
+                identifier="acme_q3:invoice.csv",
+                fact_text="",
+                embedding=b"",
+                content_hash=legacy_hash,
+                namespace="reports",
+                memory_type="file",
+                source_uri="attachments/invoice.csv",
+                source_format="csv",
+                byte_offset=0,
+                byte_length=len(att.read_bytes()),
+            )
+        ]
+    )
+
+    result = read_bundle(tmp_db, full_bundle)
+    assert result.skipped_dupes == 1
+    assert result.loaded == 7
+    assert tmp_db.count() == 8
+    file_uris = {r["source_uri"] for r in tmp_db.all_rows() if r["memory_type"] == "file"}
+    assert "attachments/invoice.csv" in file_uris
+    assert "attachments/invoice_copy.csv" in file_uris
+
+
+def test_runtime_hydrate_rejects_bundle_with_unauthorized_metadata_namespace(
+    tmp_path: Path, full_bundle: Path
+):
+    """#100: _guard_hydrate_scope rejects a bundle with an unauthorized metadata namespace."""
+    import shutil
+
+    import pytest
+
+    from hotmem.policy import CallerCredential, PolicyConfig, PolicyError
+    from hotmem.runtime import HotMemRuntime
+
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    bundle_in_mount = mount / "bundle"
+    shutil.copytree(full_bundle, bundle_in_mount)
+
+    policy = PolicyConfig(
+        store_id="store-100",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-team-a",
+                caller_id="writer-a",
+                store_id="store-100",
+                namespaces=("team-a",),
+                operations=("read", "write", "hydrate"),
+            )
+        ],
+    )
+    rt = HotMemRuntime(db_path=mount / "hotmem.sqlite", base_dir=mount, policy=policy)
+    rt.open()
+    try:
+        ctx = rt.resolve_caller(
+            token="tok-team-a",
+            requested_store_id="store-100",
+            session_id="sess-1",
+            harness_id="pytest",
+            namespace="team-a",
+        )
+        # full_bundle/metadata.json declares namespace="reports", which writer-a cannot write.
+        with pytest.raises(PolicyError) as exc_info:
+            rt.hydrate_snapshot(ctx, target="bundle")
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.error == "scope_denied"
+        assert rt._require_db().count() == 0
+    finally:
+        rt.close()

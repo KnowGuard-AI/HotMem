@@ -97,7 +97,7 @@ X-HotMem-Session-Id: sess-alpha-101
 }
 ```
 
-Returns `memory_id`, `content_hash`, and `trace_ms` (plus `"deduplicated": true` when content-hash deduplication matched an existing record in the target namespace without overwriting the original writer's attribution or tags). In supported legacy/non-policy mode (`require_auth=false`), `session_id`, `harness_id`, and `tags` are optional and preserved when supplied.
+Returns `memory_id`, `content_hash`, and `trace_ms` (plus `"deduplicated": true` when logical identity `(namespace, content_hash)` matched an existing record in the target namespace without overwriting the original writer's id, attribution, tags, or metadata). Identical content in a different namespace is a distinct memory. File-backed identity covers `identifier`, the normalized source reference, and the byte range; `source_checksum` only verifies bytes. See `docs/okf/interchange-v1.md` section 3.1. In supported legacy/non-policy mode (`require_auth=false`), `session_id`, `harness_id`, and `tags` are optional and preserved when supplied.
 
 ## 5. Search
 
@@ -145,7 +145,7 @@ Content-Type: application/json
 }
 ```
 
-Loads memories from a JSONL or JSONL.GZ swap file. Deduplicates by `content_hash`.
+Loads memories from a JSONL or JSONL.GZ swap file. Deduplicates by logical identity `(namespace, content_hash)`; repeating an import in the same namespace skips, while identical records in another namespace are loaded.
 
 ## 7. Snapshot
 

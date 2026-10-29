@@ -34,7 +34,6 @@ Extension: add strict validation mode, remote bundles, or bundle indexing here.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from dataclasses import dataclass, field, replace
@@ -43,6 +42,7 @@ from typing import Any
 
 from hotmem.db import MemoryDB, MemoryRecord
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
+from hotmem.memory import FileRef, compute_file_content_hash
 from hotmem.swap import HydrateResult, compute_content_hash
 from hotmem.trace import Timer, get_tracer
 
@@ -284,6 +284,35 @@ def parse_bundle(
     return records, warnings
 
 
+def _skip_legacy_attachment_duplicates(
+    db: MemoryDB,
+    records: list[MemoryRecord],
+) -> int:
+    """Drop bundle records already stored in the target namespace (#100).
+
+    Uses :meth:`MemoryDB.batch_existing_record_identities` so an attachment
+    stored under a pre-#100 byte hash is matched by its scoped reference tuple
+    ``(namespace, identifier, normalized_source_uri, byte_offset,
+    byte_length)`` without re-reading attachment files or falsely skipping
+    distinct attachments that share the same bytes.
+    """
+    if not records:
+        return 0
+    existing = db.batch_existing_record_identities(records)
+    if not existing:
+        return 0
+    removed = 0
+    kept: list[MemoryRecord] = []
+    for record in records:
+        key = db.record_identity_key(record)
+        if key[1] and key in existing:
+            removed += 1
+            continue
+        kept.append(record)
+    records[:] = kept
+    return removed
+
+
 def read_bundle(
     db: MemoryDB,
     bundle_dir: str | Path,
@@ -292,12 +321,10 @@ def read_bundle(
     embedder: Embedder | None = None,
     target_namespace: str | None = None,
 ) -> BundleResult:
-    """Read a loose local markdown bundle into HotMem.
+    """Parse ``bundle_dir`` and insert all records into ``db`` (idempotent).
 
-    Thin wrapper around ``parse_bundle()`` that inserts records via
-    ``db.insert_many_ignore()``. ``embedder`` owns the inline-record
-    embeddings (issue #78; ``None`` = the hash default). Returns a
-    ``BundleResult`` with loaded count, skipped dupes, and warnings.
+    Deduplicates via ``insert_many_ignore`` (by content_hash). Re-reading the
+    same bundle is a no-op (`loaded=0, skipped_dupes=N`).
     """
     bundle_dir = Path(bundle_dir)
     with Timer() as t:
@@ -307,8 +334,9 @@ def read_bundle(
                 r if getattr(r, "namespace", "") else replace(r, namespace=target_namespace)
                 for r in records
             ]
+        skipped = _skip_legacy_attachment_duplicates(db, records)
         loaded = db.insert_many_ignore(records)
-        skipped = len(records) - loaded
+        skipped += len(records) - loaded
         embedded = sum(1 for r in records if r.embedding)
 
     _trace.info(
@@ -544,15 +572,20 @@ def _parse_attachments(
             warnings.append(BundleWarning(f"attachments/{att.name}", f"read error: {err}"))
             continue
 
-        # Content-derived hash (portable, collision-resistant).
-        content_hash = hashlib.sha256(file_bytes).hexdigest()
-
         source_format = att.suffix.lstrip(".") or "bin"
+        identifier = f"{default_identifier}:{att.name}"
+        file_ref = FileRef(
+            source_uri=rel_uri,
+            byte_offset=0,
+            byte_length=size,
+            source_format=source_format,
+        )
+        content_hash = compute_file_content_hash(identifier, file_ref)
 
         records.append(
             MemoryRecord(
                 id=uuid.uuid4().hex,
-                identifier=f"{default_identifier}:{att.name}",
+                identifier=identifier,
                 fact_text="",
                 embedding=b"",
                 embedding_dim=active.descriptor.dimension,

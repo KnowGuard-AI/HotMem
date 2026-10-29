@@ -10,6 +10,9 @@ Interface:
                           source_checksum (optional)
      HydratedContent (frozen dataclass): memory_id, content, verified,
                                          source_uri, byte_offset, byte_length
+     normalize_source_uri(source_uri) -> str   # syntactic, no dereference
+     compute_file_content_hash(identifier, file_ref) -> str   # logical digest
+     legacy_file_content_hashes(identifier, file_ref) -> tuple[str, ...]
      add_file_backed(db, identifier, file_ref, *, base_dir=..., summary=..., ...)
          -> tuple[memory_id, content_hash]
      get_memory_metadata(db, memory_id) -> dict | None    # no file I/O
@@ -35,6 +38,7 @@ from typing import Any
 
 from hotmem.db import MemoryDB
 from hotmem.embed import DEFAULT_EMBEDDER, Embedder, pack_embedding
+from hotmem.interchange import canonical
 from hotmem.provenance import (
     BackingFileMissingError,
     ChecksumMismatchError,
@@ -79,13 +83,107 @@ class HydratedContent:
     byte_length: int
 
 
-def _file_ref_content_hash(identifier: str, ref: FileRef) -> str:
-    """Deterministic SHA-256 of the reference itself (no bytes read)."""
-    payload = (
-        f"{identifier}:{ref.source_uri}:{ref.byte_offset}:"
-        f"{ref.byte_length}:{ref.source_checksum or ''}"
+def normalize_source_uri(
+    source_uri: str,
+    *,
+    base_dir: str | Path | None = None,
+) -> str:
+    """Syntactic source-reference normalization (see canonical module)."""
+    return canonical.normalize_source_uri(source_uri, base_dir=base_dir)
+
+
+def compute_file_content_hash(
+    identifier: str,
+    ref: FileRef,
+    *,
+    base_dir: str | Path | None = None,
+) -> str:
+    """Logical identity digest for a file-backed reference (#100).
+
+    Covers the identifier and normalized source reference tuple only. The
+    optional ``source_checksum`` verifies bytes and is deliberately excluded:
+    correcting or adding a checksum must not create a new logical memory.
+    """
+    return canonical.compute_file_reference_hash(
+        identifier,
+        ref.source_uri,
+        ref.byte_offset,
+        ref.byte_length,
+        base_dir=base_dir,
     )
-    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def legacy_file_content_hashes(
+    identifier: str,
+    ref: FileRef,
+    *,
+    base_dir: str | Path | None = None,
+) -> tuple[str, ...]:
+    """Hashes written by pre-#100 file-backed writers, newest first.
+
+    The legacy formula included the raw (unnormalized) URI and the optional
+    checksum. Callers use these only as compatibility aliases when deciding
+    whether a reference is already stored; new rows always use
+    :func:`compute_file_content_hash`.
+    """
+    uris = [ref.source_uri, normalize_source_uri(ref.source_uri)]
+    if base_dir is not None:
+        uris.append(normalize_source_uri(ref.source_uri, base_dir=base_dir))
+    hashes: list[str] = []
+    seen: set[str] = set()
+    for uri in uris:
+        if not uri:
+            continue
+        base = f"{identifier}:{uri}:{ref.byte_offset}:{ref.byte_length}"
+        candidates = [hashlib.sha256(f"{base}:{ref.source_checksum or ''}".encode()).hexdigest()]
+        if ref.source_checksum:
+            candidates.append(hashlib.sha256(f"{base}:".encode()).hexdigest())
+        for h in candidates:
+            if h not in seen:
+                seen.add(h)
+                hashes.append(h)
+    return tuple(hashes)
+
+
+def _file_ref_content_hash(
+    identifier: str,
+    ref: FileRef,
+    *,
+    base_dir: str | Path | None = None,
+) -> str:
+    """Backward-compatible alias for :func:`compute_file_content_hash`."""
+    return compute_file_content_hash(identifier, ref, base_dir=base_dir)
+
+
+def find_existing_file_record(
+    db: MemoryDB,
+    namespace: str,
+    identifier: str,
+    ref: FileRef,
+    *,
+    base_dir: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Return an existing row for this reference, including legacy hashes."""
+    seen: set[str] = set()
+    for content_hash in (
+        compute_file_content_hash(identifier, ref, base_dir=base_dir),
+        compute_file_content_hash(identifier, ref),
+        *legacy_file_content_hashes(identifier, ref, base_dir=base_dir),
+    ):
+        if not content_hash or content_hash in seen:
+            continue
+        seen.add(content_hash)
+        row = db.find_by_namespace_and_hash(namespace, content_hash)
+        if row is not None:
+            return row
+    return db.find_file_record_by_reference(
+        namespace,
+        identifier,
+        ref.source_uri,
+        ref.byte_offset,
+        ref.byte_length,
+        base_dir=base_dir,
+    )
 
 
 def _resolve_uri(source_uri: str, base_dir: str | None) -> str:
@@ -134,8 +232,12 @@ def add_file_backed(
             raise FileNotFoundError(f"backing file not found: {file_ref.source_uri}")
 
         active = embedder if embedder is not None else DEFAULT_EMBEDDER
+        existing = find_existing_file_record(db, namespace, identifier, file_ref, base_dir=base_dir)
+        if existing is not None:
+            return str(existing["id"]), str(existing["content_hash"])
+
         memory_id = uuid.uuid4().hex
-        content_hash = _file_ref_content_hash(identifier, file_ref)
+        content_hash = compute_file_content_hash(identifier, file_ref, base_dir=base_dir)
 
         if summary:
             vec = active.embed(summary)

@@ -575,6 +575,22 @@ def apply_delta(
                 memory = record_to_memory_record(
                     rec, blob, embedding_model=model, embedding_dim=dim
                 )
+                existing_by_hash = (
+                    db.find_by_namespace_and_hash(memory.namespace, memory.content_hash)
+                    if memory.content_hash
+                    else None
+                )
+                if existing_by_hash is not None and str(existing_by_hash["id"]) != record_id:
+                    conflicts.append(
+                        Conflict(
+                            reason="state_divergence",
+                            record_id=record_id,
+                            op_id=op.get("op_id"),
+                            expected=expected,
+                            actual=str(existing_by_hash["id"]),
+                        )
+                    )
+                    continue
                 db.insert(**{c: getattr(memory, c) for c in _MEMORY_COLUMNS}, _commit=False)
                 applied += 1
                 embedding_counts[f"embedding_{status}"] += 1

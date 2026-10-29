@@ -339,37 +339,24 @@ def hydrate_package(
             "annotation_conflicts": 0,
         }
         pending: list[dict] = []
+        intra_batch_dups: list[dict] = []
         batch_seen: set[tuple[str, str]] = set()
 
         package_ids, referenced_ids, has_annotations = _scan_annotation_context(verified.stream())
         known_ids: set[str] | None = None
         if has_annotations:
             # A reference resolves against the package ids or the ids the
-            # target already stores — one chunked existence query for the
+            # target already stores -- one chunked existence query for the
             # referenced subset, never a full-store scan.
             known_ids = package_ids | db.fetch_existing_ids(referenced_ids)
 
         def flush() -> None:
-            if not pending:
+            if not pending and not intra_batch_dups:
                 return
-            pairs = [(str(r.get("namespace") or ""), r["content_hash"]) for r in pending]
-            existing = db.batch_existing_namespace_hashes(pairs)
-            todo = [
-                r
-                for r in pending
-                if (str(r.get("namespace") or ""), r["content_hash"]) not in existing
-            ]
+            existing = db.batch_existing_record_identities(pending)
+            todo = [r for r in pending if db.record_identity_key(r) not in existing]
+            db_dups = [r for r in pending if db.record_identity_key(r) in existing]
             counters["skipped"] += len(pending) - len(todo)
-
-            merge_duplicate_annotations(
-                db,
-                [
-                    r
-                    for r in pending
-                    if (str(r.get("namespace") or ""), r["content_hash"]) in existing
-                ],
-                counters,
-            )
 
             records = []
             for rec in todo:
@@ -381,7 +368,14 @@ def hydrate_package(
             inserted = db.insert_many_ignore(records, _commit=False)
             counters["loaded"] += inserted
             counters["skipped"] += len(records) - inserted  # residual OR IGNOREs
+
+            merge_duplicate_annotations(
+                db,
+                db_dups + intra_batch_dups,
+                counters,
+            )
             pending.clear()
+            intra_batch_dups.clear()
             batch_seen.clear()
 
         try:
@@ -430,11 +424,16 @@ def hydrate_package(
                         detail={"id": rec["id"], "issues": issues},
                     )
                     continue
-                dedup_key = (str(rec.get("namespace") or ""), rec["content_hash"])
-                if dedup_key in batch_seen:
+                dedup_key = db.record_identity_key(rec)
+                if dedup_key[1] and dedup_key in batch_seen:
                     counters["skipped"] += 1
+                    if isinstance(rec.get("metadata"), dict) and "annotations" in (
+                        rec["metadata"] or {}
+                    ):
+                        intra_batch_dups.append(rec)
                     continue
-                batch_seen.add(dedup_key)
+                if dedup_key[1]:
+                    batch_seen.add(dedup_key)
                 pending.append(rec)
                 if len(pending) >= HYDRATE_BATCH:
                     flush()

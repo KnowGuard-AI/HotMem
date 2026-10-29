@@ -632,3 +632,39 @@ def test_installed_mcp_stdio_session_restore_and_cleanup(tmp_path: Path, suffix:
     assert stderr.count("mcp server closed") == 3
     shutil.rmtree(root)
     assert not root.exists()
+
+
+def test_embedded_add_identity_is_namespace_scoped(state: _ServerState):
+    """#100: embedded MCP twins in distinct namespaces coexist; repeat skips."""
+    body = {"identifier": "mcp/ns-doc", "fact": "same embedded fact"}
+    a = _text(_handle_add_memory(state, {**body, "namespace": "ns-a"}))
+    b = _text(_handle_add_memory(state, {**body, "namespace": "ns-b"}))
+    assert a["content_hash"] == b["content_hash"]
+    assert a["memory_id"] != b["memory_id"]
+    assert state.db.count() == 2
+
+    repeat = _text(_handle_add_memory(state, {**body, "namespace": "ns-a"}))
+    assert repeat["memory_id"] == a["memory_id"]
+    assert repeat["content_hash"] == a["content_hash"]
+    assert repeat["deduplicated"] is True
+    assert state.db.count() == 2
+    assert state.db.get_memory(a["memory_id"])["namespace"] == "ns-a"
+    assert state.db.get_memory(b["memory_id"])["namespace"] == "ns-b"
+
+
+def test_embedded_hydrate_propagates_state_namespace(state: _ServerState, tmp_path: Path):
+    """#100: embedded MCP hydrate applies state.namespace to unscoped records."""
+    swap = tmp_path / "unscoped.jsonl"
+    swap.write_text(
+        json.dumps({"id": "mcp-hyd-1", "identifier": "doc", "fact_text": "mcp fact"}) + "\n",
+        encoding="utf-8",
+    )
+    state.namespace = "mcp-scope"
+    first = _text(_handle_hydrate(state, {"file": str(swap)}))
+    assert first["loaded"] == 1
+    assert first["skipped_dupes"] == 0
+    assert state.db.get_memory("mcp-hyd-1")["namespace"] == "mcp-scope"
+
+    second = _text(_handle_hydrate(state, {"file": str(swap)}))
+    assert second["loaded"] == 0
+    assert second["skipped_dupes"] == 1
