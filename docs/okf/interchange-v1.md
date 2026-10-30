@@ -66,6 +66,27 @@ One JSON object per line. Fields are **required**, **conditionally required**,
   row version (#99) without changing this contract's `schema_version`.
   Readers that do not understand it keep it as a forward-compatible field.
 
+### 1.1a Complete 30-column `memories` field disposition (#99)
+
+`hotmem.interchange.MEMORY_FIELD_INVENTORY` classifies every column in
+`hotmem.db._MEMORY_COLUMNS`:
+
+| Disposition | Columns | Contract |
+| --- | --- | --- |
+| `preserve` | `id`, `identifier`, `fact_text`, `source`, `importance`, `metadata_json`, `content_hash`, `ttl_seconds`, `created_at`, `namespace`, `tier`, `memory_type`, `source_uri`, `source_format`, `source_checksum`, `byte_offset`, `byte_length`, `updated_at`, `snapshot_id`, `promotion_state`, `promotion_candidate`, `parent_memory`, `related_memories`, `tags`, `schema_version`, `fact_summary`, `provenance_json` | Exported and restored without silent reset across clean runtimes. |
+| `regenerate` | `embedding`, `embedding_dim`, `embedding_model` | Reused when compatible with the active `EmbeddingDescriptor` (#78); rebuilt from `fact_text`/`fact_summary` otherwise. |
+| `exclude` | *(none on `memories`; store-local tables `store_meta`, `events`, `operation_ledger`, `sync_checkpoints`, `handoff_ledger`, `bundle_index` are outside `memories.jsonl`)* | Instance-local operational state is never mixed into portable memory records. |
+
+Older-package defaults distinguish omitted/null legacy fields from explicit
+empty, zero, or false values:
+- `source`: omitted/null defaults to the reader's format label (`"swap"`,
+  `"snapshot"`, `"interchange"`); explicit `""` is preserved as `""`.
+- `importance`: omitted/null defaults to `0.5`; explicit `0.0` is preserved as
+  `0.0`.
+- `byte_offset`: omitted/null is `None`; explicit `0` is preserved as `0`.
+- `promotion_candidate`: omitted/null defaults to `0`; explicit `0` or `1` is
+  preserved.
+
 ### 1.2 Forward compatibility
 
 - Readers MUST NOT reject a record for unknown top-level keys, unknown

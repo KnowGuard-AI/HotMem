@@ -24,9 +24,18 @@ Extension: package publishing/verification live in interchange.package and
 from hotmem.interchange import canonical, compat, record
 from hotmem.interchange.canonical import compute_content_hash, logical_id
 from hotmem.interchange.compat import compatible_embedding_blob
-from hotmem.interchange.record import normalize_record, validate_record
+from hotmem.interchange.record import (
+    MEMORY_FIELD_INVENTORY,
+    VALID_DISPOSITIONS,
+    FieldDisposition,
+    normalize_record,
+    validate_record,
+)
 
 __all__ = [
+    "MEMORY_FIELD_INVENTORY",
+    "VALID_DISPOSITIONS",
+    "FieldDisposition",
     "canonical",
     "compat",
     "compatible_embedding_blob",

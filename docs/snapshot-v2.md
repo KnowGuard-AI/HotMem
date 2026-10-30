@@ -78,24 +78,51 @@ export time (`created_at`) and `hotmem_version`, which are informational.
 ## `memories.jsonl`
 
 One JSON object per line, sorted by `id`. Each record carries the full memory
-record payload (`schema_version: 2`). Embeddings are stored as base64 so the
-JSONL is text-portable and can be rehydrated without re-embedding.
+record payload (`schema_version: 2`, plus optional `record_schema_version`
+carrying the row's stored SQLite `memories.schema_version` when it differs from
+`2`). Embeddings are stored as base64 so the JSONL is text-portable and can be
+rehydrated without re-embedding.
 
 ```json
 {
   "schema_version": 2,
+  "record_schema_version": 1,
   "id": "...", "identifier": "...", "memory_type": "fact" | "file",
   "fact_text": "..." | "", "fact_summary": "..." | null,
   "embedding": "<base64 or null>", "embedding_dim": 64,
   "embedding_model": "hotmem-hash-v1", "source": "...", "importance": 0.5,
   "metadata": {}, "content_hash": "...",
   "ttl_seconds": null | 3600, "namespace": "", "tier": "hot", "tags": [],
+  "related_memories": [], "parent_memory": "",
   "source_uri": null | "...", "byte_offset": null | 0, "byte_length": null | 100,
   "source_checksum": null | "...", "source_format": null | "csv",
   "provenance": null | {}, "created_at": "...",
+  "updated_at": null | "...", "snapshot_id": "",
   "promotion_state": "HOT", "promotion_candidate": 0
 }
 ```
+
+### 30-column field disposition contract (#99)
+
+Every column of the SQLite `memories` table (`hotmem.db._MEMORY_COLUMNS`) is
+governed by `hotmem.interchange.MEMORY_FIELD_INVENTORY`:
+
+- **`preserve` (27 columns):** `id`, `identifier`, `fact_text`, `source`,
+  `importance`, `metadata_json` (`metadata`), `content_hash`, `ttl_seconds`,
+  `created_at`, `namespace`, `tier`, `memory_type`, `source_uri`,
+  `source_format`, `source_checksum`, `byte_offset`, `byte_length`,
+  `updated_at`, `snapshot_id`, `promotion_state`, `promotion_candidate`,
+  `parent_memory`, `related_memories`, `tags`, `schema_version`
+  (`record_schema_version`), `fact_summary`, and `provenance_json`
+  (`provenance`).
+- **`regenerate` (3 columns):** `embedding`, `embedding_dim`,
+  `embedding_model`. Compatible stored vectors (matching `(embedding_model,
+  embedding_dim)` and finite unit-norm float32 payload) are reused without
+  recomputation; incompatible or missing vectors are rebuilt from
+  `fact_text` / `fact_summary` under the active embedder.
+- **Store-local tables (`store_meta`, `events`, `operation_ledger`,
+  `sync_checkpoints`, `handoff_ledger`, `bundle_index`):** intentionally
+  excluded from `memories.jsonl` because they represent instance-local state.
 
 All fields round-trip: `namespace`, `tier`, `tags`, `ttl_seconds`, and
 `provenance` survive snapshot -> hydrate (verified by tests). Unknown

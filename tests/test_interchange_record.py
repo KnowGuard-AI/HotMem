@@ -388,3 +388,128 @@ def test_resolve_failed_when_embedder_raises():
     assert exploding.calls == 1
     assert blob == b"" and model == ""
     assert dim == desc.dimension
+
+
+# ── complete 30-column field disposition contract (#99 WP1) ─────────────────
+
+
+def test_memory_field_inventory_covers_every_sqlite_column_in_order():
+    """#99 WP1: every column in _MEMORY_COLUMNS has an explicit disposition and rationale."""
+    from hotmem.db import _MEMORY_COLUMNS
+    from hotmem.interchange.record import MEMORY_FIELD_INVENTORY, VALID_DISPOSITIONS
+
+    assert tuple(MEMORY_FIELD_INVENTORY.keys()) == _MEMORY_COLUMNS
+    for col in _MEMORY_COLUMNS:
+        spec = MEMORY_FIELD_INVENTORY[col]
+        assert spec.column == col
+        assert spec.disposition in VALID_DISPOSITIONS
+        assert spec.snapshot_v2_field
+        assert spec.interchange_v1_field
+        assert spec.legacy_jsonl_field
+        assert len(spec.rationale) >= 20
+
+    preserved = {c for c, s in MEMORY_FIELD_INVENTORY.items() if s.disposition == "preserve"}
+    regenerated = {c for c, s in MEMORY_FIELD_INVENTORY.items() if s.disposition == "regenerate"}
+    excluded = {c for c, s in MEMORY_FIELD_INVENTORY.items() if s.disposition == "exclude"}
+    assert regenerated == {"embedding", "embedding_dim", "embedding_model"}
+    assert excluded == set()
+    assert len(preserved) == len(_MEMORY_COLUMNS) - 3
+
+
+def test_legacy_defaults_distinguish_missing_from_explicit_empty_zero_or_false():
+    """#99 WP1: omitted legacy fields get defaults while explicit '', 0, 0.0, False survive."""
+    from hotmem.swap import record_to_memory_record
+
+    omitted = normalize_record({"identifier": "k", "fact_text": "v"}, default_source="snapshot")
+    assert omitted["source"] == "snapshot"
+    assert omitted["importance"] == 0.5
+    assert omitted["byte_offset"] is None
+    assert omitted["ttl_seconds"] is None
+    assert omitted["updated_at"] is None
+    assert omitted["promotion_state"] is None
+    assert omitted["promotion_candidate"] is None
+    omitted_mem = record_to_memory_record(omitted, b"", "hotmem-hash-v1", 64)
+    assert omitted_mem.promotion_state == "HOT"
+    assert omitted_mem.promotion_candidate == 0
+    assert omitted_mem.schema_version == 1
+
+    explicit = normalize_record(
+        {
+            "identifier": "k",
+            "fact_text": "v",
+            "source": "",
+            "importance": 0.0,
+            "byte_offset": 0,
+            "promotion_candidate": 0,
+            "promotion_state": "COLD",
+            "tier": "cold",
+            "schema_version": 2,
+            "record_schema_version": 1,
+        },
+        default_source="snapshot",
+    )
+    assert validate_record(explicit) == []
+    assert explicit["source"] == ""
+    assert explicit["importance"] == 0.0
+    assert explicit["byte_offset"] == 0
+    assert explicit["promotion_candidate"] == 0
+    assert explicit["promotion_state"] == "COLD"
+    assert explicit["tier"] == "cold"
+    explicit_mem = record_to_memory_record(explicit, b"", "hotmem-hash-v1", 64)
+    assert explicit_mem.source == ""
+    assert explicit_mem.importance == 0.0
+    assert explicit_mem.byte_offset == 0
+    assert explicit_mem.promotion_candidate == 0
+    assert explicit_mem.promotion_state == "COLD"
+    assert explicit_mem.tier == "cold"
+    assert explicit_mem.schema_version == 1
+
+
+@pytest.mark.parametrize(
+    ("bad_fields", "expected_field"),
+    [
+        ({"importance": 1.5}, "importance"),
+        ({"importance": -0.1}, "importance"),
+        ({"importance": "not-a-float"}, "importance"),
+        ({"importance": True}, "importance"),
+        ({"ttl_seconds": 0}, "ttl_seconds"),
+        ({"ttl_seconds": -60}, "ttl_seconds"),
+        ({"ttl_seconds": "forever"}, "ttl_seconds"),
+        ({"ttl_seconds": True}, "ttl_seconds"),
+        ({"tier": "glacial"}, "tier"),
+        ({"promotion_state": "SUPER_HOT"}, "promotion_state"),
+        ({"promotion_candidate": 2}, "promotion_candidate"),
+        ({"promotion_candidate": "maybe"}, "promotion_candidate"),
+        ({"memory_type": "executable"}, "memory_type"),
+        ({"byte_offset": -1}, "byte_offset"),
+        ({"byte_length": -5}, "byte_length"),
+        ({"memory_type": "file", "source_uri": "a.csv", "byte_length": 0}, "byte_length"),
+        ({"schema_version": 0}, "schema_version"),
+        ({"record_schema_version": -1}, "record_schema_version"),
+        ({"metadata": ["not", "an", "object"]}, "metadata"),
+        ({"metadata_json": "{broken-json"}, "metadata"),
+        ({"provenance": ["not", "an", "object"]}, "provenance"),
+        ({"provenance_json": "{broken-json"}, "provenance"),
+        ({"tags": {"not": "a-list"}}, "tags"),
+        ({"tags": [123]}, "tags"),
+        ({"related_memories": {"not": "a-list"}}, "related_memories"),
+        ({"related_memories": [456]}, "related_memories"),
+    ],
+)
+def test_validate_record_rejects_malformed_values_without_leaking_content(
+    bad_fields: dict, expected_field: str
+):
+    """#99 WP1: malformed fields produce actionable errors without echoing sensitive content."""
+    secret_canary = "TOP_SECRET_CANARY_VALUE_99"
+    raw = {
+        "identifier": "sec/item",
+        "fact_text": f"Confidential payload {secret_canary}",
+        **bad_fields,
+    }
+    rec = normalize_record(raw)
+    issues = validate_record(rec)
+    assert issues, f"expected validation error for {bad_fields}"
+    assert any(expected_field in issue for issue in issues), issues
+    for issue in issues:
+        assert secret_canary not in issue
+        assert "Confidential payload" not in issue
