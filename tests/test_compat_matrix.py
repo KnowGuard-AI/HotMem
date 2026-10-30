@@ -454,7 +454,31 @@ def test_legacy_v01_and_pre99_snapshot_v2_fixtures_hydrate_with_documented_defau
     assert fb["source_checksum"] == "ab" * 32
     dst.close()
 
-    # 2. Unsupported future schema_version (99) or unknown format fails at version boundary.
+    # 2. Legacy v0.1 JSONL (single-file swap) hydrates under documented defaults.
+    v01 = tmp_path / "v01.jsonl"
+    v01.write_text(
+        json.dumps({"identifier": "legacy/v01", "fact_text": "Minimal v0.1 record."}) + "\n",
+        encoding="utf-8",
+    )
+    dst_v01 = MemoryDB(tmp_path / "dst_v01.sqlite")
+    res_v01 = snapshot_hydrate(dst_v01, v01)
+    assert res_v01.loaded == 1
+    v01_row = dst_v01.all_rows()[0]
+    assert v01_row is not None
+    assert v01_row["source"] == "swap"
+    assert v01_row["importance"] == 0.5
+    assert v01_row["tier"] == "hot"
+    assert v01_row["promotion_state"] == "HOT"
+    assert v01_row["promotion_candidate"] == 0
+    assert v01_row["namespace"] == ""
+    assert v01_row["schema_version"] == 1
+    assert v01_row["parent_memory"] == ""
+    assert v01_row["related_memories"] == "[]"
+    assert v01_row["tags"] == "[]"
+    assert v01_row["provenance_json"] is None
+    dst_v01.close()
+
+    # 3. Unsupported future schema_version (99) or unknown format fails at version boundary.
     future_v2 = tmp_path / "future_v99"
     future_v2.mkdir()
     (future_v2 / MEMORIES_NAME).write_bytes(mem_path.read_bytes())
