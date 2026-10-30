@@ -498,16 +498,6 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
-def _as_float(value: Any, default: float) -> float:
-    if value is None or value == "" or isinstance(value, bool):
-        return default
-    try:
-        val = float(value)
-        return val if math.isfinite(val) else default
-    except (TypeError, ValueError):
-        return default
-
-
 def _as_json(value: Any, fallback: Any) -> Any:
     """Parse a JSON string field; pass through objects; fallback on error."""
     if isinstance(value, str):

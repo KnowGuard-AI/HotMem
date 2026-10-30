@@ -43,6 +43,7 @@ from hotmem.interchange.hydrate import _scan_annotation_context
 from hotmem.interchange.paths import confined_relpath
 from hotmem.interchange.record import normalize_record, validate_record
 from hotmem.snapshot.format import (
+    MANIFEST_NAME,
     Manifest,
     SnapshotChecksumError,
     compute_overall,
@@ -53,7 +54,6 @@ from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("snapshot.reader")
 
-MANIFEST_NAME = "manifest.json"
 MEMORIES_NAME = "memories.jsonl"
 METADATA_NAME = "metadata.json"
 
