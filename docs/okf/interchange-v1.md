@@ -295,6 +295,17 @@ Normative fields (readers MUST understand these):
   `permitted_namespaces`, `share_approvals`, `exported_count`,
   `omitted_count`, and `store_id`. It is excluded from logical identity and
   digests; readers ignore it if unknown.
+- `mount_id`, `replica_id`, `history_id`, `state_fingerprint`, and
+  `replay_cursor` (plus `source.mount_id`, `source.replica_id`, and
+  `source.history_id`), when present (issue #94), bind the exported package to
+  its logical mount identity, runtime replica provenance, event-log epoch, and
+  an opaque versioned `hmc1` replay cursor. `verify_package` validates
+  `replay_cursor` before any target write while continuing to accept legacy
+  manifests that omit these fields. Hydrating into an empty target store adopts
+  `mount_id` and records the clone base lineage (`compare_mount_lineage`
+  classifies `"same_replica"`, `"clone"`, `"fork"`, `"replacement"`, and
+  `"different_mount"`). Multi-writer ordering and conflict resolution across
+  divergent runtime forks are undefined.
 
 ### 6.1 Proposed fields (NOT emitted — pending contract review per ADR-003)
 

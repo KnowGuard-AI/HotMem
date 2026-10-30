@@ -245,3 +245,37 @@ identity are unaffected.
 Bump `SCHEMA_VERSION` in `src/hotmem/snapshot/format.py` and add a migration
 path in `reader.py` for future incompatible format changes. Older snapshots
 remain readable; the reader dispatches by `schema_version`.
+
+## Portable mount identity and replay cursors (issue #94)
+
+Snapshot v2 manifests carry additive lineage and replay cursor fields:
+
+- `mount_id`: logical mount/workspace identity (`mnt-<hex>` or explicit mount
+  configuration). Preserved across clones, restores, and forks of the same
+  workspace.
+- `replica_id`: runtime SQLite replica identity (`rep-<hex>`). Exported as
+  source provenance; a hydrating target always keeps or generates its own
+  distinct `replica_id`.
+- `history_id`: source replica event-log epoch (`hist-<hex>`). Regenerated
+  whenever a replica is cloned, restored, forked, or replaced.
+- `state_fingerprint`: canonical state fingerprint over the exported records.
+- `replay_cursor`: opaque, versioned `hmc1.<payload>.<checksum>` replay cursor
+  bound to `(mount_id, replica_id, history_id, base_snapshot_id, scope, seq,
+  anchor_event_id)`.
+
+Verification and hydration rules:
+
+- A bare SQLite `seq` integer, numeric string, or unanchored mapping is never
+  accepted as a portable cursor (`ReplayCursorError(reason="unanchored_sequence")`).
+- If `replay_cursor` is present in `manifest.json`, `verify_manifest` validates
+  its `hmc1` prefix, version, checksum, and alignment with `mount_id`,
+  `replica_id`, and `history_id` before any record is read. Legacy pre-#94
+  manifests without `replay_cursor` remain readable.
+- Hydrating into an empty/clean store adopts `mount_id` (when `target_namespace`
+  is unset) and records `base_snapshot_id`, `base_state_fingerprint`,
+  `base_source_replica_id`, `base_history_id`, and `base_cursor`, establishing
+  a `"clone"` relationship (`compare_mount_lineage`).
+- Independent local writes on a cloned replica transition its lineage to
+  `"fork"`. Multi-writer ordering and automatic fork conflict resolution are
+  intentionally undefined; cursor replay against a wrong source, stale/trimmed
+  base, replaced history, or divergent fork fails closed before mutation.
