@@ -213,6 +213,12 @@ def hydrate_v2(
         if not memories_path.is_file():
             raise SnapshotChecksumError("missing_file", file=MEMORIES_NAME)
 
+        was_empty = (
+            db.count() == 0
+            and db.event_log_bounds()["head_seq"] == 0
+            and not db.mount_identity().mount_bound
+        )
+
         counters = {
             "loaded": 0,
             "skipped": 0,
@@ -337,6 +343,24 @@ def hydrate_v2(
                     if len(pending) >= HYDRATE_BATCH:
                         flush()
             flush()
+            if was_empty and manifest.mount_id:
+                from hotmem.interchange.fingerprint import state_fingerprint
+
+                base_fp = (
+                    manifest.state_fingerprint
+                    if target_namespace is None and manifest.state_fingerprint
+                    else state_fingerprint(db.all_rows())
+                )
+                db.record_clone_lineage(
+                    source_mount_id=manifest.mount_id,
+                    source_replica_id=manifest.replica_id,
+                    source_history_id=manifest.history_id,
+                    base_snapshot_id=manifest.snapshot_id,
+                    base_state_fingerprint=base_fp,
+                    base_cursor=manifest.replay_cursor,
+                    adopt_mount_id=(target_namespace is None),
+                    _commit=False,
+                )
             db.commit()
         except Exception:
             db.rollback()

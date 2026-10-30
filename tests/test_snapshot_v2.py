@@ -1496,3 +1496,60 @@ def test_manifest_falls_back_to_legacy_file_references_when_new_key_empty(
     assert len(parsed.file_backed_references) == 1
     assert parsed.file_backed_references[0].memory_id == mid
     assert parsed.file_backed_references[0].attachment == legacy_refs[0]["attachment"]
+
+
+def test_snapshot_v2_manifest_carries_mount_identity_and_replay_cursor(
+    populated_db: MemoryDB, tmp_path: Path
+):
+    """#94: Snapshot v2 manifest records mount_id, replica_id, history_id,
+    state_fingerprint, and an opaque hmc1 replay_cursor; clean hydrate records
+    clone lineage while tampered cursors fail verification before mutation."""
+    import shutil
+
+    from hotmem.events import decode_cursor
+    from hotmem.mount import compare_mount_lineage
+
+    snap_dir = tmp_path / "snap_cursor_v2"
+    snapshot(populated_db, snap_dir)
+
+    raw_manifest = json.loads((snap_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    src_ident = populated_db.mount_identity()
+    assert raw_manifest["mount_id"] == src_ident.mount_id
+    assert raw_manifest["replica_id"] == src_ident.replica_id
+    assert raw_manifest["history_id"] == src_ident.history_id
+    assert raw_manifest["state_fingerprint"]
+    assert raw_manifest["replay_cursor"].startswith("hmc1.")
+
+    decoded = decode_cursor(raw_manifest["replay_cursor"])
+    assert decoded.mount_id == src_ident.mount_id
+    assert decoded.replica_id == src_ident.replica_id
+    assert decoded.history_id == src_ident.history_id
+
+    # Hydrating into a clean target adopts mount_id and records clone lineage.
+    clone_db = MemoryDB(tmp_path / "clone_from_v2.sqlite")
+    try:
+        hydrate(clone_db, snap_dir)
+        cmp_res = compare_mount_lineage(populated_db, clone_db)
+        assert cmp_res["relationship"] == "clone"
+        assert clone_db.mount_identity().mount_id == src_ident.mount_id
+        assert clone_db.mount_identity().replica_id != src_ident.replica_id
+        assert clone_db.mount_identity().base_cursor == raw_manifest["replay_cursor"]
+    finally:
+        clone_db.close()
+
+    # Tampering replay_cursor with a bare sequence or mismatched mount_id fails verification.
+    bad_dir = tmp_path / "snap_bad_cursor"
+    shutil.copytree(snap_dir, bad_dir)
+    bad_manifest = dict(raw_manifest)
+    bad_manifest["replay_cursor"] = "1"
+    (bad_dir / MANIFEST_NAME).write_text(json.dumps(bad_manifest), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError) as exc_info:
+        verify_manifest(bad_dir)
+    assert exc_info.value.file == "replay_cursor"
+
+    bad_manifest["mount_id"] = "mnt-wrong-mount"
+    bad_manifest["replay_cursor"] = raw_manifest["replay_cursor"]
+    (bad_dir / MANIFEST_NAME).write_text(json.dumps(bad_manifest), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError) as exc_info2:
+        verify_manifest(bad_dir)
+    assert exc_info2.value.file == "replay_cursor"

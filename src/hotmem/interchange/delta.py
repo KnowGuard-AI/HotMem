@@ -172,18 +172,47 @@ def produce_delta(
 
             removed_since_base = len(base_ids - current_ids)
             resulting = state_fingerprint_from_list(current_fingerprints)
+            from hotmem.events import issue_replay_cursor
+
+            ident = db.mount_identity()
+            base_lid = str(base.manifest.get("logical_id") or "")
+            cursor_token = issue_replay_cursor(
+                db,
+                position="head",
+                base_snapshot_id=base_lid,
+            ).encode()
+            base_mount_id = base.manifest.get("mount_id") or (
+                base.manifest.get("source") or {}
+            ).get("mount_id")
 
             manifest = {
                 "format": FORMAT_ID,
                 "schema_version": 1,
                 "fingerprint_version": FINGERPRINT_VERSION,
-                "source": {"kind": "hotmem-dump"},
+                "source": {
+                    "kind": "hotmem-dump",
+                    "mount_id": ident.mount_id,
+                    "replica_id": ident.replica_id,
+                    "history_id": ident.history_id,
+                    "replay_cursor": cursor_token,
+                },
                 "base": {
                     "package_format": "hotmem-interchange-v1",
                     "logical_id": base.manifest.get("logical_id"),
-                    # Base packages do not carry state fingerprints yet (delta-v1 §10).
+                    # Base packages do not carry state fingerprints yet (delta-v1 section 10).
                     "state_fingerprint": None,
                     "record_count": base.record_count,
+                    **(
+                        {"mount_id": base_mount_id}
+                        if isinstance(base_mount_id, str) and base_mount_id
+                        else {}
+                    ),
+                    **(
+                        {"replay_cursor": base.manifest["replay_cursor"]}
+                        if isinstance(base.manifest.get("replay_cursor"), str)
+                        and base.manifest.get("replay_cursor")
+                        else {}
+                    ),
                 },
                 "counts": {
                     "added": added,
@@ -335,6 +364,40 @@ def _load_delta_manifest(pkg: Path) -> dict[str, Any]:
             expected=str(FINGERPRINT_VERSION),
             actual=str(manifest.get("fingerprint_version")),
         )
+    from hotmem.events import ReplayCursorError, decode_cursor
+
+    for block_name in ("source", "base"):
+        block = manifest.get(block_name)
+        if not isinstance(block, dict):
+            continue
+        cursor_val = block.get("replay_cursor")
+        if cursor_val is None or cursor_val == "":
+            continue
+        if not isinstance(cursor_val, str):
+            raise PackageError(
+                "invalid_cursor",
+                file=MANIFEST_NAME,
+                expected="valid hmc1 replay_cursor",
+                actual=str(cursor_val),
+            )
+        try:
+            decoded = decode_cursor(cursor_val)
+        except ReplayCursorError as err:
+            raise PackageError(
+                "invalid_cursor",
+                file=MANIFEST_NAME,
+                expected="valid hmc1 replay_cursor",
+                actual=cursor_val,
+                detail=str(err),
+            ) from err
+        block_mount = str(block.get("mount_id") or "")
+        if block_mount and decoded.mount_id != block_mount:
+            raise PackageError(
+                "cursor_manifest_mismatch",
+                file=MANIFEST_NAME,
+                expected=f"{block_name}.mount_id={block_mount!r}",
+                actual=decoded.mount_id,
+            )
     return manifest
 
 

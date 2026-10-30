@@ -229,3 +229,42 @@ def test_package_roundtrip_preserves_promotion_state(src_db: MemoryDB, tmp_path:
     row = next(r for r in target.all_rows() if r["id"] == "m1")
     assert row["promotion_state"] == "ARCHIVED"
     target.close()
+
+
+def test_package_manifest_carries_mount_identity_and_replay_cursor_and_rejects_tampering(
+    src_db: MemoryDB, tmp_path: Path
+):
+    """#94: hotmem-interchange-v1 manifest carries mount/replica/history identity
+    and an opaque hmc1 replay_cursor; verify_package rejects invalid cursors."""
+    from hotmem.events import decode_cursor
+    from hotmem.interchange.hydrate import PackageError, hydrate_package, verify_package
+    from hotmem.mount import compare_mount_lineage
+
+    out = tmp_path / "pkg_cursor"
+    write_package(src_db, out)
+    manifest = json.loads((out / MANIFEST_NAME).read_text(encoding="utf-8"))
+    ident = src_db.mount_identity()
+
+    assert manifest["mount_id"] == ident.mount_id
+    assert manifest["replica_id"] == ident.replica_id
+    assert manifest["history_id"] == ident.history_id
+    assert manifest["source"]["mount_id"] == ident.mount_id
+    assert manifest["replay_cursor"].startswith("hmc1.")
+    decoded = decode_cursor(manifest["replay_cursor"])
+    assert decoded.mount_id == ident.mount_id
+    assert decoded.replica_id == ident.replica_id
+
+    target = MemoryDB(tmp_path / "clone_pkg.sqlite")
+    try:
+        hydrate_package(target, out)
+        assert compare_mount_lineage(src_db, target)["relationship"] == "clone"
+    finally:
+        target.close()
+
+    # Bare SQLite sequence in replay_cursor is rejected before restore.
+    bad_manifest = dict(manifest)
+    bad_manifest["replay_cursor"] = "0"
+    (out / MANIFEST_NAME).write_text(json.dumps(bad_manifest), encoding="utf-8")
+    with pytest.raises(PackageError) as exc_info:
+        verify_package(out)
+    assert exc_info.value.reason == "invalid_cursor"

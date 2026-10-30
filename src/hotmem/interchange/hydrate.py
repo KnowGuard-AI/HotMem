@@ -127,6 +127,44 @@ def _load_manifest(pkg: Path) -> dict[str, Any]:
             expected=f"schema_version<={_SUPPORTED_SCHEMA}",
             actual=str(manifest.get("schema_version")),
         )
+    for key in ("mount_id", "replica_id", "history_id", "state_fingerprint", "replay_cursor"):
+        val = manifest.get(key)
+        if val is not None and not isinstance(val, str):
+            raise PackageError(
+                "malformed_manifest",
+                file=MANIFEST_NAME,
+                expected=f"{key}: string",
+                actual=str(val),
+            )
+    cursor_str = str(manifest.get("replay_cursor") or "")
+    if cursor_str:
+        from hotmem.events import ReplayCursorError, decode_cursor
+
+        try:
+            decoded = decode_cursor(cursor_str)
+        except ReplayCursorError as err:
+            raise PackageError(
+                "invalid_cursor",
+                file=MANIFEST_NAME,
+                expected="valid hmc1 replay_cursor",
+                actual=cursor_str,
+                detail=str(err),
+            ) from err
+        source_block = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+        mount_id_str = str(manifest.get("mount_id") or source_block.get("mount_id") or "")
+        replica_id_str = str(manifest.get("replica_id") or source_block.get("replica_id") or "")
+        history_id_str = str(manifest.get("history_id") or source_block.get("history_id") or "")
+        if (
+            (mount_id_str and decoded.mount_id != mount_id_str)
+            or (replica_id_str and decoded.replica_id != replica_id_str)
+            or (history_id_str and decoded.history_id != history_id_str)
+        ):
+            raise PackageError(
+                "cursor_manifest_mismatch",
+                file=MANIFEST_NAME,
+                expected=f"mount_id={mount_id_str!r}, replica_id={replica_id_str!r}",
+                actual=cursor_str,
+            )
     return manifest
 
 
@@ -326,6 +364,11 @@ def hydrate_package(
     pkg_dir = Path(pkg_dir)
     with Timer() as t:
         verified = verify_package(pkg_dir)
+        was_empty = (
+            db.count() == 0
+            and db.event_log_bounds()["head_seq"] == 0
+            and not db.mount_identity().mount_bound
+        )
 
         counters = {
             "loaded": 0,
@@ -438,6 +481,37 @@ def hydrate_package(
                 if len(pending) >= HYDRATE_BATCH:
                     flush()
             flush()
+            pkg_source = (
+                verified.manifest.get("source")
+                if isinstance(verified.manifest.get("source"), dict)
+                else {}
+            )
+            pkg_mount_id = str(
+                verified.manifest.get("mount_id") or pkg_source.get("mount_id") or ""
+            )
+            if was_empty and pkg_mount_id:
+                from hotmem.interchange.fingerprint import state_fingerprint
+
+                manifest_fp = str(verified.manifest.get("state_fingerprint") or "")
+                base_fp = (
+                    manifest_fp
+                    if target_namespace is None and manifest_fp
+                    else state_fingerprint(db.all_rows())
+                )
+                db.record_clone_lineage(
+                    source_mount_id=pkg_mount_id,
+                    source_replica_id=str(
+                        verified.manifest.get("replica_id") or pkg_source.get("replica_id") or ""
+                    ),
+                    source_history_id=str(
+                        verified.manifest.get("history_id") or pkg_source.get("history_id") or ""
+                    ),
+                    base_snapshot_id=str(verified.manifest.get("logical_id") or ""),
+                    base_state_fingerprint=base_fp,
+                    base_cursor=str(verified.manifest.get("replay_cursor") or ""),
+                    adopt_mount_id=(target_namespace is None),
+                    _commit=False,
+                )
             db.commit()
         except Exception:
             db.rollback()

@@ -126,19 +126,22 @@ def _write_payload(
     *,
     row_filter: Any | None = None,
     row_transform: Any | None = None,
-) -> tuple[int, list[str], set[tuple[str, int]]]:
+) -> tuple[int, list[str], set[tuple[str, int]], list[str]]:
     """Stream canonical records to ``sink``, hashing payload bytes.
 
-    Returns (record_count, content_hashes, embedding_spaces) where
-    ``embedding_spaces`` is the set of distinct (model, dim) pairs carried
-    by rows that actually hold an embedding — the manifest's honest
+    Returns (record_count, content_hashes, embedding_spaces, record_fingerprints)
+    where ``embedding_spaces`` is the set of distinct (model, dim) pairs carried
+    by rows that actually hold an embedding -- the manifest's honest
     description of which space the payload's vectors belong to (#78;
     previously the block claimed the hash default even for semantic
-    stores). Memory stays O(row) — rows are fetched in id order with
+    stores). Memory stays O(row) -- rows are fetched in id order with
     fetchmany batches and written one line at a time (interchange
     #67/#69 streaming requirement).
     """
+    from hotmem.interchange.fingerprint import record_fingerprint
+
     content_hashes: list[str] = []
+    record_fingerprints: list[str] = []
     embedding_spaces: set[tuple[str, int]] = set()
     count = 0
     for row in db.iter_rows():
@@ -149,18 +152,20 @@ def _write_payload(
             if transformed is None:
                 continue
             row = transformed
-        data = canonical_line(row_to_record(row)).encode()
+        rec = row_to_record(row)
+        data = canonical_line(rec).encode()
         hasher.update(data)
         sink.write(data)
         content_hashes.append(row["content_hash"] or "")
+        record_fingerprints.append(record_fingerprint(rec))
         if row.get("embedding"):
-            # Legacy rows may carry a blob with an empty model string — the
+            # Legacy rows may carry a blob with an empty model string -- the
             # documented convention maps that to the hash default (compat.py
-            # §5.1), so the manifest applies the same mapping.
+            # section 5.1), so the manifest applies the same mapping.
             model = str(row.get("embedding_model") or "") or EMBEDDING_MODEL
             embedding_spaces.add((model, int(row.get("embedding_dim") or EMBEDDING_DIM)))
         count += 1
-    return count, content_hashes, embedding_spaces
+    return count, content_hashes, embedding_spaces, record_fingerprints
 
 
 def _embedding_manifest_block(spaces: set[tuple[str, int]]) -> dict[str, Any]:
@@ -209,18 +214,21 @@ def write_package(
     hasher = hashlib.sha256()
 
     try:
+        from hotmem.events import issue_replay_cursor
+        from hotmem.interchange.fingerprint import state_fingerprint_from_list
+
         payload_path = staging / payload_name
         with open(payload_path, "wb") as raw_file:
             if gz:
-                # filename="" (no embedded name), mtime=0 → byte-stable transport.
+                # filename="" (no embedded name), mtime=0 -> byte-stable transport.
                 with gzip.GzipFile(
                     filename="", mode="wb", compresslevel=9, fileobj=raw_file, mtime=0
                 ) as gz_file:
-                    record_count, content_hashes, spaces = _write_payload(
+                    record_count, content_hashes, spaces, record_fps = _write_payload(
                         db, gz_file, hasher, row_filter=row_filter, row_transform=row_transform
                     )
             else:
-                record_count, content_hashes, spaces = _write_payload(
+                record_count, content_hashes, spaces, record_fps = _write_payload(
                     db, raw_file, hasher, row_filter=row_filter, row_transform=row_transform
                 )
             raw_file.flush()
@@ -233,13 +241,37 @@ def write_package(
         if gz:
             payload_entry["decompressed_sha256"] = hasher.hexdigest()
 
+        lid = logical_id(content_hashes)
+        ident = db.mount_identity()
+        state_fp = state_fingerprint_from_list(record_fps)
+        scope_ns = (
+            str(export_scope["namespace"])
+            if isinstance(export_scope, dict) and export_scope.get("namespace")
+            else None
+        )
+        cursor_token = issue_replay_cursor(
+            db,
+            position="head",
+            namespace=scope_ns,
+        ).encode()
+
         manifest = {
             "format": FORMAT_ID,
             "schema_version": 1,
             "record_count": record_count,
-            "logical_id": logical_id(content_hashes),
+            "logical_id": lid,
             "files": {payload_name: payload_entry},
-            "source": {"kind": "hotmem-dump"},
+            "source": {
+                "kind": "hotmem-dump",
+                "mount_id": ident.mount_id,
+                "replica_id": ident.replica_id,
+                "history_id": ident.history_id,
+            },
+            "mount_id": ident.mount_id,
+            "replica_id": ident.replica_id,
+            "history_id": ident.history_id,
+            "state_fingerprint": state_fp,
+            "replay_cursor": cursor_token,
             "embedding": _embedding_manifest_block(spaces),
             "created_at": datetime.now(UTC).isoformat(),
             "hotmem_version": _hotmem_version(),

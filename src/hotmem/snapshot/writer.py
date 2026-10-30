@@ -159,7 +159,14 @@ def write_snapshot_v2(
         # Streaming export (interchange #67): rows stream in id order
         # (fetchmany batches) and the payload digest is computed while
         # writing — one pass, O(batch) memory.
+        from hotmem.events import issue_replay_cursor
+        from hotmem.interchange.fingerprint import (
+            record_fingerprint,
+            state_fingerprint_from_list,
+        )
+
         content_hashes: list[str] = []
+        record_fingerprints: list[str] = []
         file_references: list[FileReference] = []
         copied: dict[str, str] = {}  # attachment filename -> memory_id (for trace)
         inline_count = 0
@@ -181,6 +188,7 @@ def write_snapshot_v2(
                     row = transformed
                 rec = _row_to_record(row)
                 memory_count += 1
+                record_fingerprints.append(record_fingerprint(rec))
 
                 if rec["memory_type"] == "file":
                     file_backed_count += 1
@@ -269,6 +277,18 @@ def write_snapshot_v2(
 
         overall = compute_overall({name: e.sha256 for name, e in per_file.items()})
         snapshot_id = compute_snapshot_id(content_hashes)
+        ident = db.mount_identity()
+        state_fp = state_fingerprint_from_list(record_fingerprints)
+        scope_ns = (
+            str(export_scope["namespace"])
+            if isinstance(export_scope, dict) and export_scope.get("namespace")
+            else None
+        )
+        cursor_token = issue_replay_cursor(
+            db,
+            position="head",
+            namespace=scope_ns,
+        ).encode()
 
         manifest = Manifest(
             snapshot_id=snapshot_id,
@@ -282,6 +302,11 @@ def write_snapshot_v2(
             file_backed_references=file_references,
             attachments=attachment_entries,
             scope=export_scope,
+            mount_id=ident.mount_id,
+            replica_id=ident.replica_id,
+            history_id=ident.history_id,
+            state_fingerprint=state_fp,
+            replay_cursor=cursor_token,
         )
 
         # Write manifest.json with stable key ordering.
