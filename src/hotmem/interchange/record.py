@@ -296,8 +296,8 @@ MEMORY_FIELD_INVENTORY: dict[str, FieldDisposition] = {
         legacy_jsonl_field="byte_length",
         legacy_default=None,
         rationale=(
-            "Byte length for file-backed slices; required positive integer for memory_type='file' "
-            "and None for inline records."
+            "Byte length for file-backed slices; required non-negative integer for "
+            "memory_type='file' (0 is an empty slice) and None for inline records."
         ),
     ),
     "updated_at": FieldDisposition(
@@ -596,13 +596,11 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
     if (
         raw_byte_length is not None
         and raw_byte_length != ""
-        and (byte_length is None or byte_length < 0 or (memory_type == "file" and byte_length <= 0))
+        and (byte_length is None or byte_length < 0)
     ):
         _append_issue(
             validation_issues,
-            "invalid byte_length: expected positive integer for file record"
-            if memory_type == "file"
-            else "invalid byte_length: expected non-negative integer",
+            "invalid byte_length: expected non-negative integer",
         )
 
     content_hash = _as_str(raw.get("content_hash")).strip()
@@ -866,11 +864,11 @@ def validate_record(record: dict[str, Any]) -> list[str]:
         elif (
             isinstance(record.get("byte_length"), bool)
             or not isinstance(record.get("byte_length"), int)
-            or record["byte_length"] <= 0
+            or record["byte_length"] < 0
         ):
             _append_issue(
                 issues,
-                "invalid byte_length: expected positive integer for file record",
+                "invalid byte_length: expected non-negative integer for file record",
             )
         if record.get("byte_offset") is not None and (
             isinstance(record.get("byte_offset"), bool)

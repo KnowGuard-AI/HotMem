@@ -228,7 +228,7 @@ class Manifest:
                 isinstance(ref.get("byte_offset"), bool)
                 or isinstance(ref.get("byte_length"), bool)
                 or bo < 0
-                or bl <= 0
+                or bl < 0
                 or (not ref.get("source_uri") and not ref.get("attachment"))
             ):
                 raise SnapshotChecksumError("malformed", file="file_backed_references")

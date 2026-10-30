@@ -1235,3 +1235,124 @@ def test_hydrate_v2_preserves_compatible_embeddings_and_rebuilds_only_incompatib
     assert r_foreign["embedding_model"] == desc.key
     assert r_foreign["embedding_dim"] == desc.dimension
     dst.close()
+
+
+# -- Zero-length file references: export/verify/hydrate compatibility (#99 review F1) --
+
+
+def test_zero_length_file_reference_export_verifies_and_hydrates(
+    tmp_path: Path,
+):
+    """A supported zero-length file-backed memory must not produce a snapshot
+    that fails its own manifest verification, and must hydrate with all 30
+    portable columns preserved (legacy DBs and ``add_file_backed`` allow 0)."""
+    from hotmem.db import _MEMORY_COLUMNS
+    from hotmem.memory import FileRef, add_file_backed
+    from hotmem.snapshot import verify as verify_snapshot
+
+    ws = tmp_path / "ws_zero"
+    ws.mkdir()
+    (ws / "empty.csv").write_bytes(b"")
+
+    src = MemoryDB(ws / "src.sqlite")
+    mid, _ = add_file_backed(
+        src,
+        identifier="ops/empty-slice",
+        file_ref=FileRef(
+            source_uri="empty.csv",
+            byte_offset=0,
+            byte_length=0,
+            source_format="csv",
+            source_checksum=hashlib.sha256(b"").hexdigest(),
+        ),
+        base_dir=str(ws),
+        summary="Zero-length slice summary",
+        namespace="ops",
+        tier="cold",
+        promotion_state="ARCHIVED",
+        promotion_candidate=0,
+        tags=["project:hotmem"],
+        provenance={"session_id": "sess-zero"},
+    )
+    expected_row = src.get_memory(mid)
+    assert expected_row is not None and expected_row["byte_length"] == 0
+
+    snap_dir = tmp_path / "snap_zero"
+    snapshot(src, snap_dir, copy_attachments=True, base_dir=ws)
+    manifest = verify_manifest(snap_dir)
+    assert manifest.file_backed_references[0].byte_length == 0
+    assert manifest.file_backed_references[0].attachment is None
+    assert verify_snapshot(snap_dir)["valid"] is True
+    src.close()
+
+    dst = MemoryDB(tmp_path / "dst_zero.sqlite")
+    res = hydrate(dst, snap_dir)
+    assert res.loaded == 1
+    assert res.invalid == 0
+    restored = dst.get_memory(mid)
+    assert restored is not None
+    for col in _MEMORY_COLUMNS:
+        assert restored[col] == expected_row[col], (
+            f"zero-length ref column {col!r} mismatch: "
+            f"expected {expected_row[col]!r}, got {restored[col]!r}"
+        )
+    dst.close()
+
+
+def test_legacy_manifest_with_zero_length_reference_still_verifies(tmp_path: Path):
+    """Pre-#99 supported packages may declare a zero-length file reference;
+    verification must accept it (reject only negative lengths)."""
+    from hotmem.snapshot.format import compute_overall, sha256_file
+
+    snap_dir = tmp_path / "legacy_zero_ref"
+    snap_dir.mkdir()
+    record = {
+        "schema_version": 2,
+        "id": "legacy-zero",
+        "identifier": "legacy/zero",
+        "memory_type": "file",
+        "fact_text": "",
+        "fact_summary": "Legacy zero-length slice",
+        "source_uri": "old.csv",
+        "byte_offset": 0,
+        "byte_length": 0,
+        "source_format": "csv",
+        "source_checksum": "",
+    }
+    mem = snap_dir / MEMORIES_NAME
+    mem.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    mem_sha = sha256_file(mem)
+    manifest = {
+        "format": "hotmem-snapshot-v2",
+        "schema_version": 2,
+        "snapshot_id": "d" * 64,
+        "memory_count": 1,
+        "file_backed_count": 1,
+        "inline_count": 0,
+        "files": {MEMORIES_NAME: {"size": mem.stat().st_size, "sha256": mem_sha}},
+        "overall_sha256": compute_overall({MEMORIES_NAME: mem_sha}),
+        "file_backed_references": [
+            {
+                "memory_id": "legacy-zero",
+                "source_uri": "old.csv",
+                "byte_offset": 0,
+                "byte_length": 0,
+                "source_format": "csv",
+                "source_checksum": "",
+            }
+        ],
+    }
+    (snap_dir / MANIFEST_NAME).write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+
+    parsed = verify_manifest(snap_dir)
+    assert parsed.file_backed_references[0].byte_length == 0
+
+    dst = MemoryDB(tmp_path / "dst_legacy_zero.sqlite")
+    res = hydrate(dst, snap_dir)
+    assert res.loaded == 1
+    assert res.invalid == 0
+    restored = dst.get_memory("legacy-zero")
+    assert restored is not None and restored["byte_length"] == 0
+    dst.close()

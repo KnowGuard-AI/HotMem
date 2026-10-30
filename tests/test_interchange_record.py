@@ -487,7 +487,7 @@ def test_legacy_defaults_distinguish_missing_from_explicit_empty_zero_or_false()
         ({"memory_type": "executable"}, "memory_type"),
         ({"byte_offset": -1}, "byte_offset"),
         ({"byte_length": -5}, "byte_length"),
-        ({"memory_type": "file", "source_uri": "a.csv", "byte_length": 0}, "byte_length"),
+        ({"memory_type": "file", "source_uri": "a.csv", "byte_length": -1}, "byte_length"),
         ({"schema_version": 0}, "schema_version"),
         ({"record_schema_version": -1}, "record_schema_version"),
         ({"metadata": ["not", "an", "object"]}, "metadata"),
