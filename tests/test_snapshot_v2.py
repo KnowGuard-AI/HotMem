@@ -855,8 +855,8 @@ def test_maximal_file_backed_record_and_attachments_roundtrip_into_clean_runtime
     not exist, while reference-only exports declare the external dependency."""
     from hotmem.db import _MEMORY_COLUMNS
     from hotmem.interchange.fingerprint import record_fingerprint
-    from hotmem.memory import add_file_backed, hydrate_memory_detailed
-    from hotmem.provenance import BackingFileMissingError, ChecksumMismatchError, FileRef
+    from hotmem.memory import FileRef, add_file_backed, hydrate_memory_detailed
+    from hotmem.provenance import BackingFileMissingError, ChecksumMismatchError
     from hotmem.snapshot import verify as verify_snapshot
 
     src_workspace = tmp_path / f"workspace_v{stored_schema_version}"
