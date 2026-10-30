@@ -275,8 +275,77 @@ def test_jsonl_snapshot_values_are_json_serializable_and_maskable(tmp_path: Path
         snapshot(db, swap)
         records = _all_records(swap)
         masked = mask(records[0])
-        # The masked record must be a pure dict of sentinels — no raw bytes.
+        # The masked record must be a pure dict of sentinels -- no raw bytes.
         assert isinstance(masked, dict)
         assert all(isinstance(v, str) for v in masked.values())
     finally:
         db.close()
+
+
+# -- Golden replay cursor vectors (#94) --------------------------------------
+
+GOLDEN_CURSOR_START_V1 = (
+    "hmc1.eyJhbmNob3JfZXZlbnRfaWQiOiIiLCJiYXNlX3NuYXBzaG90X2lkIjoiIiwiaGlzdG9ye"
+    "V9pZCI6Imhpc3QtMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJtb3VudF9pZCI"
+    "6Im1udC0wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcGxpY2FfaWQiOiJyZ"
+    "XAtMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJzY29wZSI6eyJldmVudF90eXB"
+    "lcyI6WyJtZW1vcnkuY3JlYXRlZCJdLCJuYW1lc3BhY2UiOm51bGx9LCJzZXEiOjAsInYiOjF9"
+    ".8411dc07"
+)
+
+GOLDEN_CURSOR_SCOPED_HEAD_V1 = (
+    "hmc1.eyJhbmNob3JfZXZlbnRfaWQiOiJldnQtMDAwMyIsImJhc2Vfc25hcHNob3RfaWQiO"
+    "iJzbmFwLWJhc2UtMDEiLCJoaXN0b3J5X2lkIjoiaGlzdC0wMDAwMDAwMDAwMDAwMDAwMDA"
+    "wMDAwMDAwMDAwMDAwMSIsIm1vdW50X2lkIjoibW50LTAwMDAwMDAwMDAwMDAwMDAwMDAwM"
+    "DAwMDAwMDAwMDAxIiwicmVwbGljYV9pZCI6InJlcC0wMDAwMDAwMDAwMDAwMDAwMDAwMDA"
+    "wMDAwMDAwMDAwMSIsInNjb3BlIjp7ImV2ZW50X3R5cGVzIjpbIm1lbW9yeS5jcmVhdGVkI"
+    "l0sIm5hbWVzcGFjZSI6Im9wcyJ9LCJzZXEiOjMsInYiOjF9.805a1b10"
+)
+
+
+def test_golden_replay_cursor_hmc1_vectors_are_locked():
+    """#94 acceptance: the cursor format is opaque to callers, versioned,
+    serializable, and covered by golden fixtures."""
+    from hotmem.events import (
+        CURSOR_PREFIX,
+        CURSOR_VERSION,
+        ReplayCursor,
+        decode_cursor,
+        encode_cursor,
+    )
+
+    c_start = ReplayCursor(
+        mount_id="mnt-00000000000000000000000000000001",
+        replica_id="rep-00000000000000000000000000000001",
+        history_id="hist-00000000000000000000000000000001",
+        seq=0,
+        anchor_event_id="",
+    )
+    assert encode_cursor(c_start) == GOLDEN_CURSOR_START_V1
+    assert decode_cursor(GOLDEN_CURSOR_START_V1) == c_start
+    assert set(c_start.to_payload_dict()) == {
+        "anchor_event_id",
+        "base_snapshot_id",
+        "history_id",
+        "mount_id",
+        "replica_id",
+        "scope",
+        "seq",
+        "v",
+    }
+
+    c_scoped = ReplayCursor(
+        mount_id="mnt-00000000000000000000000000000001",
+        replica_id="rep-00000000000000000000000000000001",
+        history_id="hist-00000000000000000000000000000001",
+        seq=3,
+        anchor_event_id="evt-0003",
+        base_snapshot_id="snap-base-01",
+        namespace="ops",
+    )
+    assert encode_cursor(c_scoped) == GOLDEN_CURSOR_SCOPED_HEAD_V1
+    decoded = decode_cursor(GOLDEN_CURSOR_SCOPED_HEAD_V1)
+    assert decoded == c_scoped
+    assert decoded.version == CURSOR_VERSION == 1
+    assert GOLDEN_CURSOR_SCOPED_HEAD_V1.startswith(f"{CURSOR_PREFIX}.")
+    assert decoded.scope == {"event_types": ["memory.created"], "namespace": "ops"}
