@@ -319,23 +319,61 @@ def _copy_attachment(
     """Copy a small byte range into attachments/; return the filename or None on error.
 
     The attachment filename is the SHA-256 of the byte range (content-addressed,
-    stable across runs). On any read/IO error the original URI is kept and the
-    snapshot continues (references, not duplicates — never fail over a copy).
+    stable across runs). On any read/IO error, truncation, or checksum mismatch,
+    the original URI is kept and the snapshot continues (references, not
+    duplicates — never write a truncated or checksum-mismatched attachment).
     """
     # Resolve relative URIs against base_dir before passing to the adapter.
     uri = source_uri_override or ref.source_uri
     if base_dir is not None and "://" not in uri and not Path(uri).is_absolute():
         uri = str(Path(base_dir) / uri)
+    data: bytes | None = None
     try:
         data = adapter.read_range(uri, ref.byte_offset, ref.byte_length)
     except (FileNotFoundError, OSError, ValueError) as err:
+        if base_dir is not None and ref.source_checksum:
+            candidate = Path(base_dir) / "attachments" / str(ref.source_checksum)
+            if candidate.is_file():
+                try:
+                    data = candidate.read_bytes()
+                except OSError:
+                    data = None
+        if data is None:
+            _trace.warn(
+                "attachment",
+                "skipped attachment copy; keeping original URI",
+                detail={
+                    "source_uri": ref.source_uri,
+                    "memory_id": ref.memory_id,
+                    "err": str(err),
+                },
+            )
+            return None
+    if len(data) != ref.byte_length:
         _trace.warn(
             "attachment",
-            "skipped attachment copy; keeping original URI",
-            detail={"source_uri": ref.source_uri, "memory_id": ref.memory_id, "err": str(err)},
+            "skipped truncated attachment copy; keeping original URI",
+            detail={
+                "source_uri": ref.source_uri,
+                "memory_id": ref.memory_id,
+                "expected": ref.byte_length,
+                "actual": len(data),
+            },
         )
         return None
     name = sha256_bytes(data)
+    if ref.source_checksum and name != ref.source_checksum:
+        _trace.warn(
+            "attachment",
+            "skipped checksum-mismatched attachment copy; keeping original URI",
+            detail={
+                "source_uri": ref.source_uri,
+                "memory_id": ref.memory_id,
+                "expected": ref.source_checksum,
+                "actual": name,
+            },
+        )
+        return None
     (attachments_dir / name).write_bytes(data)
     return name
 

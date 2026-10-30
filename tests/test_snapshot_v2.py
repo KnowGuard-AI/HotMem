@@ -841,3 +841,197 @@ def test_maximal_inline_record_roundtrips_all_30_columns_across_clean_runtimes(
             )
         assert record_fingerprint(restored) == expected_fp
         dst.close()
+
+
+# ── Maximal file-backed record & declared dependencies (#99 WP3) ────────────
+
+
+@pytest.mark.parametrize("stored_schema_version", [1, 2])
+def test_maximal_file_backed_record_and_attachments_roundtrip_into_clean_runtime(
+    tmp_path: Path, stored_schema_version: int
+):
+    """#99 WP3: a maximal file-backed record restores all 30 columns and its
+    attached backing bytes into a clean runtime where the original file does
+    not exist, while reference-only exports declare the external dependency."""
+    from hotmem.db import _MEMORY_COLUMNS
+    from hotmem.interchange.fingerprint import record_fingerprint
+    from hotmem.memory import add_file_backed, hydrate_memory_detailed
+    from hotmem.provenance import BackingFileMissingError, ChecksumMismatchError, FileRef
+    from hotmem.snapshot import verify as verify_snapshot
+
+    src_workspace = tmp_path / f"workspace_v{stored_schema_version}"
+    src_workspace.mkdir()
+    backing = src_workspace / "ledger.csv"
+    backing_bytes = b"id,amount,status\n101,2500.00,SETTLED\n102,900.00,PENDING\n"
+    backing.write_bytes(backing_bytes)
+
+    slice_offset = 17
+    slice_length = 20
+    slice_bytes = backing_bytes[slice_offset : slice_offset + slice_length]
+    slice_sha = hashlib.sha256(slice_bytes).hexdigest()
+
+    src = MemoryDB(src_workspace / "src.sqlite")
+    mid, ch = add_file_backed(
+        src,
+        identifier="finance/ledger-row-101",
+        file_ref=FileRef(
+            source_uri="ledger.csv",
+            byte_offset=slice_offset,
+            byte_length=slice_length,
+            source_format="csv",
+            source_checksum=slice_sha,
+        ),
+        base_dir=str(src_workspace),
+        summary="Settled ledger entry 101 for $2500.00",
+        importance=0.9,
+        metadata={"sheet": "Q4", "verified_by": "auditor"},
+        source="agent://finance-ingest",
+        ttl_seconds=172800,
+        created_at="2026-10-03T08:00:00Z",
+        namespace="finance/q4",
+        tier="cold",
+        updated_at="2026-10-04T09:15:00Z",
+        snapshot_id="snap-fin-000",
+        promotion_state="PROMOTED",
+        promotion_candidate=1,
+        parent_memory="inline-max-001",
+        related_memories=["mem-audit-1", "mem-audit-2"],
+        tags=["model:gpt-5", "project:hotmem", "org:knowguard"],
+        schema_version=stored_schema_version,
+        provenance={
+            "caller_id": "caller-fin",
+            "envelope_version": "hotmem-session-v1",
+            "harness_id": "codex",
+            "namespace": "finance/q4",
+            "session_id": "sess-wp3-fin",
+            "source": "agent://finance-ingest",
+            "store_id": "store-fin-src",
+        },
+    )
+    expected_row = src.get_memory(mid)
+    assert expected_row is not None
+    expected_fp = record_fingerprint(expected_row)
+
+    # Export Snapshot v2 WITH attachments and WITHOUT attachments, plus Interchange v1.
+    v2_attached = tmp_path / f"v2_attached_{stored_schema_version}"
+    snapshot(src, v2_attached, copy_attachments=True, base_dir=src_workspace)
+    assert verify_snapshot(v2_attached)["valid"] is True
+    att_manifest = verify_manifest(v2_attached)
+    assert len(att_manifest.file_backed_references) == 1
+    assert att_manifest.file_backed_references[0].attachment == slice_sha
+    assert f"attachments/{slice_sha}" in att_manifest.files
+
+    v2_ref_only = tmp_path / f"v2_ref_only_{stored_schema_version}"
+    snapshot(src, v2_ref_only, copy_attachments=False, base_dir=src_workspace)
+    ref_manifest = verify_manifest(v2_ref_only)
+    assert len(ref_manifest.file_backed_references) == 1
+    assert ref_manifest.file_backed_references[0].attachment is None
+    assert ref_manifest.file_backed_references[0].source_uri == "ledger.csv"
+    assert ref_manifest.file_backed_references[0].source_checksum == slice_sha
+
+    pkg_dir = tmp_path / f"pkg_file_{stored_schema_version}"
+    snapshot(src, pkg_dir, package=True)
+    src.close()
+
+    # Delete the original backing file to prove clean-runtime independence.
+    backing.unlink()
+
+    # 1. Clean runtime hydrating v2_attached restores all 30 columns AND can
+    # materialize the verified slice bytes directly from the snapshot attachment.
+    clean_attached_db = MemoryDB(tmp_path / f"clean_att_{stored_schema_version}.sqlite")
+    res_att = hydrate(clean_attached_db, v2_attached)
+    assert res_att.loaded == 1
+    assert res_att.embedding_reused == 1
+    assert res_att.embedding_rebuilt == 0
+    restored_att = clean_attached_db.get_memory(mid)
+    assert restored_att is not None
+    for col in _MEMORY_COLUMNS:
+        assert restored_att[col] == expected_row[col], (
+            f"attached v2 column {col!r} mismatch: "
+            f"expected {expected_row[col]!r}, got {restored_att[col]!r}"
+        )
+    assert restored_att["content_hash"] == ch
+    assert record_fingerprint(restored_att) == expected_fp
+
+    hydrated_payload = hydrate_memory_detailed(clean_attached_db, mid, base_dir=v2_attached)
+    assert hydrated_payload.content == slice_bytes
+    assert hydrated_payload.verified is True
+
+    # Re-exporting from clean_attached_db using v2_attached as base_dir preserves the attachment.
+    v2_reexport = tmp_path / f"v2_reexport_{stored_schema_version}"
+    snapshot(clean_attached_db, v2_reexport, copy_attachments=True, base_dir=v2_attached)
+    reexport_manifest = verify_manifest(v2_reexport)
+    assert reexport_manifest.file_backed_references[0].attachment == slice_sha
+
+    # Tampering with the attachment in v2_attached is caught on payload hydration too.
+    att_file = v2_attached / "attachments" / slice_sha
+    att_file.write_bytes(b"X" * slice_length)
+    with pytest.raises(ChecksumMismatchError):
+        hydrate_memory_detailed(clean_attached_db, mid, base_dir=v2_attached)
+    clean_attached_db.close()
+
+    # 2. Clean runtime hydrating v2_ref_only or pkg_dir preserves all 30 columns,
+    # and reports BackingFileMissingError when attempting to read external bytes
+    # that are absent in the clean environment.
+    for label, art in (("v2_ref_only", v2_ref_only), ("pkg", pkg_dir)):
+        clean_ref_db = MemoryDB(tmp_path / f"clean_{label}_{stored_schema_version}.sqlite")
+        res_ref = hydrate(clean_ref_db, art)
+        assert res_ref.loaded == 1
+        restored_ref = clean_ref_db.get_memory(mid)
+        assert restored_ref is not None
+        for col in _MEMORY_COLUMNS:
+            assert restored_ref[col] == expected_row[col], (
+                f"{label} column {col!r} mismatch: "
+                f"expected {expected_row[col]!r}, got {restored_ref[col]!r}"
+            )
+        with pytest.raises(BackingFileMissingError):
+            hydrate_memory_detailed(clean_ref_db, mid, base_dir=tmp_path)
+        clean_ref_db.close()
+
+
+def test_missing_or_mismatched_declared_attachment_fails_before_hydration(
+    populated_db: MemoryDB, tmp_path: Path
+):
+    """#99 WP3: if a manifest declares an attachment in file_backed_references
+    or attachments that is missing from files/disk or mismatches source_checksum
+    or byte_length, verify_manifest and hydrate fail closed without mutating target DB."""
+    snap_dir = tmp_path / "snap_dep"
+    write_snapshot_v2(populated_db, snap_dir, copy_attachments=True, base_dir=tmp_path)
+
+    target_db = MemoryDB(tmp_path / "target_dep.sqlite")
+
+    # Case 1: file_backed_references points to an attachment not listed in manifest.files
+    manifest_path = snap_dir / MANIFEST_NAME
+    orig_manifest_bytes = manifest_path.read_bytes()
+
+    bad_missing = json.loads(orig_manifest_bytes.decode("utf-8"))
+    bad_missing["file_backed_references"][0]["attachment"] = "deadbeef" * 8
+    manifest_path.write_text(json.dumps(bad_missing), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError, match="missing_file"):
+        hydrate(target_db, snap_dir)
+    assert target_db.count() == 0
+
+    # Case 2: file_backed_references attachment sha256 disagrees with source_checksum
+    bad_checksum = json.loads(orig_manifest_bytes.decode("utf-8"))
+    bad_checksum["file_backed_references"][0]["source_checksum"] = "00" * 32
+    manifest_path.write_text(json.dumps(bad_checksum), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError, match="mismatch"):
+        hydrate(target_db, snap_dir)
+    assert target_db.count() == 0
+
+    # Case 3: file_backed_references byte_length disagrees with attachment size
+    bad_size = json.loads(orig_manifest_bytes.decode("utf-8"))
+    bad_size["file_backed_references"][0]["byte_length"] = 999
+    manifest_path.write_text(json.dumps(bad_size), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError, match="mismatch"):
+        hydrate(target_db, snap_dir)
+    assert target_db.count() == 0
+
+    # Case 4: manifest.files is missing memories.jsonl altogether
+    bad_no_memories = json.loads(orig_manifest_bytes.decode("utf-8"))
+    bad_no_memories["files"].pop(MEMORIES_NAME, None)
+    manifest_path.write_text(json.dumps(bad_no_memories), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError, match="missing_file"):
+        hydrate(target_db, snap_dir)
+    assert target_db.count() == 0
+    target_db.close()

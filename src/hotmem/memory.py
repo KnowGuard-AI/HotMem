@@ -205,8 +205,18 @@ def add_file_backed(
     importance: float = 0.5,
     metadata: dict[str, Any] | None = None,
     source: str = "",
+    ttl_seconds: int | None = None,
+    created_at: str | None = None,
     namespace: str = "",
+    tier: str = "hot",
+    updated_at: str | None = None,
+    snapshot_id: str = "",
+    promotion_state: str = "HOT",
+    promotion_candidate: int = 0,
+    parent_memory: str = "",
+    related_memories: list[str] | None = None,
     tags: list[str] | None = None,
+    schema_version: int = 1,
     provenance: dict[str, Any] | None = None,
     embedder: Embedder | None = None,
     _commit: bool = True,
@@ -261,11 +271,21 @@ def add_file_backed(
             embedding_model=embedding_model,
             source=source,
             importance=importance,
-            metadata_json=json.dumps(metadata or {}),
+            metadata_json=json.dumps(metadata or {}, sort_keys=True),
             content_hash=content_hash,
+            ttl_seconds=ttl_seconds,
+            created_at=created_at,
             namespace=namespace,
+            tier=tier,
+            updated_at=updated_at,
+            snapshot_id=snapshot_id,
+            promotion_state=promotion_state,
+            promotion_candidate=promotion_candidate,
+            parent_memory=parent_memory,
+            related_memories=json.dumps(list(related_memories or ())),
             tags=json.dumps(list(tags or ())),
-            provenance_json=json.dumps(provenance) if provenance else None,
+            schema_version=schema_version,
+            provenance_json=json.dumps(provenance, sort_keys=True) if provenance else None,
             _commit=_commit,
         )
 
@@ -304,18 +324,80 @@ def hydrate_memory(
     return hydrate_memory_detailed(db, memory_id, base_dir=base_dir).content
 
 
+def _read_snapshot_attachment(
+    record: dict[str, Any],
+    base_dir: str | Path | None,
+) -> bytes | None:
+    """If ``base_dir`` is a Snapshot v2 directory carrying an attachment for ``record``,
+    return the attached byte slice; otherwise return ``None``."""
+    if base_dir is None:
+        return None
+    root = Path(base_dir)
+    attachments_dir = root / "attachments"
+    if not attachments_dir.is_dir():
+        return None
+
+    att_name: str | None = None
+    manifest_path = root / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            refs = (
+                manifest_raw.get("file_backed_references")
+                or manifest_raw.get("file_references")
+                or []
+            )
+            for ref in refs:
+                if not isinstance(ref, dict) or not ref.get("attachment"):
+                    continue
+                if str(ref.get("memory_id") or "") == str(record.get("id") or ""):
+                    att_name = str(ref["attachment"])
+                    break
+            if att_name is None:
+                for ref in refs:
+                    if not isinstance(ref, dict) or not ref.get("attachment"):
+                        continue
+                    if (
+                        str(ref.get("source_uri") or "") == str(record.get("source_uri") or "")
+                        and int(ref.get("byte_offset") or 0) == int(record.get("byte_offset") or 0)
+                        and int(ref.get("byte_length") or 0) == int(record.get("byte_length") or 0)
+                    ):
+                        att_name = str(ref["attachment"])
+                        break
+        except Exception:
+            att_name = None
+
+    if att_name is None and record.get("source_checksum"):
+        att_name = str(record["source_checksum"])
+    if not att_name or "/" in att_name or "\\" in att_name or att_name in (".", ".."):
+        return None
+
+    try:
+        resolved_root = attachments_dir.resolve()
+        candidate = (attachments_dir / att_name).resolve()
+        candidate.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate.read_bytes()
+
+
 def hydrate_memory_detailed(
     db: MemoryDB,
     memory_id: str,
     *,
-    base_dir: str | None = None,
+    base_dir: str | Path | None = None,
     verify: bool = True,
 ) -> HydratedContent:
     """Materialize a memory's payload on demand with provenance metadata.
 
     For inline memories: returns fact_text.encode() (no adapter use).
     For file-backed memories: reads exactly [offset, offset+length) via the
-    adapter and verifies source_checksum if present and ``verify=True``.
+    adapter (falling back to a verified Snapshot v2 ``attachments/`` slice
+    when ``base_dir`` is a snapshot directory and the external backing file is
+    not present locally) and verifies source_checksum if present and
+    ``verify=True``.
 
     Args:
         verify: when True (default), verify source_checksum if present.
@@ -344,7 +426,7 @@ def hydrate_memory_detailed(
         )
 
     source_uri = record["source_uri"] or ""
-    resolved_uri = _resolve_uri(source_uri, base_dir)
+    resolved_uri = _resolve_uri(source_uri, str(base_dir) if base_dir is not None else None)
     adapter = get_adapter(resolved_uri)
     offset = record["byte_offset"] or 0
     length = record["byte_length"] or 0
@@ -354,12 +436,15 @@ def hydrate_memory_detailed(
         try:
             data = adapter.read_range(resolved_uri, offset, length)
         except FileNotFoundError as err:
-            _trace.warn(
-                "hydrate",
-                "backing file missing",
-                detail={"memory_id": memory_id, "source_uri": source_uri},
-            )
-            raise BackingFileMissingError(source_uri) from err
+            attached = _read_snapshot_attachment(record, base_dir)
+            if attached is None:
+                _trace.warn(
+                    "hydrate",
+                    "backing file missing",
+                    detail={"memory_id": memory_id, "source_uri": source_uri},
+                )
+                raise BackingFileMissingError(source_uri) from err
+            data = attached
 
         verified = False
 

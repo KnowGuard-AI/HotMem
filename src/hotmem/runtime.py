@@ -719,6 +719,7 @@ class HotMemRuntime:
                         importance=importance,
                         metadata=meta_dict,
                         source=effective_source,
+                        ttl_seconds=ttl_seconds,
                         namespace=target_namespace,
                         tags=tag_list,
                         provenance=provenance_dict,
@@ -783,10 +784,10 @@ class HotMemRuntime:
                         importance=importance,
                         metadata_json=json.dumps(meta_dict, sort_keys=True),
                         content_hash=content_hash,
-                ttl_seconds=ttl_seconds,
-                namespace=target_namespace,
-                tags=tags_json,
-                provenance_json=json.dumps(provenance_dict, sort_keys=True)
+                        ttl_seconds=ttl_seconds,
+                        namespace=target_namespace,
+                        tags=tags_json,
+                        provenance_json=json.dumps(provenance_dict, sort_keys=True)
                         if provenance_dict
                         else None,
                         _commit=False,

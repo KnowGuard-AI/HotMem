@@ -38,6 +38,7 @@ from typing import Literal
 
 FORMAT = "hotmem-snapshot-v2"
 SCHEMA_VERSION = 2
+MANIFEST_NAME = "manifest.json"
 
 # Heuristic threshold for copying a file-backed byte range into attachments/.
 # Inline text is fine up to ~8 KB; ranges above this stay referenced.
@@ -173,52 +174,114 @@ class Manifest:
 
     @classmethod
     def from_dict(cls, data: dict) -> Manifest:
+        if not isinstance(data, dict):
+            raise SnapshotChecksumError("malformed", file=MANIFEST_NAME)
+
+        raw_format = data.get("format")
+        if raw_format is not None and str(raw_format) != FORMAT:
+            raise SnapshotChecksumError("malformed", file=MANIFEST_NAME)
+
+        raw_schema = data.get("schema_version")
+        if raw_schema is not None:
+            if isinstance(raw_schema, bool):
+                raise SnapshotChecksumError("malformed", file=MANIFEST_NAME)
+            try:
+                schema_version = int(raw_schema)
+            except (TypeError, ValueError) as err:
+                raise SnapshotChecksumError("malformed", file=MANIFEST_NAME) from err
+            if schema_version not in (1, 2):
+                raise SnapshotChecksumError("malformed", file=MANIFEST_NAME)
+        else:
+            schema_version = SCHEMA_VERSION
+
+        raw_files = data.get("files")
+        if raw_files is not None and not isinstance(raw_files, dict):
+            raise SnapshotChecksumError("malformed", file=MANIFEST_NAME)
         files: dict[str, FileEntry] = {}
-        for name, entry in (data.get("files") or {}).items():
+        for name, entry in (raw_files or {}).items():
             if not isinstance(entry, dict) or "sha256" not in entry or "size" not in entry:
                 raise SnapshotChecksumError("malformed", file=name)
-            files[name] = FileEntry(size=int(entry["size"]), sha256=str(entry["sha256"]))
+            try:
+                size_val = int(entry["size"])
+            except (TypeError, ValueError) as err:
+                raise SnapshotChecksumError("malformed", file=name) from err
+            if isinstance(entry["size"], bool) or size_val < 0:
+                raise SnapshotChecksumError("malformed", file=name)
+            files[name] = FileEntry(size=size_val, sha256=str(entry["sha256"]))
 
         # Accept both new (file_backed_references) and old (file_references) names.
-        refs_data = data.get("file_backed_references") or data.get("file_references") or []
+        refs_data = data.get("file_backed_references")
+        if refs_data is None:
+            refs_data = data.get("file_references")
+        if refs_data is not None and not isinstance(refs_data, list):
+            raise SnapshotChecksumError("malformed", file="file_backed_references")
         refs: list[FileReference] = []
-        for ref in refs_data:
+        for ref in refs_data or []:
             if not isinstance(ref, dict) or "memory_id" not in ref or "source_uri" not in ref:
+                raise SnapshotChecksumError("malformed", file="file_backed_references")
+            try:
+                bo = int(ref.get("byte_offset") or 0)
+                bl = int(ref.get("byte_length") or 0)
+            except (TypeError, ValueError) as err:
+                raise SnapshotChecksumError("malformed", file="file_backed_references") from err
+            if (
+                isinstance(ref.get("byte_offset"), bool)
+                or isinstance(ref.get("byte_length"), bool)
+                or bo < 0
+                or bl <= 0
+                or (not ref.get("source_uri") and not ref.get("attachment"))
+            ):
                 raise SnapshotChecksumError("malformed", file="file_backed_references")
             refs.append(
                 FileReference(
                     memory_id=str(ref["memory_id"]),
                     source_uri=str(ref["source_uri"]),
-                    byte_offset=int(ref.get("byte_offset") or 0),
-                    byte_length=int(ref.get("byte_length") or 0),
+                    byte_offset=bo,
+                    byte_length=bl,
                     source_format=ref.get("source_format"),
                     source_checksum=ref.get("source_checksum"),
                     attachment=ref.get("attachment"),
                 )
             )
 
+        raw_atts = data.get("attachments")
+        if raw_atts is not None and not isinstance(raw_atts, list):
+            raise SnapshotChecksumError("malformed", file="attachments")
         atts: list[AttachmentEntry] = []
-        for att in data.get("attachments") or []:
-            if not isinstance(att, dict) or "name" not in att:
+        for att in raw_atts or []:
+            if not isinstance(att, dict) or "name" not in att or not att["name"]:
+                raise SnapshotChecksumError("malformed", file="attachments")
+            try:
+                att_size = int(att.get("size", 0))
+            except (TypeError, ValueError) as err:
+                raise SnapshotChecksumError("malformed", file="attachments") from err
+            if isinstance(att.get("size"), bool) or att_size < 0:
                 raise SnapshotChecksumError("malformed", file="attachments")
             atts.append(
                 AttachmentEntry(
                     name=str(att["name"]),
                     source_uri=str(att.get("source_uri", "")),
-                    size=int(att.get("size", 0)),
+                    size=att_size,
                     sha256=str(att.get("sha256", "")),
                 )
             )
 
+        try:
+            mem_count = int(data.get("memory_count") or 0)
+            fb_count = int(data.get("file_backed_count") or 0)
+            inl_count = int(data.get("inline_count") or 0)
+        except (TypeError, ValueError) as err:
+            raise SnapshotChecksumError("malformed", file=MANIFEST_NAME) from err
+
         return cls(
-            format=str(data.get("format") or FORMAT),
-            schema_version=int(data.get("schema_version") or SCHEMA_VERSION),
+            format=str(raw_format or FORMAT),
+            schema_version=schema_version,
             snapshot_id=str(data.get("snapshot_id") or ""),
             created_at=str(data.get("created_at") or ""),
             hotmem_version=str(data.get("hotmem_version") or ""),
-            memory_count=int(data.get("memory_count") or 0),
-            file_backed_count=int(data.get("file_backed_count") or 0),
-            inline_count=int(data.get("inline_count") or 0),
+            memory_count=mem_count,
+            file_backed_count=fb_count,
+            inline_count=inl_count,
             files=files,
             overall_sha256=str(data.get("overall_sha256") or ""),
             file_backed_references=refs,

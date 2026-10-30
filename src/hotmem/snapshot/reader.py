@@ -88,6 +88,9 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
 
     manifest = Manifest.from_dict(raw)
 
+    if MEMORIES_NAME not in manifest.files:
+        raise SnapshotChecksumError("missing_file", file=MEMORIES_NAME)
+
     # Verify each listed file.
     per_file_hashes: dict[str, str] = {}
     for rel, entry in manifest.files.items():
@@ -124,6 +127,63 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
             expected=expected_overall,
             actual=actual_overall,
         )
+
+    # Verify declared attachments and file-backed reference dependencies (#99 WP3).
+    for att in manifest.attachments:
+        rel_att = f"attachments/{att.name}"
+        if (
+            "/" in att.name
+            or "\\" in att.name
+            or att.name in ("", ".", "..")
+            or not confined_relpath(d, rel_att)
+        ):
+            raise SnapshotChecksumError("path_escape", file=rel_att)
+        if rel_att not in manifest.files:
+            raise SnapshotChecksumError("missing_file", file=rel_att)
+        fentry = manifest.files[rel_att]
+        if att.size != fentry.size:
+            raise SnapshotChecksumError(
+                "mismatch",
+                file=rel_att,
+                expected=f"size={att.size}",
+                actual=f"size={fentry.size}",
+            )
+        if att.sha256 and att.sha256 != fentry.sha256:
+            raise SnapshotChecksumError(
+                "mismatch",
+                file=rel_att,
+                expected=att.sha256,
+                actual=fentry.sha256,
+            )
+
+    for ref in manifest.file_backed_references:
+        if ref.attachment is not None:
+            att_name = str(ref.attachment)
+            rel_att = f"attachments/{att_name}"
+            if (
+                "/" in att_name
+                or "\\" in att_name
+                or att_name in ("", ".", "..")
+                or not confined_relpath(d, rel_att)
+            ):
+                raise SnapshotChecksumError("path_escape", file=rel_att)
+            if rel_att not in manifest.files:
+                raise SnapshotChecksumError("missing_file", file=rel_att)
+            fentry = manifest.files[rel_att]
+            if ref.byte_length > 0 and fentry.size != ref.byte_length:
+                raise SnapshotChecksumError(
+                    "mismatch",
+                    file=rel_att,
+                    expected=f"size={ref.byte_length}",
+                    actual=f"size={fentry.size}",
+                )
+            if ref.source_checksum and fentry.sha256 != ref.source_checksum:
+                raise SnapshotChecksumError(
+                    "mismatch",
+                    file=rel_att,
+                    expected=ref.source_checksum,
+                    actual=fentry.sha256,
+                )
 
     return manifest
 
