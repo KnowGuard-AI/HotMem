@@ -145,7 +145,7 @@ def test_compare_mount_lineage_distinguishes_same_clone_fork_replacement_and_dif
     branch_cmp = compare_mount_lineage(src, branch)
     assert branch_cmp["relationship"] == "fork"
 
-    # 6. Raw filesystem copy (shutil.copy) where both copies append divergent events at same seq.
+    # 6. Raw filesystem copy (shutil.copy) where both copies diverge via state and events.
     src.close()
     raw_copy_path = tmp_path / "raw_copy.sqlite"
     shutil.copy2(tmp_path / "src.sqlite", raw_copy_path)
@@ -153,6 +153,20 @@ def test_compare_mount_lineage_distinguishes_same_clone_fork_replacement_and_dif
     raw_copy = MemoryDB(raw_copy_path)
     add_memory(src, "ops/after-copy-a", "Source side write after raw copy")
     add_memory(raw_copy, "ops/after-copy-b", "Copy side write after raw copy")
+    raw_state_cmp = compare_mount_lineage(src, raw_copy)
+    assert raw_state_cmp["relationship"] == "fork"
+    assert raw_state_cmp["reason"] == "divergent_state_on_copied_replica"
+
+    src.append_event(
+        event_id="evt-copy-a",
+        event_type="memory.created",
+        occurred_at="2026-10-30T00:00:00Z",
+    )
+    raw_copy.append_event(
+        event_id="evt-copy-b",
+        event_type="memory.created",
+        occurred_at="2026-10-30T00:00:00Z",
+    )
     raw_fork_cmp = compare_mount_lineage(src, raw_copy)
     assert raw_fork_cmp["relationship"] == "fork"
     assert raw_fork_cmp["reason"] == "divergent_event_id_at_same_seq"
