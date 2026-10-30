@@ -321,7 +321,7 @@ def _copy_attachment(
     The attachment filename is the SHA-256 of the byte range (content-addressed,
     stable across runs). On any read/IO error, truncation, or checksum mismatch,
     the original URI is kept and the snapshot continues (references, not
-    duplicates — never write a truncated or checksum-mismatched attachment).
+    duplicates -- never write a truncated or checksum-mismatched attachment).
     """
     # Resolve relative URIs against base_dir before passing to the adapter.
     uri = source_uri_override or ref.source_uri

@@ -844,7 +844,7 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
 
 
 def validate_record(record: dict[str, Any]) -> list[str]:
-    """Structural and domain validation of a normalized record (interchange-v1 §7).
+    """Structural and domain validation of a normalized record (interchange-v1 section 7).
 
     Returns a list of problems; an empty list means the record is
     hydratable. Error messages identify the field and violated contract

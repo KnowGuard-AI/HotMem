@@ -353,7 +353,7 @@ def test_matrix_legacy_jsonl_with_foreign_model_rebuilds(tmp_path: Path):
     target.close()
 
 
-# ── Legacy compatibility, repeat hydration, and byte vs semantic fidelity (#99 WP5) ──
+# -- Legacy compatibility, repeat hydration, and byte vs semantic fidelity (#99 WP5) --
 
 
 def test_legacy_v01_and_pre99_snapshot_v2_fixtures_hydrate_with_documented_defaults(

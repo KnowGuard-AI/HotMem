@@ -720,7 +720,7 @@ def test_v2_identity_is_namespace_scoped_and_repeat_is_idempotent(tmp_path: Path
     dst.close()
 
 
-# ── Maximal inline record v2 round-trip (#99 WP2) ───────────────────────────
+# -- Maximal inline record v2 round-trip (#99 WP2) --
 
 
 @pytest.mark.parametrize("stored_schema_version", [1, 2, 3])
@@ -843,7 +843,7 @@ def test_maximal_inline_record_roundtrips_all_30_columns_across_clean_runtimes(
         dst.close()
 
 
-# ── Maximal file-backed record & declared dependencies (#99 WP3) ────────────
+# -- Maximal file-backed record & declared dependencies (#99 WP3) --
 
 
 @pytest.mark.parametrize("stored_schema_version", [1, 2])
@@ -1037,7 +1037,7 @@ def test_missing_or_mismatched_declared_attachment_fails_before_hydration(
     target_db.close()
 
 
-# ── Hydration mapping, validation, rollback & embeddings (#99 WP4) ──────────
+# -- Hydration mapping, validation, rollback & embeddings (#99 WP4) --
 
 
 def test_hydrate_v2_rejects_malformed_record_values_and_rolls_back_on_midstream_failure(

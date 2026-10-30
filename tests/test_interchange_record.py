@@ -390,7 +390,7 @@ def test_resolve_failed_when_embedder_raises():
     assert dim == desc.dimension
 
 
-# ── complete 30-column field disposition contract (#99 WP1) ─────────────────
+# -- complete 30-column field disposition contract (#99 WP1) --
 
 
 def test_memory_field_inventory_covers_every_sqlite_column_in_order():
