@@ -159,3 +159,20 @@ def test_unknown_keys_cross_form_agreement():
     raw = _base_row()
     raw["future_producer_field"] = {"x": 1}
     assert record_fingerprint(raw) == record_fingerprint(normalize_record(raw))
+
+
+def test_row_schema_version_precedence_agrees_across_raw_and_package_forms():
+    """Row ``schema_version`` wins over the container envelope's version, so a
+    raw DB row, its interchange package record, and its snapshot record all
+    fingerprint identically (#99 review F6; delta-v1 section 5)."""
+    raw_row = _base_row(schema_version=2)
+    interchange_record = _base_row(schema_version=1, record_schema_version=2)
+    snapshot_record = _base_row(schema_version=2)
+    assert record_fingerprint(raw_row) == record_fingerprint(interchange_record)
+    assert record_fingerprint(raw_row) == record_fingerprint(snapshot_record)
+
+    raw_row_v1 = _base_row(schema_version=1)
+    interchange_v1 = _base_row(schema_version=1, record_schema_version=1)
+    snapshot_v1 = _base_row(schema_version=2, record_schema_version=1)
+    assert record_fingerprint(raw_row_v1) == record_fingerprint(interchange_v1)
+    assert record_fingerprint(raw_row_v1) == record_fingerprint(snapshot_v1)

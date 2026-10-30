@@ -118,6 +118,14 @@ or dimension changes are caught by the manifest compatibility block),
 pending contract review (ADR-003); adding them bumps
 `fingerprint_version`.
 
+`schema_version` in the fingerprint is the **row** Memory Record version:
+when a record carries the additive `record_schema_version` (v2 / interchange
+readers), that value takes precedence over the container envelope's
+`schema_version`. Raw DB rows, `hotmem-interchange-v1` records, and
+`hotmem-snapshot-v2` records of the same row therefore fingerprint
+identically. Rows without `record_schema_version` were already consistent, so
+this clarification does not change `fingerprint_version`.
+
 ## 6. Apply semantics (compare-and-swap)
 
 Verification completes **before any target write** (files, sizes, digests,
