@@ -84,6 +84,8 @@ empty, zero, or false values:
 - `importance`: omitted/null defaults to `0.5`; explicit `0.0` is preserved as
   `0.0`.
 - `byte_offset`: omitted/null is `None`; explicit `0` is preserved as `0`.
+- `byte_length`: omitted/null for `memory_type: "file"` is invalid; explicit
+  `0` is a preserved zero-length slice (old packages keep hydrating).
 - `promotion_candidate`: omitted/null defaults to `0`; explicit `0` or `1` is
   preserved.
 

@@ -80,8 +80,9 @@ export time (`created_at`) and `hotmem_version`, which are informational.
 One JSON object per line, sorted by `id`. Each record carries the full memory
 record payload (`schema_version: 2`, plus optional `record_schema_version`
 carrying the row's stored SQLite `memories.schema_version` when it differs from
-`2`). Embeddings are stored as base64 so the JSONL is text-portable and can be
-rehydrated without re-embedding.
+`2`; row version `2` is implicit in the `2` envelope). Embeddings are stored
+as base64 so the JSONL is text-portable and can be rehydrated without
+re-embedding.
 
 ```json
 {
@@ -158,8 +159,20 @@ Empty by default. When `copy_attachments=true` (CLI `--attach`, API
 (`ATTACH_THRESHOLD`) are copied into `attachments/<sha256-of-range>` and the
 corresponding `file_backed_references[].attachment` is set to the filename.
 Larger ranges always stay referenced (reference-not-duplicate principle). On
-any read error, the original `source_uri` is kept and the snapshot never
-fails.
+any read error, truncation, or `source_checksum` mismatch, the attachment is
+**not** written, the original `source_uri` is kept, and the snapshot never
+fails; the record remains a declared external dependency.
+
+Every declared dependency is verified before hydration: `attachments/` names
+must be single path segments confined to the snapshot, listed in
+`manifest.files`, and match the declared size and `source_checksum` (or
+`sha256`) of `file_backed_references` / `attachments`.
+
+When the original backing file is absent from a clean runtime, on-demand byte
+hydration (`hydrate_memory_detailed` / `hydrate_many`) can materialize the
+verified slice from `attachments/` if `base_dir` points at this snapshot
+directory. The returned bytes are length-checked and verified against
+`source_checksum` when present.
 
 ## Hydration
 
@@ -170,9 +183,12 @@ fails.
   v2-columns-in-jsonl).
 - A directory with `manifest.json` -> v2 reader: verify all listed file
   SHA-256s + `overall_sha256` (hard error on mismatch -> `SnapshotChecksumError`
-  -> HTTP 409), then stream `memories.jsonl` into the DB. File-backed
-  references are reconstructed **without** touching the backing files
-  (references preserved, not bytes copied).
+  -> HTTP 409), then stream `memories.jsonl` into the DB in one transaction
+  (a failure rolls the whole hydrate back). File-backed references are
+  reconstructed **without** touching the backing files (references
+  preserved, not bytes copied); reading their bytes later can use the
+  snapshot's verified `attachments/` when `base_dir` is the snapshot
+  directory.
 - A directory with `memories.jsonl` but no `manifest.json` -> legacy reader on
   that file.
 - A directory with neither -> `SnapshotChecksumError("missing_manifest")`.
