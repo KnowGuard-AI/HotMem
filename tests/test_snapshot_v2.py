@@ -718,3 +718,781 @@ def test_v2_identity_is_namespace_scoped_and_repeat_is_idempotent(tmp_path: Path
     assert second.skipped_dupes == 2
     assert dst.count() == 2
     dst.close()
+
+
+# -- Maximal inline record v2 round-trip (#99 WP2) --
+
+
+@pytest.mark.parametrize("stored_schema_version", [1, 2, 3])
+def test_maximal_inline_record_roundtrips_all_30_columns_across_clean_runtimes(
+    tmp_path: Path, stored_schema_version: int
+):
+    """#99 WP2: a maximal inline record exported via Snapshot v2, Interchange v1,
+    and JSONL hydrates into clean runtimes with every portable field equal and
+    compatible stored embeddings reused without recomputation."""
+    from hotmem.db import _MEMORY_COLUMNS
+    from hotmem.interchange.canonical import compute_content_hash
+    from hotmem.interchange.fingerprint import record_fingerprint
+    from hotmem.interchange.record import MEMORY_FIELD_INVENTORY
+    from hotmem.snapshot import verify as verify_snapshot
+
+    fact_text = "Maximal inline Memory Record v2 state fidelity check (#99)."
+    identifier = "ops/inline-maximal"
+    content_hash = compute_content_hash(identifier, fact_text)
+    vec_blob = pack_embedding(embed_text(fact_text))
+
+    src = MemoryDB(tmp_path / f"src_v{stored_schema_version}.sqlite")
+    src.insert(
+        id="inline-max-001",
+        identifier=identifier,
+        fact_text=fact_text,
+        embedding=vec_blob,
+        embedding_dim=EMBEDDING_DIM,
+        embedding_model=EMBEDDING_MODEL,
+        source="agent://investigator",
+        importance=0.85,
+        metadata_json=json.dumps(
+            {
+                "ticket": 99,
+                "nested": {"stage": "wp2", "ok": True},
+                "annotations": {
+                    "schema_version": 1,
+                    "confidence": [
+                        {
+                            "score": 0.95,
+                            "source": "human:reviewer",
+                            "timestamp": "2026-10-01T12:00:00Z",
+                            "rationale": "verified inline state",
+                        }
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        content_hash=content_hash,
+        ttl_seconds=86400,
+        created_at="2026-10-01T12:00:00Z",
+        namespace="ops/shared",
+        tier="warm",
+        memory_type="fact",
+        source_uri="",
+        source_format="",
+        source_checksum="",
+        byte_offset=None,
+        byte_length=None,
+        updated_at="2026-10-02T15:30:00Z",
+        snapshot_id="snap-lineage-prev-01",
+        promotion_state="READY",
+        promotion_candidate=1,
+        parent_memory="mem-parent-root",
+        related_memories=json.dumps(["mem-rel-a", "mem-rel-b"]),
+        tags=json.dumps(["model:gpt-5", "project:hotmem", "org:knowguard"]),
+        schema_version=stored_schema_version,
+        fact_summary="Short summary of maximal inline record",
+        provenance_json=json.dumps(
+            {
+                "caller_id": "caller-alpha",
+                "envelope_version": "hotmem-session-v1",
+                "harness_id": "codex",
+                "namespace": "ops/shared",
+                "session_id": "sess-wp2-01",
+                "source": "agent://investigator",
+                "store_id": "store-origin",
+            },
+            sort_keys=True,
+        ),
+    )
+    expected_row = src.get_memory("inline-max-001")
+    assert expected_row is not None
+    expected_fp = record_fingerprint(expected_row)
+
+    # 1. Snapshot v2 export -> verify -> clean hydrate
+    v2_dir = tmp_path / f"snap_v2_{stored_schema_version}"
+    snapshot(src, v2_dir)
+    verify_info = verify_snapshot(v2_dir)
+    assert verify_info["valid"] is True
+
+    # 2. Interchange v1 package export -> verify -> clean hydrate
+    pkg_dir = tmp_path / f"pkg_v1_{stored_schema_version}"
+    snapshot(src, pkg_dir, package=True)
+    assert verify_snapshot(pkg_dir)["valid"] is True
+
+    # 3. Legacy JSONL export -> clean hydrate
+    jsonl_path = tmp_path / f"swap_{stored_schema_version}.jsonl"
+    snapshot(src, jsonl_path)
+    src.close()
+
+    for label, artifact in (("v2", v2_dir), ("package", pkg_dir), ("jsonl", jsonl_path)):
+        dst = MemoryDB(tmp_path / f"dst_{label}_{stored_schema_version}.sqlite")
+        res = hydrate(dst, artifact)
+        assert res.loaded == 1
+        assert res.skipped_dupes == 0
+        assert res.invalid == 0
+        assert res.embedding_reused == 1
+        assert res.embedding_rebuilt == 0
+
+        restored = dst.get_memory("inline-max-001")
+        assert restored is not None
+        for col in _MEMORY_COLUMNS:
+            assert col in MEMORY_FIELD_INVENTORY
+            assert restored[col] == expected_row[col], (
+                f"{label} mismatch on column {col!r}: "
+                f"expected {expected_row[col]!r}, got {restored[col]!r}"
+            )
+        assert record_fingerprint(restored) == expected_fp
+        dst.close()
+
+
+# -- Maximal file-backed record & declared dependencies (#99 WP3) --
+
+
+@pytest.mark.parametrize("stored_schema_version", [1, 2])
+def test_maximal_file_backed_record_and_attachments_roundtrip_into_clean_runtime(
+    tmp_path: Path, stored_schema_version: int
+):
+    """#99 WP3: a maximal file-backed record restores all 30 columns and its
+    attached backing bytes into a clean runtime where the original file does
+    not exist, while reference-only exports declare the external dependency."""
+    from hotmem.db import _MEMORY_COLUMNS
+    from hotmem.interchange.fingerprint import record_fingerprint
+    from hotmem.memory import FileRef, add_file_backed, hydrate_memory_detailed
+    from hotmem.provenance import BackingFileMissingError, ChecksumMismatchError
+    from hotmem.snapshot import verify as verify_snapshot
+
+    src_workspace = tmp_path / f"workspace_v{stored_schema_version}"
+    src_workspace.mkdir()
+    backing = src_workspace / "ledger.csv"
+    backing_bytes = b"id,amount,status\n101,2500.00,SETTLED\n102,900.00,PENDING\n"
+    backing.write_bytes(backing_bytes)
+
+    slice_offset = 17
+    slice_length = 20
+    slice_bytes = backing_bytes[slice_offset : slice_offset + slice_length]
+    slice_sha = hashlib.sha256(slice_bytes).hexdigest()
+
+    src = MemoryDB(src_workspace / "src.sqlite")
+    mid, ch = add_file_backed(
+        src,
+        identifier="finance/ledger-row-101",
+        file_ref=FileRef(
+            source_uri="ledger.csv",
+            byte_offset=slice_offset,
+            byte_length=slice_length,
+            source_format="csv",
+            source_checksum=slice_sha,
+        ),
+        base_dir=str(src_workspace),
+        summary="Settled ledger entry 101 for $2500.00",
+        importance=0.9,
+        metadata={"sheet": "Q4", "verified_by": "auditor"},
+        source="agent://finance-ingest",
+        ttl_seconds=172800,
+        created_at="2026-10-03T08:00:00Z",
+        namespace="finance/q4",
+        tier="cold",
+        updated_at="2026-10-04T09:15:00Z",
+        snapshot_id="snap-fin-000",
+        promotion_state="PROMOTED",
+        promotion_candidate=1,
+        parent_memory="inline-max-001",
+        related_memories=["mem-audit-1", "mem-audit-2"],
+        tags=["model:gpt-5", "project:hotmem", "org:knowguard"],
+        schema_version=stored_schema_version,
+        provenance={
+            "caller_id": "caller-fin",
+            "envelope_version": "hotmem-session-v1",
+            "harness_id": "codex",
+            "namespace": "finance/q4",
+            "session_id": "sess-wp3-fin",
+            "source": "agent://finance-ingest",
+            "store_id": "store-fin-src",
+        },
+    )
+    expected_row = src.get_memory(mid)
+    assert expected_row is not None
+    expected_fp = record_fingerprint(expected_row)
+
+    # Export Snapshot v2 WITH attachments and WITHOUT attachments, plus Interchange v1.
+    v2_attached = tmp_path / f"v2_attached_{stored_schema_version}"
+    snapshot(src, v2_attached, copy_attachments=True, base_dir=src_workspace)
+    assert verify_snapshot(v2_attached)["valid"] is True
+    att_manifest = verify_manifest(v2_attached)
+    assert len(att_manifest.file_backed_references) == 1
+    assert att_manifest.file_backed_references[0].attachment == slice_sha
+    assert f"attachments/{slice_sha}" in att_manifest.files
+
+    v2_ref_only = tmp_path / f"v2_ref_only_{stored_schema_version}"
+    snapshot(src, v2_ref_only, copy_attachments=False, base_dir=src_workspace)
+    ref_manifest = verify_manifest(v2_ref_only)
+    assert len(ref_manifest.file_backed_references) == 1
+    assert ref_manifest.file_backed_references[0].attachment is None
+    assert ref_manifest.file_backed_references[0].source_uri == "ledger.csv"
+    assert ref_manifest.file_backed_references[0].source_checksum == slice_sha
+
+    pkg_dir = tmp_path / f"pkg_file_{stored_schema_version}"
+    snapshot(src, pkg_dir, package=True)
+    src.close()
+
+    # Delete the original backing file to prove clean-runtime independence.
+    backing.unlink()
+
+    # 1. Clean runtime hydrating v2_attached restores all 30 columns AND can
+    # materialize the verified slice bytes directly from the snapshot attachment.
+    clean_attached_db = MemoryDB(tmp_path / f"clean_att_{stored_schema_version}.sqlite")
+    res_att = hydrate(clean_attached_db, v2_attached)
+    assert res_att.loaded == 1
+    assert res_att.embedding_reused == 1
+    assert res_att.embedding_rebuilt == 0
+    restored_att = clean_attached_db.get_memory(mid)
+    assert restored_att is not None
+    for col in _MEMORY_COLUMNS:
+        assert restored_att[col] == expected_row[col], (
+            f"attached v2 column {col!r} mismatch: "
+            f"expected {expected_row[col]!r}, got {restored_att[col]!r}"
+        )
+    assert restored_att["content_hash"] == ch
+    assert record_fingerprint(restored_att) == expected_fp
+
+    hydrated_payload = hydrate_memory_detailed(clean_attached_db, mid, base_dir=v2_attached)
+    assert hydrated_payload.content == slice_bytes
+    assert hydrated_payload.verified is True
+
+    # Re-exporting from clean_attached_db using v2_attached as base_dir preserves the attachment.
+    v2_reexport = tmp_path / f"v2_reexport_{stored_schema_version}"
+    snapshot(clean_attached_db, v2_reexport, copy_attachments=True, base_dir=v2_attached)
+    reexport_manifest = verify_manifest(v2_reexport)
+    assert reexport_manifest.file_backed_references[0].attachment == slice_sha
+
+    # Tampering with the attachment in v2_attached is caught on payload hydration too.
+    att_file = v2_attached / "attachments" / slice_sha
+    att_file.write_bytes(b"X" * slice_length)
+    with pytest.raises(ChecksumMismatchError):
+        hydrate_memory_detailed(clean_attached_db, mid, base_dir=v2_attached)
+    clean_attached_db.close()
+
+    # 2. Clean runtime hydrating v2_ref_only or pkg_dir preserves all 30 columns,
+    # and reports BackingFileMissingError when attempting to read external bytes
+    # that are absent in the clean environment.
+    for label, art in (("v2_ref_only", v2_ref_only), ("pkg", pkg_dir)):
+        clean_ref_db = MemoryDB(tmp_path / f"clean_{label}_{stored_schema_version}.sqlite")
+        res_ref = hydrate(clean_ref_db, art)
+        assert res_ref.loaded == 1
+        restored_ref = clean_ref_db.get_memory(mid)
+        assert restored_ref is not None
+        for col in _MEMORY_COLUMNS:
+            assert restored_ref[col] == expected_row[col], (
+                f"{label} column {col!r} mismatch: "
+                f"expected {expected_row[col]!r}, got {restored_ref[col]!r}"
+            )
+        with pytest.raises(BackingFileMissingError):
+            hydrate_memory_detailed(clean_ref_db, mid, base_dir=tmp_path)
+        clean_ref_db.close()
+
+
+def test_missing_or_mismatched_declared_attachment_fails_before_hydration(
+    populated_db: MemoryDB, tmp_path: Path
+):
+    """#99 WP3: if a manifest declares an attachment in file_backed_references
+    or attachments that is missing from files/disk or mismatches source_checksum
+    or byte_length, verify_manifest and hydrate fail closed without mutating target DB."""
+    snap_dir = tmp_path / "snap_dep"
+    write_snapshot_v2(populated_db, snap_dir, copy_attachments=True, base_dir=tmp_path)
+
+    target_db = MemoryDB(tmp_path / "target_dep.sqlite")
+
+    # Case 1: file_backed_references points to an attachment not listed in manifest.files
+    manifest_path = snap_dir / MANIFEST_NAME
+    orig_manifest_bytes = manifest_path.read_bytes()
+
+    bad_missing = json.loads(orig_manifest_bytes.decode("utf-8"))
+    bad_missing["file_backed_references"][0]["attachment"] = "deadbeef" * 8
+    manifest_path.write_text(json.dumps(bad_missing), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError, match="missing_file"):
+        hydrate(target_db, snap_dir)
+    assert target_db.count() == 0
+
+    # Case 2: file_backed_references attachment sha256 disagrees with source_checksum
+    bad_checksum = json.loads(orig_manifest_bytes.decode("utf-8"))
+    bad_checksum["file_backed_references"][0]["source_checksum"] = "00" * 32
+    manifest_path.write_text(json.dumps(bad_checksum), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError, match="mismatch"):
+        hydrate(target_db, snap_dir)
+    assert target_db.count() == 0
+
+    # Case 3: file_backed_references byte_length disagrees with attachment size
+    bad_size = json.loads(orig_manifest_bytes.decode("utf-8"))
+    bad_size["file_backed_references"][0]["byte_length"] = 999
+    manifest_path.write_text(json.dumps(bad_size), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError, match="mismatch"):
+        hydrate(target_db, snap_dir)
+    assert target_db.count() == 0
+
+    # Case 4: manifest.files is missing memories.jsonl altogether
+    bad_no_memories = json.loads(orig_manifest_bytes.decode("utf-8"))
+    bad_no_memories["files"].pop(MEMORIES_NAME, None)
+    manifest_path.write_text(json.dumps(bad_no_memories), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError, match="missing_file"):
+        hydrate(target_db, snap_dir)
+    assert target_db.count() == 0
+    target_db.close()
+
+
+# -- Hydration mapping, validation, rollback & embeddings (#99 WP4) --
+
+
+def test_hydrate_v2_rejects_malformed_record_values_and_rolls_back_on_midstream_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#99 WP4: malformed record values in a checksum-valid Snapshot v2 are
+    rejected without storing invalid state, and a mid-stream failure after a
+    batch flush rolls back the entire transaction so target DB stays untouched."""
+    from hotmem.snapshot import reader as v2_reader
+    from hotmem.snapshot.format import FileEntry, Manifest, compute_overall, sha256_file
+
+    # 1. Checksum-valid Snapshot v2 containing 1 valid record and 3 malformed records.
+    snap_dir = tmp_path / "snap_malformed_records"
+    snap_dir.mkdir()
+    lines = [
+        json.dumps(
+            {
+                "id": "valid-1",
+                "identifier": "ops/valid",
+                "fact_text": "Valid record survives.",
+                "importance": 0.6,
+                "tier": "hot",
+                "promotion_state": "HOT",
+                "promotion_candidate": 0,
+            }
+        ),
+        json.dumps(
+            {
+                "id": "bad-state",
+                "identifier": "ops/bad-state",
+                "fact_text": "Invalid promotion state must be rejected.",
+                "promotion_state": "NOT_A_VALID_STATE",
+            }
+        ),
+        json.dumps(
+            {
+                "id": "bad-imp",
+                "identifier": "ops/bad-imp",
+                "fact_text": "Out of range importance must be rejected.",
+                "importance": 9.99,
+            }
+        ),
+        json.dumps(
+            {
+                "id": "bad-ttl",
+                "identifier": "ops/bad-ttl",
+                "fact_text": "Negative TTL must be rejected.",
+                "ttl_seconds": -30,
+            }
+        ),
+    ]
+    mem_path = snap_dir / MEMORIES_NAME
+    mem_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    mem_sha = sha256_file(mem_path)
+    mem_size = mem_path.stat().st_size
+    manifest = Manifest(
+        snapshot_id="a" * 64,
+        memory_count=len(lines),
+        inline_count=len(lines),
+        files={MEMORIES_NAME: FileEntry(size=mem_size, sha256=mem_sha)},
+        overall_sha256=compute_overall({MEMORIES_NAME: mem_sha}),
+    )
+    (snap_dir / MANIFEST_NAME).write_text(
+        json.dumps(manifest.to_dict(), sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    dst = MemoryDB(tmp_path / "dst_malformed.sqlite")
+    res = hydrate(dst, snap_dir)
+    assert res.loaded == 1
+    assert res.invalid == 3
+    assert dst.count() == 1
+    assert dst.get_memory("valid-1") is not None
+    assert dst.get_memory("bad-state") is None
+    assert dst.get_memory("bad-imp") is None
+    assert dst.get_memory("bad-ttl") is None
+    dst.close()
+
+    # 2. Multi-batch rollback: force HYDRATE_BATCH=1 so batch 1 flushes before
+    # batch 2 raises an error; verify db.rollback() leaves 0 rows in target DB.
+    monkeypatch.setattr(v2_reader, "HYDRATE_BATCH", 1)
+    snap_rollback = tmp_path / "snap_rollback"
+    snap_rollback.mkdir()
+    rb_lines = [
+        json.dumps({"id": "rb-1", "identifier": "ops/rb1", "fact_text": "First batch row."}),
+        json.dumps({"id": "rb-2", "identifier": "ops/rb2", "fact_text": "Second batch row."}),
+    ]
+    rb_mem = snap_rollback / MEMORIES_NAME
+    rb_mem.write_text("\n".join(rb_lines) + "\n", encoding="utf-8")
+    rb_sha = sha256_file(rb_mem)
+    rb_manifest = Manifest(
+        snapshot_id="b" * 64,
+        memory_count=2,
+        inline_count=2,
+        files={MEMORIES_NAME: FileEntry(size=rb_mem.stat().st_size, sha256=rb_sha)},
+        overall_sha256=compute_overall({MEMORIES_NAME: rb_sha}),
+    )
+    (snap_rollback / MANIFEST_NAME).write_text(
+        json.dumps(rb_manifest.to_dict(), sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    target_rb = MemoryDB(tmp_path / "target_rb.sqlite")
+    orig_insert_many = target_rb.insert_many_ignore
+    calls = 0
+
+    def fail_on_second_batch(records, *, _commit: bool = True):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated mid-hydration failure after batch 1 flush")
+        return orig_insert_many(records, _commit=_commit)
+
+    monkeypatch.setattr(target_rb, "insert_many_ignore", fail_on_second_batch)
+    with pytest.raises(RuntimeError, match="simulated mid-hydration failure"):
+        hydrate(target_rb, snap_rollback)
+
+    assert calls == 2
+    assert target_rb.count() == 0
+    target_rb.close()
+
+
+def test_hydrate_v2_preserves_compatible_embeddings_and_rebuilds_only_incompatible(
+    tmp_path: Path,
+):
+    """#99 WP4: compatible stored embeddings are preserved without calling the
+    embedder, while incompatible embeddings are rebuilt and restamped."""
+    from hotmem.embed import EmbeddingDescriptor
+
+    desc = EmbeddingDescriptor(
+        implementation="custom",
+        model="wp4-embed",
+        dimension=8,
+        revision="r1",
+        preprocessing="pp1",
+    )
+
+    class CountingEmbedder:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        @property
+        def descriptor(self) -> EmbeddingDescriptor:
+            return desc
+
+        def embed(self, text: str) -> list[float]:
+            self.calls.append(text)
+            norm = 8**0.5
+            return [(1.0 if i % 2 == 0 else -1.0) / norm for i in range(8)]
+
+    embedder = CountingEmbedder()
+    unit_blob = pack_embedding(embedder.embed("seed"))
+    embedder.calls.clear()
+
+    src = MemoryDB(tmp_path / "src_emb.sqlite")
+    # Row 1: already matches CountingEmbedder's descriptor -> must be reused.
+    src.insert(
+        id="emb-compat",
+        identifier="ops/compat",
+        fact_text="Compatible vector text.",
+        embedding=unit_blob,
+        embedding_dim=desc.dimension,
+        embedding_model=desc.key,
+        content_hash=hashlib.sha256(b"ops/compat:Compatible vector text.").hexdigest(),
+    )
+    # Row 2: carries foreign model -> must be rebuilt under CountingEmbedder.
+    src.insert(
+        id="emb-foreign",
+        identifier="ops/foreign",
+        fact_text="Foreign vector text.",
+        embedding=pack_embedding(embed_text("Foreign vector text.")),
+        embedding_dim=EMBEDDING_DIM,
+        embedding_model="foreign-model-v0",
+        content_hash=hashlib.sha256(b"ops/foreign:Foreign vector text.").hexdigest(),
+    )
+
+    snap_dir = tmp_path / "snap_emb"
+    write_snapshot_v2(src, snap_dir)
+    src.close()
+
+    dst = MemoryDB(tmp_path / "dst_emb.sqlite")
+    res = hydrate(dst, snap_dir, embedder=embedder)
+    assert res.loaded == 2
+    assert res.embedding_reused == 1
+    assert res.embedding_rebuilt == 1
+    assert embedder.calls == ["Foreign vector text."]
+
+    r_compat = dst.get_memory("emb-compat")
+    r_foreign = dst.get_memory("emb-foreign")
+    assert r_compat is not None and r_foreign is not None
+    assert r_compat["embedding"] == unit_blob
+    assert r_compat["embedding_model"] == desc.key
+    assert r_compat["embedding_dim"] == desc.dimension
+    assert r_foreign["embedding"] == unit_blob
+    assert r_foreign["embedding_model"] == desc.key
+    assert r_foreign["embedding_dim"] == desc.dimension
+    dst.close()
+
+
+# -- Zero-length file references: export/verify/hydrate compatibility (#99 review F1) --
+
+
+def test_zero_length_file_reference_export_verifies_and_hydrates(
+    tmp_path: Path,
+):
+    """A supported zero-length file-backed memory must not produce a snapshot
+    that fails its own manifest verification, and must hydrate with all 30
+    portable columns preserved (legacy DBs and ``add_file_backed`` allow 0)."""
+    from hotmem.db import _MEMORY_COLUMNS
+    from hotmem.memory import FileRef, add_file_backed
+    from hotmem.snapshot import verify as verify_snapshot
+
+    ws = tmp_path / "ws_zero"
+    ws.mkdir()
+    (ws / "empty.csv").write_bytes(b"")
+
+    src = MemoryDB(ws / "src.sqlite")
+    mid, _ = add_file_backed(
+        src,
+        identifier="ops/empty-slice",
+        file_ref=FileRef(
+            source_uri="empty.csv",
+            byte_offset=0,
+            byte_length=0,
+            source_format="csv",
+            source_checksum=hashlib.sha256(b"").hexdigest(),
+        ),
+        base_dir=str(ws),
+        summary="Zero-length slice summary",
+        namespace="ops",
+        tier="cold",
+        promotion_state="ARCHIVED",
+        promotion_candidate=0,
+        tags=["project:hotmem"],
+        provenance={"session_id": "sess-zero"},
+    )
+    expected_row = src.get_memory(mid)
+    assert expected_row is not None and expected_row["byte_length"] == 0
+
+    snap_dir = tmp_path / "snap_zero"
+    snapshot(src, snap_dir, copy_attachments=True, base_dir=ws)
+    manifest = verify_manifest(snap_dir)
+    assert manifest.file_backed_references[0].byte_length == 0
+    assert manifest.file_backed_references[0].attachment is None
+    assert verify_snapshot(snap_dir)["valid"] is True
+    src.close()
+
+    dst = MemoryDB(tmp_path / "dst_zero.sqlite")
+    res = hydrate(dst, snap_dir)
+    assert res.loaded == 1
+    assert res.invalid == 0
+    restored = dst.get_memory(mid)
+    assert restored is not None
+    for col in _MEMORY_COLUMNS:
+        assert restored[col] == expected_row[col], (
+            f"zero-length ref column {col!r} mismatch: "
+            f"expected {expected_row[col]!r}, got {restored[col]!r}"
+        )
+    dst.close()
+
+
+def test_legacy_manifest_with_zero_length_reference_still_verifies(tmp_path: Path):
+    """Pre-#99 supported packages may declare a zero-length file reference;
+    verification must accept it (reject only negative lengths)."""
+    from hotmem.snapshot.format import compute_overall, sha256_file
+
+    snap_dir = tmp_path / "legacy_zero_ref"
+    snap_dir.mkdir()
+    record = {
+        "schema_version": 2,
+        "id": "legacy-zero",
+        "identifier": "legacy/zero",
+        "memory_type": "file",
+        "fact_text": "",
+        "fact_summary": "Legacy zero-length slice",
+        "source_uri": "old.csv",
+        "byte_offset": 0,
+        "byte_length": 0,
+        "source_format": "csv",
+        "source_checksum": "",
+    }
+    mem = snap_dir / MEMORIES_NAME
+    mem.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    mem_sha = sha256_file(mem)
+    manifest = {
+        "format": "hotmem-snapshot-v2",
+        "schema_version": 2,
+        "snapshot_id": "d" * 64,
+        "memory_count": 1,
+        "file_backed_count": 1,
+        "inline_count": 0,
+        "files": {MEMORIES_NAME: {"size": mem.stat().st_size, "sha256": mem_sha}},
+        "overall_sha256": compute_overall({MEMORIES_NAME: mem_sha}),
+        "file_backed_references": [
+            {
+                "memory_id": "legacy-zero",
+                "source_uri": "old.csv",
+                "byte_offset": 0,
+                "byte_length": 0,
+                "source_format": "csv",
+                "source_checksum": "",
+            }
+        ],
+    }
+    (snap_dir / MANIFEST_NAME).write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+
+    parsed = verify_manifest(snap_dir)
+    assert parsed.file_backed_references[0].byte_length == 0
+
+    dst = MemoryDB(tmp_path / "dst_legacy_zero.sqlite")
+    res = hydrate(dst, snap_dir)
+    assert res.loaded == 1
+    assert res.invalid == 0
+    restored = dst.get_memory("legacy-zero")
+    assert restored is not None and restored["byte_length"] == 0
+    dst.close()
+
+
+def test_hydrate_many_uses_snapshot_attachments_in_clean_runtime(tmp_path: Path):
+    """#99 review F2: the bulk hydration path must honor verified Snapshot v2
+    attachments exactly like hydrate_memory_detailed when the backing file is
+    absent from the clean runtime."""
+    from hotmem.db import _MEMORY_COLUMNS
+    from hotmem.memory import FileRef, add_file_backed, hydrate_many
+    from hotmem.snapshot import verify as verify_snapshot
+
+    ws = tmp_path / "ws_bulk"
+    ws.mkdir()
+    payload = b"part,price\\nA,10\\nB,20\\n"
+    (ws / "parts.csv").write_bytes(payload)
+    checksum = hashlib.sha256(payload).hexdigest()
+
+    src = MemoryDB(ws / "src.sqlite")
+    mid, _ = add_file_backed(
+        src,
+        identifier="ops/parts",
+        file_ref=FileRef("parts.csv", 0, len(payload), "csv", checksum),
+        base_dir=str(ws),
+        summary="Parts price table",
+        namespace="ops",
+        tags=["project:hotmem"],
+        provenance={"session_id": "sess-bulk"},
+    )
+    expected = src.get_memory(mid)
+    assert expected is not None
+
+    snap_dir = tmp_path / "snap_bulk"
+    snapshot(src, snap_dir, copy_attachments=True, base_dir=ws)
+    assert verify_snapshot(snap_dir)["valid"] is True
+    src.close()
+    (ws / "parts.csv").unlink()
+
+    dst = MemoryDB(tmp_path / "dst_bulk.sqlite")
+    assert hydrate(dst, snap_dir).loaded == 1
+    restored = dst.get_memory(mid)
+    assert restored is not None
+    for col in _MEMORY_COLUMNS:
+        assert restored[col] == expected[col]
+
+    results = hydrate_many(dst, [mid], base_dir=snap_dir)
+    assert len(results) == 1
+    assert results[0].content == payload
+    assert results[0].verified is True
+    dst.close()
+
+
+def test_snapshot_attachment_lookup_rejects_wrong_length_and_caches_manifest(
+    tmp_path: Path,
+):
+    """#99 review F3: corrupt-length attachments are never returned, and the
+    manifest reference index is parsed once per manifest identity."""
+    from hotmem.memory import (
+        FileRef,
+        _snapshot_reference_index,
+        add_file_backed,
+        hydrate_memory_detailed,
+    )
+    from hotmem.provenance import BackingFileMissingError
+    from hotmem.snapshot import verify as verify_snapshot
+
+    ws = tmp_path / "ws_len"
+    ws.mkdir()
+    payload = b"sku,qty\\nA,1\\n"
+    (ws / "stock.csv").write_bytes(payload)
+
+    src = MemoryDB(ws / "src.sqlite")
+    mid, _ = add_file_backed(
+        src,
+        identifier="ops/stock",
+        file_ref=FileRef("stock.csv", 0, len(payload), "csv", None),
+        base_dir=str(ws),
+        summary="Stock quantity table",
+        namespace="ops",
+    )
+    snap_dir = tmp_path / "snap_len"
+    snapshot(src, snap_dir, copy_attachments=True, base_dir=ws)
+    assert verify_snapshot(snap_dir)["valid"] is True
+    src.close()
+    (ws / "stock.csv").unlink()
+
+    dst = MemoryDB(tmp_path / "dst_len.sqlite")
+    assert hydrate(dst, snap_dir).loaded == 1
+
+    _snapshot_reference_index.cache_clear()
+    first = hydrate_memory_detailed(dst, mid, base_dir=snap_dir)
+    second = hydrate_memory_detailed(dst, mid, base_dir=snap_dir)
+    assert first.content == payload and second.content == payload
+    info = _snapshot_reference_index.cache_info()
+    assert info.misses == 1
+    assert info.hits >= 1
+
+    att_file = next((snap_dir / "attachments").iterdir())
+    att_file.write_bytes(att_file.read_bytes() + b"tampered")
+    with pytest.raises(BackingFileMissingError):
+        hydrate_memory_detailed(dst, mid, base_dir=snap_dir)
+    dst.close()
+
+
+def test_manifest_falls_back_to_legacy_file_references_when_new_key_empty(
+    tmp_path: Path,
+):
+    """#99 review F4: a transitional manifest with an empty
+    ``file_backed_references`` and populated legacy ``file_references`` keeps
+    its declared dependencies (the pre-#99 ``or`` fallback)."""
+    from hotmem.memory import FileRef, add_file_backed
+
+    ws = tmp_path / "ws_legacy_refs"
+    ws.mkdir()
+    payload = b"id,name\\n1,alpha\\n"
+    (ws / "names.csv").write_bytes(payload)
+
+    src = MemoryDB(ws / "src.sqlite")
+    mid, _ = add_file_backed(
+        src,
+        identifier="ops/names",
+        file_ref=FileRef("names.csv", 0, len(payload), "csv", hashlib.sha256(payload).hexdigest()),
+        base_dir=str(ws),
+        summary="Names table",
+        namespace="ops",
+    )
+    snap_dir = tmp_path / "snap_legacy_refs"
+    snapshot(src, snap_dir, copy_attachments=True, base_dir=ws)
+    src.close()
+
+    manifest_path = snap_dir / MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    legacy_refs = manifest["file_backed_references"]
+    assert legacy_refs and legacy_refs[0]["memory_id"] == mid
+    manifest["file_backed_references"] = []
+    manifest["file_references"] = legacy_refs
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8")
+
+    parsed = verify_manifest(snap_dir)
+    assert len(parsed.file_backed_references) == 1
+    assert parsed.file_backed_references[0].memory_id == mid
+    assert parsed.file_backed_references[0].attachment == legacy_refs[0]["attachment"]

@@ -78,24 +78,52 @@ export time (`created_at`) and `hotmem_version`, which are informational.
 ## `memories.jsonl`
 
 One JSON object per line, sorted by `id`. Each record carries the full memory
-record payload (`schema_version: 2`). Embeddings are stored as base64 so the
-JSONL is text-portable and can be rehydrated without re-embedding.
+record payload (`schema_version: 2`, plus optional `record_schema_version`
+carrying the row's stored SQLite `memories.schema_version` when it differs from
+`2`; row version `2` is implicit in the `2` envelope). Embeddings are stored
+as base64 so the JSONL is text-portable and can be rehydrated without
+re-embedding.
 
 ```json
 {
   "schema_version": 2,
+  "record_schema_version": 1,
   "id": "...", "identifier": "...", "memory_type": "fact" | "file",
   "fact_text": "..." | "", "fact_summary": "..." | null,
   "embedding": "<base64 or null>", "embedding_dim": 64,
   "embedding_model": "hotmem-hash-v1", "source": "...", "importance": 0.5,
   "metadata": {}, "content_hash": "...",
   "ttl_seconds": null | 3600, "namespace": "", "tier": "hot", "tags": [],
+  "related_memories": [], "parent_memory": "",
   "source_uri": null | "...", "byte_offset": null | 0, "byte_length": null | 100,
   "source_checksum": null | "...", "source_format": null | "csv",
   "provenance": null | {}, "created_at": "...",
+  "updated_at": null | "...", "snapshot_id": "",
   "promotion_state": "HOT", "promotion_candidate": 0
 }
 ```
+
+### 30-column field disposition contract (#99)
+
+Every column of the SQLite `memories` table (`hotmem.db._MEMORY_COLUMNS`) is
+governed by `hotmem.interchange.MEMORY_FIELD_INVENTORY`:
+
+- **`preserve` (27 columns):** `id`, `identifier`, `fact_text`, `source`,
+  `importance`, `metadata_json` (`metadata`), `content_hash`, `ttl_seconds`,
+  `created_at`, `namespace`, `tier`, `memory_type`, `source_uri`,
+  `source_format`, `source_checksum`, `byte_offset`, `byte_length`,
+  `updated_at`, `snapshot_id`, `promotion_state`, `promotion_candidate`,
+  `parent_memory`, `related_memories`, `tags`, `schema_version`
+  (`record_schema_version`), `fact_summary`, and `provenance_json`
+  (`provenance`).
+- **`regenerate` (3 columns):** `embedding`, `embedding_dim`,
+  `embedding_model`. Compatible stored vectors (matching `(embedding_model,
+  embedding_dim)` and finite unit-norm float32 payload) are reused without
+  recomputation; incompatible or missing vectors are rebuilt from
+  `fact_text` / `fact_summary` under the active embedder.
+- **Store-local tables (`store_meta`, `events`, `operation_ledger`,
+  `sync_checkpoints`, `handoff_ledger`, `bundle_index`):** intentionally
+  excluded from `memories.jsonl` because they represent instance-local state.
 
 All fields round-trip: `namespace`, `tier`, `tags`, `ttl_seconds`, and
 `provenance` survive snapshot -> hydrate (verified by tests). Unknown
@@ -131,8 +159,20 @@ Empty by default. When `copy_attachments=true` (CLI `--attach`, API
 (`ATTACH_THRESHOLD`) are copied into `attachments/<sha256-of-range>` and the
 corresponding `file_backed_references[].attachment` is set to the filename.
 Larger ranges always stay referenced (reference-not-duplicate principle). On
-any read error, the original `source_uri` is kept and the snapshot never
-fails.
+any read error, truncation, or `source_checksum` mismatch, the attachment is
+**not** written, the original `source_uri` is kept, and the snapshot never
+fails; the record remains a declared external dependency.
+
+Every declared dependency is verified before hydration: `attachments/` names
+must be single path segments confined to the snapshot, listed in
+`manifest.files`, and match the declared size and `source_checksum` (or
+`sha256`) of `file_backed_references` / `attachments`.
+
+When the original backing file is absent from a clean runtime, on-demand byte
+hydration (`hydrate_memory_detailed` / `hydrate_many`) can materialize the
+verified slice from `attachments/` if `base_dir` points at this snapshot
+directory. The returned bytes are length-checked and verified against
+`source_checksum` when present.
 
 ## Hydration
 
@@ -143,9 +183,12 @@ fails.
   v2-columns-in-jsonl).
 - A directory with `manifest.json` -> v2 reader: verify all listed file
   SHA-256s + `overall_sha256` (hard error on mismatch -> `SnapshotChecksumError`
-  -> HTTP 409), then stream `memories.jsonl` into the DB. File-backed
-  references are reconstructed **without** touching the backing files
-  (references preserved, not bytes copied).
+  -> HTTP 409), then stream `memories.jsonl` into the DB in one transaction
+  (a failure rolls the whole hydrate back). File-backed references are
+  reconstructed **without** touching the backing files (references
+  preserved, not bytes copied); reading their bytes later can use the
+  snapshot's verified `attachments/` when `base_dir` is the snapshot
+  directory.
 - A directory with `memories.jsonl` but no `manifest.json` -> legacy reader on
   that file.
 - A directory with neither -> `SnapshotChecksumError("missing_manifest")`.

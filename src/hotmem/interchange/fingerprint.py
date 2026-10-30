@@ -85,6 +85,9 @@ def record_fingerprint(row: dict[str, Any]) -> str:
     """
     normalized = normalize_record(row)
     state = {field: normalized.get(field) for field in _FINGERPRINT_FIELDS}
+    state["schema_version"] = normalized.get("record_schema_version") or normalized.get(
+        "schema_version"
+    )
     canonical = json.dumps(
         state,
         sort_keys=True,

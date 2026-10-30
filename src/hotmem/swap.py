@@ -152,7 +152,7 @@ def record_to_memory_record(
         embedding_model=embedding_model if embedding_model is not None else rec["embedding_model"],
         source=rec["source"],
         importance=rec["importance"],
-        metadata_json=json.dumps(rec["metadata"]),
+        metadata_json=json.dumps(rec["metadata"], sort_keys=True),
         content_hash=rec["content_hash"],
         ttl_seconds=rec["ttl_seconds"],
         created_at=rec["created_at"],
@@ -173,7 +173,9 @@ def record_to_memory_record(
         tags=json.dumps(rec["tags"]),
         schema_version=rec.get("record_schema_version") or rec["schema_version"],
         fact_summary=rec["fact_summary"],
-        provenance_json=json.dumps(rec["provenance"]) if rec["provenance"] else None,
+        provenance_json=(
+            json.dumps(rec["provenance"], sort_keys=True) if rec["provenance"] is not None else None
+        ),
     )
 
 
@@ -415,7 +417,7 @@ def add_memory(
         embedding_model=active.descriptor.key,
         source=source,
         importance=importance,
-        metadata_json=json.dumps(metadata or {}),
+        metadata_json=json.dumps(metadata or {}, sort_keys=True),
         content_hash=content_hash,
         ttl_seconds=ttl_seconds,
         namespace=namespace,

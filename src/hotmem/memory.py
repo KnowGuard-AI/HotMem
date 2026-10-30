@@ -33,6 +33,7 @@ import json
 import uuid
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -205,8 +206,18 @@ def add_file_backed(
     importance: float = 0.5,
     metadata: dict[str, Any] | None = None,
     source: str = "",
+    ttl_seconds: int | None = None,
+    created_at: str | None = None,
     namespace: str = "",
+    tier: str = "hot",
+    updated_at: str | None = None,
+    snapshot_id: str = "",
+    promotion_state: str = "HOT",
+    promotion_candidate: int = 0,
+    parent_memory: str = "",
+    related_memories: list[str] | None = None,
     tags: list[str] | None = None,
+    schema_version: int = 1,
     provenance: dict[str, Any] | None = None,
     embedder: Embedder | None = None,
     _commit: bool = True,
@@ -261,11 +272,21 @@ def add_file_backed(
             embedding_model=embedding_model,
             source=source,
             importance=importance,
-            metadata_json=json.dumps(metadata or {}),
+            metadata_json=json.dumps(metadata or {}, sort_keys=True),
             content_hash=content_hash,
+            ttl_seconds=ttl_seconds,
+            created_at=created_at,
             namespace=namespace,
+            tier=tier,
+            updated_at=updated_at,
+            snapshot_id=snapshot_id,
+            promotion_state=promotion_state,
+            promotion_candidate=promotion_candidate,
+            parent_memory=parent_memory,
+            related_memories=json.dumps(list(related_memories or ())),
             tags=json.dumps(list(tags or ())),
-            provenance_json=json.dumps(provenance) if provenance else None,
+            schema_version=schema_version,
+            provenance_json=json.dumps(provenance, sort_keys=True) if provenance else None,
             _commit=_commit,
         )
 
@@ -304,18 +325,135 @@ def hydrate_memory(
     return hydrate_memory_detailed(db, memory_id, base_dir=base_dir).content
 
 
+_SNAPSHOT_MANIFEST_NAME = "manifest.json"
+
+
+@lru_cache(maxsize=8)
+def _snapshot_reference_index(
+    manifest_path: str,
+    mtime_ns: int,
+    size: int,
+) -> tuple[tuple[str, str, int, int, str], ...]:
+    """Declared attachment references of one Snapshot v2 manifest.
+
+    Cached by manifest file identity so hydrating many file-backed memories
+    from the same snapshot parses the manifest once. Each entry is
+    ``(memory_id, source_uri, byte_offset, byte_length, attachment)``.
+    """
+    raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        return ()
+    refs = raw.get("file_backed_references")
+    if not refs:
+        refs = raw.get("file_references")
+    if not isinstance(refs, list):
+        return ()
+    entries: list[tuple[str, str, int, int, str]] = []
+    for ref in refs:
+        if not isinstance(ref, dict) or not ref.get("attachment"):
+            continue
+        entries.append(
+            (
+                str(ref.get("memory_id") or ""),
+                str(ref.get("source_uri") or ""),
+                int(ref.get("byte_offset") or 0),
+                int(ref.get("byte_length") or 0),
+                str(ref["attachment"]),
+            )
+        )
+    return tuple(entries)
+
+
+def _read_snapshot_attachment(
+    record: dict[str, Any],
+    base_dir: str | Path | None,
+) -> bytes | None:
+    """If ``base_dir`` is a Snapshot v2 directory carrying an attachment for ``record``,
+    return the attached byte slice; otherwise return ``None``.
+
+    The attachment must be declared for this record (by id, else by the
+    normalized reference tuple), confined to ``attachments/``, and exactly
+    ``byte_length`` bytes; corrupt or undeclared bytes are never returned.
+    """
+    if base_dir is None:
+        return None
+    root = Path(base_dir)
+    attachments_dir = root / "attachments"
+    if not attachments_dir.is_dir():
+        return None
+
+    att_name: str | None = None
+    manifest_path = root / _SNAPSHOT_MANIFEST_NAME
+    if manifest_path.is_file():
+        try:
+            stat = manifest_path.stat()
+            refs = _snapshot_reference_index(str(manifest_path), stat.st_mtime_ns, stat.st_size)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            _trace.warn(
+                "hydrate",
+                "unreadable snapshot manifest; using checksum attachment fallback",
+                detail={"manifest": str(manifest_path)},
+            )
+            refs = ()
+        else:
+            record_id = str(record.get("id") or "")
+            source_uri = str(record.get("source_uri") or "")
+            offset = int(record.get("byte_offset") or 0)
+            length = int(record.get("byte_length") or 0)
+            for ref_id, _uri, _bo, _bl, name in refs:
+                if ref_id and ref_id == record_id:
+                    att_name = name
+                    break
+            if att_name is None:
+                for _mid, ref_uri, ref_offset, ref_length, name in refs:
+                    if ref_uri == source_uri and ref_offset == offset and ref_length == length:
+                        att_name = name
+                        break
+
+    if att_name is None and record.get("source_checksum"):
+        att_name = str(record["source_checksum"])
+    if not att_name or "/" in att_name or "\\" in att_name or att_name in (".", ".."):
+        return None
+
+    try:
+        resolved_root = attachments_dir.resolve()
+        candidate = (attachments_dir / att_name).resolve()
+        candidate.relative_to(resolved_root)
+    except (OSError, ValueError):
+        return None
+    if not candidate.is_file():
+        return None
+    data = candidate.read_bytes()
+    expected_length = int(record.get("byte_length") or 0)
+    if len(data) != expected_length:
+        _trace.warn(
+            "hydrate",
+            "snapshot attachment length mismatch; ignoring attachment",
+            detail={
+                "memory_id": str(record.get("id") or ""),
+                "expected": expected_length,
+                "actual": len(data),
+            },
+        )
+        return None
+    return data
+
+
 def hydrate_memory_detailed(
     db: MemoryDB,
     memory_id: str,
     *,
-    base_dir: str | None = None,
+    base_dir: str | Path | None = None,
     verify: bool = True,
 ) -> HydratedContent:
     """Materialize a memory's payload on demand with provenance metadata.
 
     For inline memories: returns fact_text.encode() (no adapter use).
     For file-backed memories: reads exactly [offset, offset+length) via the
-    adapter and verifies source_checksum if present and ``verify=True``.
+    adapter (falling back to a verified Snapshot v2 ``attachments/`` slice
+    when ``base_dir`` is a snapshot directory and the external backing file is
+    not present locally) and verifies source_checksum if present and
+    ``verify=True``.
 
     Args:
         verify: when True (default), verify source_checksum if present.
@@ -344,7 +482,7 @@ def hydrate_memory_detailed(
         )
 
     source_uri = record["source_uri"] or ""
-    resolved_uri = _resolve_uri(source_uri, base_dir)
+    resolved_uri = _resolve_uri(source_uri, str(base_dir) if base_dir is not None else None)
     adapter = get_adapter(resolved_uri)
     offset = record["byte_offset"] or 0
     length = record["byte_length"] or 0
@@ -354,12 +492,15 @@ def hydrate_memory_detailed(
         try:
             data = adapter.read_range(resolved_uri, offset, length)
         except FileNotFoundError as err:
-            _trace.warn(
-                "hydrate",
-                "backing file missing",
-                detail={"memory_id": memory_id, "source_uri": source_uri},
-            )
-            raise BackingFileMissingError(source_uri) from err
+            attached = _read_snapshot_attachment(record, base_dir)
+            if attached is None:
+                _trace.warn(
+                    "hydrate",
+                    "backing file missing",
+                    detail={"memory_id": memory_id, "source_uri": source_uri},
+                )
+                raise BackingFileMissingError(source_uri) from err
+            data = attached
 
         verified = False
 
@@ -462,7 +603,10 @@ def hydrate_many(
             try:
                 data = adapter.read_range(resolved_uri, offset, length)
             except FileNotFoundError as err:
-                raise BackingFileMissingError(source_uri) from err
+                attached = _read_snapshot_attachment(record, base_dir)
+                if attached is None:
+                    raise BackingFileMissingError(source_uri) from err
+                data = attached
 
             if len(data) < length:
                 raise ProvenanceError("truncated", source_uri, expected=expected_checksum)

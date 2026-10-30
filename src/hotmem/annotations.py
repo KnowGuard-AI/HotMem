@@ -404,10 +404,10 @@ def merge_duplicate_annotations(
     hydration of colliding records can never grow a row's envelope
     unboundedly.
 
-    ``commit``: package hydration passes ``False`` inside its explicit
-    all-or-nothing transaction; the v2 and legacy flush paths pass ``True``
-    because their per-batch inserts auto-commit and no later commit exists
-    to carry an all-duplicate batch's merge.
+    ``commit``: package and v2 hydration pass ``False`` inside their explicit
+    all-or-nothing transaction and commit once at the end; the legacy JSONL
+    flush path passes ``True`` because its per-batch inserts auto-commit and
+    no later commit exists to carry an all-duplicate batch's merge.
 
     ``counters["annotations_merged"]`` counts merged items;
     ``counters["annotation_conflicts"]`` counts conflicting items. Rows

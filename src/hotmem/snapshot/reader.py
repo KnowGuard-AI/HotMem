@@ -43,6 +43,7 @@ from hotmem.interchange.hydrate import _scan_annotation_context
 from hotmem.interchange.paths import confined_relpath
 from hotmem.interchange.record import normalize_record, validate_record
 from hotmem.snapshot.format import (
+    MANIFEST_NAME,
     Manifest,
     SnapshotChecksumError,
     compute_overall,
@@ -53,7 +54,6 @@ from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("snapshot.reader")
 
-MANIFEST_NAME = "manifest.json"
 MEMORIES_NAME = "memories.jsonl"
 METADATA_NAME = "metadata.json"
 
@@ -87,6 +87,9 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
         raise SnapshotChecksumError("malformed", file=MANIFEST_NAME) from err
 
     manifest = Manifest.from_dict(raw)
+
+    if MEMORIES_NAME not in manifest.files:
+        raise SnapshotChecksumError("missing_file", file=MEMORIES_NAME)
 
     # Verify each listed file.
     per_file_hashes: dict[str, str] = {}
@@ -124,6 +127,63 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
             expected=expected_overall,
             actual=actual_overall,
         )
+
+    # Verify declared attachments and file-backed reference dependencies (#99 WP3).
+    for att in manifest.attachments:
+        rel_att = f"attachments/{att.name}"
+        if (
+            "/" in att.name
+            or "\\" in att.name
+            or att.name in ("", ".", "..")
+            or not confined_relpath(d, rel_att)
+        ):
+            raise SnapshotChecksumError("path_escape", file=rel_att)
+        if rel_att not in manifest.files:
+            raise SnapshotChecksumError("missing_file", file=rel_att)
+        fentry = manifest.files[rel_att]
+        if att.size != fentry.size:
+            raise SnapshotChecksumError(
+                "mismatch",
+                file=rel_att,
+                expected=f"size={att.size}",
+                actual=f"size={fentry.size}",
+            )
+        if att.sha256 and att.sha256 != fentry.sha256:
+            raise SnapshotChecksumError(
+                "mismatch",
+                file=rel_att,
+                expected=att.sha256,
+                actual=fentry.sha256,
+            )
+
+    for ref in manifest.file_backed_references:
+        if ref.attachment is not None:
+            att_name = str(ref.attachment)
+            rel_att = f"attachments/{att_name}"
+            if (
+                "/" in att_name
+                or "\\" in att_name
+                or att_name in ("", ".", "..")
+                or not confined_relpath(d, rel_att)
+            ):
+                raise SnapshotChecksumError("path_escape", file=rel_att)
+            if rel_att not in manifest.files:
+                raise SnapshotChecksumError("missing_file", file=rel_att)
+            fentry = manifest.files[rel_att]
+            if ref.byte_length > 0 and fentry.size != ref.byte_length:
+                raise SnapshotChecksumError(
+                    "mismatch",
+                    file=rel_att,
+                    expected=f"size={ref.byte_length}",
+                    actual=f"size={fentry.size}",
+                )
+            if ref.source_checksum and fentry.sha256 != ref.source_checksum:
+                raise SnapshotChecksumError(
+                    "mismatch",
+                    file=rel_att,
+                    expected=ref.source_checksum,
+                    actual=fentry.sha256,
+                )
 
     return manifest
 
@@ -192,7 +252,7 @@ def hydrate_v2(
                 records.append(
                     record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
                 )
-            loaded = db.insert_many_ignore(records)
+            loaded = db.insert_many_ignore(records, _commit=False)
             counters["loaded"] += loaded
             counters["skipped"] += len(records) - loaded
 
@@ -200,65 +260,87 @@ def hydrate_v2(
                 db,
                 db_dups + intra_batch_dups,
                 counters,
-                # Per-batch autocommit path: no later commit exists to carry
-                # an all-duplicate batch's merge (durability, #79 review).
-                commit=True,
+                commit=False,
             )
             pending.clear()
             intra_batch_dups.clear()
             batch_seen.clear()
 
-        with open(memories_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                if not isinstance(record, dict):
-                    counters["invalid"] += 1
-                    continue
-                try:
-                    rec = normalize_record(record, default_source="snapshot")
-                    if target_namespace is not None and not rec.get("namespace"):
-                        rec["namespace"] = target_namespace
-                except AnnotationValidationError as err:
-                    counters["invalid"] += 1  # malformed envelope: skip record (#79)
-                    _trace.debug(
-                        "hydrate_v2",
-                        "skipping record with malformed annotations",
-                        detail={"error": str(err)},
-                    )
-                    continue
-                if has_annotations:
-                    metadata = rec.get("metadata") or {}
-                    if isinstance(metadata, dict) and "annotations" in metadata:
-                        try:
-                            validate_metadata(metadata, known_ids=known_ids)
-                        except AnnotationValidationError as err:
-                            counters["invalid"] += 1
-                            _trace.debug(
-                                "hydrate_v2",
-                                "skipping record with invalid annotations",
-                                detail={"id": rec["id"], "error": str(err)},
-                            )
-                            continue
-                if validate_record(rec):
-                    counters["invalid"] += 1
-                    continue
-                dedup_key = db.record_identity_key(rec)
-                if dedup_key[1] and dedup_key in batch_seen:
-                    counters["skipped"] += 1
-                    if isinstance(rec.get("metadata"), dict) and "annotations" in (
-                        rec["metadata"] or {}
-                    ):
-                        intra_batch_dups.append(rec)
-                    continue
-                if dedup_key[1]:
-                    batch_seen.add(dedup_key)
-                pending.append(rec)
-                if len(pending) >= HYDRATE_BATCH:
-                    flush()
-        flush()
+        try:
+            with open(memories_path, encoding="utf-8") as f:
+                for lineno, line in enumerate(f, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    if not isinstance(record, dict):
+                        counters["invalid"] += 1
+                        _trace.debug(
+                            "hydrate_v2",
+                            "skipping non-object record",
+                            detail={"line": lineno},
+                        )
+                        continue
+                    try:
+                        rec = normalize_record(record, default_source="snapshot")
+                        if target_namespace is not None and not rec.get("namespace"):
+                            rec["namespace"] = target_namespace
+                    except AnnotationValidationError as err:
+                        counters["invalid"] += 1  # malformed envelope: skip record (#79)
+                        _trace.debug(
+                            "hydrate_v2",
+                            "skipping record with malformed annotations",
+                            detail={"line": lineno, "error": str(err)},
+                        )
+                        continue
+                    if has_annotations:
+                        metadata = rec.get("metadata") or {}
+                        if isinstance(metadata, dict) and "annotations" in metadata:
+                            try:
+                                validate_metadata(metadata, known_ids=known_ids)
+                            except AnnotationValidationError as err:
+                                counters["invalid"] += 1
+                                _trace.debug(
+                                    "hydrate_v2",
+                                    "skipping record with invalid annotations",
+                                    detail={
+                                        "line": lineno,
+                                        "id": rec["id"],
+                                        "error": str(err),
+                                    },
+                                )
+                                continue
+                    issues = validate_record(rec)
+                    if issues:
+                        counters["invalid"] += 1
+                        _trace.debug(
+                            "hydrate_v2",
+                            "skipping invalid record",
+                            detail={
+                                "line": lineno,
+                                "id": rec["id"],
+                                "issues": issues,
+                            },
+                        )
+                        continue
+                    dedup_key = db.record_identity_key(rec)
+                    if dedup_key[1] and dedup_key in batch_seen:
+                        counters["skipped"] += 1
+                        if isinstance(rec.get("metadata"), dict) and "annotations" in (
+                            rec["metadata"] or {}
+                        ):
+                            intra_batch_dups.append(rec)
+                        continue
+                    if dedup_key[1]:
+                        batch_seen.add(dedup_key)
+                    pending.append(rec)
+                    if len(pending) >= HYDRATE_BATCH:
+                        flush()
+            flush()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
         loaded = counters["loaded"]
         skipped = counters["skipped"]
