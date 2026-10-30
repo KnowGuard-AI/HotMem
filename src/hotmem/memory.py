@@ -547,7 +547,10 @@ def hydrate_many(
             try:
                 data = adapter.read_range(resolved_uri, offset, length)
             except FileNotFoundError as err:
-                raise BackingFileMissingError(source_uri) from err
+                attached = _read_snapshot_attachment(record, base_dir)
+                if attached is None:
+                    raise BackingFileMissingError(source_uri) from err
+                data = attached
 
             if len(data) < length:
                 raise ProvenanceError("truncated", source_uri, expected=expected_checksum)

@@ -1356,3 +1356,51 @@ def test_legacy_manifest_with_zero_length_reference_still_verifies(tmp_path: Pat
     restored = dst.get_memory("legacy-zero")
     assert restored is not None and restored["byte_length"] == 0
     dst.close()
+
+
+def test_hydrate_many_uses_snapshot_attachments_in_clean_runtime(tmp_path: Path):
+    """#99 review F2: the bulk hydration path must honor verified Snapshot v2
+    attachments exactly like hydrate_memory_detailed when the backing file is
+    absent from the clean runtime."""
+    from hotmem.db import _MEMORY_COLUMNS
+    from hotmem.memory import FileRef, add_file_backed, hydrate_many
+    from hotmem.snapshot import verify as verify_snapshot
+
+    ws = tmp_path / "ws_bulk"
+    ws.mkdir()
+    payload = b"part,price\\nA,10\\nB,20\\n"
+    (ws / "parts.csv").write_bytes(payload)
+    checksum = hashlib.sha256(payload).hexdigest()
+
+    src = MemoryDB(ws / "src.sqlite")
+    mid, _ = add_file_backed(
+        src,
+        identifier="ops/parts",
+        file_ref=FileRef("parts.csv", 0, len(payload), "csv", checksum),
+        base_dir=str(ws),
+        summary="Parts price table",
+        namespace="ops",
+        tags=["project:hotmem"],
+        provenance={"session_id": "sess-bulk"},
+    )
+    expected = src.get_memory(mid)
+    assert expected is not None
+
+    snap_dir = tmp_path / "snap_bulk"
+    snapshot(src, snap_dir, copy_attachments=True, base_dir=ws)
+    assert verify_snapshot(snap_dir)["valid"] is True
+    src.close()
+    (ws / "parts.csv").unlink()
+
+    dst = MemoryDB(tmp_path / "dst_bulk.sqlite")
+    assert hydrate(dst, snap_dir).loaded == 1
+    restored = dst.get_memory(mid)
+    assert restored is not None
+    for col in _MEMORY_COLUMNS:
+        assert restored[col] == expected[col]
+
+    results = hydrate_many(dst, [mid], base_dir=snap_dir)
+    assert len(results) == 1
+    assert results[0].content == payload
+    assert results[0].verified is True
+    dst.close()
