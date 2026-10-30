@@ -211,10 +211,14 @@ class Manifest:
 
         # Accept both new (file_backed_references) and old (file_references) names.
         refs_data = data.get("file_backed_references")
-        if refs_data is None:
-            refs_data = data.get("file_references")
         if refs_data is not None and not isinstance(refs_data, list):
             raise SnapshotChecksumError("malformed", file="file_backed_references")
+        if not refs_data:
+            # Legacy writers may emit an empty new key alongside the old one.
+            legacy_refs = data.get("file_references")
+            if legacy_refs is not None and not isinstance(legacy_refs, list):
+                raise SnapshotChecksumError("malformed", file="file_references")
+            refs_data = legacy_refs
         refs: list[FileReference] = []
         for ref in refs_data or []:
             if not isinstance(ref, dict) or "memory_id" not in ref or "source_uri" not in ref:

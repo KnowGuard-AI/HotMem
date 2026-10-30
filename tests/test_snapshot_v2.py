@@ -1456,3 +1456,43 @@ def test_snapshot_attachment_lookup_rejects_wrong_length_and_caches_manifest(
     with pytest.raises(BackingFileMissingError):
         hydrate_memory_detailed(dst, mid, base_dir=snap_dir)
     dst.close()
+
+
+def test_manifest_falls_back_to_legacy_file_references_when_new_key_empty(
+    tmp_path: Path,
+):
+    """#99 review F4: a transitional manifest with an empty
+    ``file_backed_references`` and populated legacy ``file_references`` keeps
+    its declared dependencies (the pre-#99 ``or`` fallback)."""
+    from hotmem.memory import FileRef, add_file_backed
+
+    ws = tmp_path / "ws_legacy_refs"
+    ws.mkdir()
+    payload = b"id,name\\n1,alpha\\n"
+    (ws / "names.csv").write_bytes(payload)
+
+    src = MemoryDB(ws / "src.sqlite")
+    mid, _ = add_file_backed(
+        src,
+        identifier="ops/names",
+        file_ref=FileRef("names.csv", 0, len(payload), "csv", hashlib.sha256(payload).hexdigest()),
+        base_dir=str(ws),
+        summary="Names table",
+        namespace="ops",
+    )
+    snap_dir = tmp_path / "snap_legacy_refs"
+    snapshot(src, snap_dir, copy_attachments=True, base_dir=ws)
+    src.close()
+
+    manifest_path = snap_dir / MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    legacy_refs = manifest["file_backed_references"]
+    assert legacy_refs and legacy_refs[0]["memory_id"] == mid
+    manifest["file_backed_references"] = []
+    manifest["file_references"] = legacy_refs
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8")
+
+    parsed = verify_manifest(snap_dir)
+    assert len(parsed.file_backed_references) == 1
+    assert parsed.file_backed_references[0].memory_id == mid
+    assert parsed.file_backed_references[0].attachment == legacy_refs[0]["attachment"]
