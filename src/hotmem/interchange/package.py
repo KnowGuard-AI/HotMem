@@ -25,6 +25,7 @@ Extension: hydrate/verify live in interchange.hydrate; dispatch surfaces in
 from __future__ import annotations
 
 import base64
+import contextlib
 import gzip
 import hashlib
 import json
@@ -157,7 +158,8 @@ def _write_payload(
         hasher.update(data)
         sink.write(data)
         content_hashes.append(row["content_hash"] or "")
-        record_fingerprints.append(record_fingerprint(rec))
+        with contextlib.suppress(Exception):
+            record_fingerprints.append(record_fingerprint(rec))
         if row.get("embedding"):
             # Legacy rows may carry a blob with an empty model string -- the
             # documented convention maps that to the hash default (compat.py

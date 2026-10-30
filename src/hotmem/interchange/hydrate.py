@@ -69,11 +69,13 @@ class PackageError(Exception):
         file: str | None = None,
         expected: str | None = None,
         actual: str | None = None,
+        detail: str | None = None,
     ) -> None:
         self.reason = reason
         self.file = file
         self.expected = expected
         self.actual = actual
+        self.detail = detail
         super().__init__(
             f"{reason}: {file or 'package'}"
             + (f" (expected {expected}, got {actual})" if expected else "")

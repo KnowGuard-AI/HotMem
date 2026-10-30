@@ -21,6 +21,7 @@ Extension: add encryption, remote sync, or attachment policies here.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -188,7 +189,8 @@ def write_snapshot_v2(
                     row = transformed
                 rec = _row_to_record(row)
                 memory_count += 1
-                record_fingerprints.append(record_fingerprint(rec))
+                with contextlib.suppress(Exception):
+                    record_fingerprints.append(record_fingerprint(rec))
 
                 if rec["memory_type"] == "file":
                     file_backed_count += 1

@@ -91,7 +91,7 @@ def test_compare_mount_lineage_distinguishes_same_clone_fork_replacement_and_dif
     src = MemoryDB(tmp_path / "src.sqlite")
     add_memory(src, "ops/runbook", "Primary runbook fact")
     src_ident = src.mount_identity()
-    src_rows = src.all_rows()
+    src_rows = src.all_rows(include_embedding=True)
     src_snap_id = logical_id(r["content_hash"] for r in src_rows)
     src_fp = state_fingerprint(src_rows)
 
