@@ -33,6 +33,7 @@ import json
 import uuid
 from collections import defaultdict
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -324,12 +325,56 @@ def hydrate_memory(
     return hydrate_memory_detailed(db, memory_id, base_dir=base_dir).content
 
 
+_SNAPSHOT_MANIFEST_NAME = "manifest.json"
+
+
+@lru_cache(maxsize=8)
+def _snapshot_reference_index(
+    manifest_path: str,
+    mtime_ns: int,
+    size: int,
+) -> tuple[tuple[str, str, int, int, str], ...]:
+    """Declared attachment references of one Snapshot v2 manifest.
+
+    Cached by manifest file identity so hydrating many file-backed memories
+    from the same snapshot parses the manifest once. Each entry is
+    ``(memory_id, source_uri, byte_offset, byte_length, attachment)``.
+    """
+    raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        return ()
+    refs = raw.get("file_backed_references")
+    if not refs:
+        refs = raw.get("file_references")
+    if not isinstance(refs, list):
+        return ()
+    entries: list[tuple[str, str, int, int, str]] = []
+    for ref in refs:
+        if not isinstance(ref, dict) or not ref.get("attachment"):
+            continue
+        entries.append(
+            (
+                str(ref.get("memory_id") or ""),
+                str(ref.get("source_uri") or ""),
+                int(ref.get("byte_offset") or 0),
+                int(ref.get("byte_length") or 0),
+                str(ref["attachment"]),
+            )
+        )
+    return tuple(entries)
+
+
 def _read_snapshot_attachment(
     record: dict[str, Any],
     base_dir: str | Path | None,
 ) -> bytes | None:
     """If ``base_dir`` is a Snapshot v2 directory carrying an attachment for ``record``,
-    return the attached byte slice; otherwise return ``None``."""
+    return the attached byte slice; otherwise return ``None``.
+
+    The attachment must be declared for this record (by id, else by the
+    normalized reference tuple), confined to ``attachments/``, and exactly
+    ``byte_length`` bytes; corrupt or undeclared bytes are never returned.
+    """
     if base_dir is None:
         return None
     root = Path(base_dir)
@@ -338,34 +383,32 @@ def _read_snapshot_attachment(
         return None
 
     att_name: str | None = None
-    manifest_path = root / "manifest.json"
+    manifest_path = root / _SNAPSHOT_MANIFEST_NAME
     if manifest_path.is_file():
         try:
-            manifest_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-            refs = (
-                manifest_raw.get("file_backed_references")
-                or manifest_raw.get("file_references")
-                or []
+            stat = manifest_path.stat()
+            refs = _snapshot_reference_index(str(manifest_path), stat.st_mtime_ns, stat.st_size)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            _trace.warn(
+                "hydrate",
+                "unreadable snapshot manifest; using checksum attachment fallback",
+                detail={"manifest": str(manifest_path)},
             )
-            for ref in refs:
-                if not isinstance(ref, dict) or not ref.get("attachment"):
-                    continue
-                if str(ref.get("memory_id") or "") == str(record.get("id") or ""):
-                    att_name = str(ref["attachment"])
+            refs = ()
+        else:
+            record_id = str(record.get("id") or "")
+            source_uri = str(record.get("source_uri") or "")
+            offset = int(record.get("byte_offset") or 0)
+            length = int(record.get("byte_length") or 0)
+            for ref_id, _uri, _bo, _bl, name in refs:
+                if ref_id and ref_id == record_id:
+                    att_name = name
                     break
             if att_name is None:
-                for ref in refs:
-                    if not isinstance(ref, dict) or not ref.get("attachment"):
-                        continue
-                    if (
-                        str(ref.get("source_uri") or "") == str(record.get("source_uri") or "")
-                        and int(ref.get("byte_offset") or 0) == int(record.get("byte_offset") or 0)
-                        and int(ref.get("byte_length") or 0) == int(record.get("byte_length") or 0)
-                    ):
-                        att_name = str(ref["attachment"])
+                for _mid, ref_uri, ref_offset, ref_length, name in refs:
+                    if ref_uri == source_uri and ref_offset == offset and ref_length == length:
+                        att_name = name
                         break
-        except Exception:
-            att_name = None
 
     if att_name is None and record.get("source_checksum"):
         att_name = str(record["source_checksum"])
@@ -380,7 +423,20 @@ def _read_snapshot_attachment(
         return None
     if not candidate.is_file():
         return None
-    return candidate.read_bytes()
+    data = candidate.read_bytes()
+    expected_length = int(record.get("byte_length") or 0)
+    if len(data) != expected_length:
+        _trace.warn(
+            "hydrate",
+            "snapshot attachment length mismatch; ignoring attachment",
+            detail={
+                "memory_id": str(record.get("id") or ""),
+                "expected": expected_length,
+                "actual": len(data),
+            },
+        )
+        return None
+    return data
 
 
 def hydrate_memory_detailed(

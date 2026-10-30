@@ -1404,3 +1404,55 @@ def test_hydrate_many_uses_snapshot_attachments_in_clean_runtime(tmp_path: Path)
     assert results[0].content == payload
     assert results[0].verified is True
     dst.close()
+
+
+def test_snapshot_attachment_lookup_rejects_wrong_length_and_caches_manifest(
+    tmp_path: Path,
+):
+    """#99 review F3: corrupt-length attachments are never returned, and the
+    manifest reference index is parsed once per manifest identity."""
+    from hotmem.memory import (
+        FileRef,
+        _snapshot_reference_index,
+        add_file_backed,
+        hydrate_memory_detailed,
+    )
+    from hotmem.provenance import BackingFileMissingError
+    from hotmem.snapshot import verify as verify_snapshot
+
+    ws = tmp_path / "ws_len"
+    ws.mkdir()
+    payload = b"sku,qty\\nA,1\\n"
+    (ws / "stock.csv").write_bytes(payload)
+
+    src = MemoryDB(ws / "src.sqlite")
+    mid, _ = add_file_backed(
+        src,
+        identifier="ops/stock",
+        file_ref=FileRef("stock.csv", 0, len(payload), "csv", None),
+        base_dir=str(ws),
+        summary="Stock quantity table",
+        namespace="ops",
+    )
+    snap_dir = tmp_path / "snap_len"
+    snapshot(src, snap_dir, copy_attachments=True, base_dir=ws)
+    assert verify_snapshot(snap_dir)["valid"] is True
+    src.close()
+    (ws / "stock.csv").unlink()
+
+    dst = MemoryDB(tmp_path / "dst_len.sqlite")
+    assert hydrate(dst, snap_dir).loaded == 1
+
+    _snapshot_reference_index.cache_clear()
+    first = hydrate_memory_detailed(dst, mid, base_dir=snap_dir)
+    second = hydrate_memory_detailed(dst, mid, base_dir=snap_dir)
+    assert first.content == payload and second.content == payload
+    info = _snapshot_reference_index.cache_info()
+    assert info.misses == 1
+    assert info.hits >= 1
+
+    att_file = next((snap_dir / "attachments").iterdir())
+    att_file.write_bytes(att_file.read_bytes() + b"tampered")
+    with pytest.raises(BackingFileMissingError):
+        hydrate_memory_detailed(dst, mid, base_dir=snap_dir)
+    dst.close()
