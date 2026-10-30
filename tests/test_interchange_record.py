@@ -428,7 +428,9 @@ def test_legacy_defaults_distinguish_missing_from_explicit_empty_zero_or_false()
     assert omitted["updated_at"] is None
     assert omitted["promotion_state"] is None
     assert omitted["promotion_candidate"] is None
-    omitted_mem = record_to_memory_record(omitted, b"", "hotmem-hash-v1", 64)
+    omitted_mem = record_to_memory_record(
+        omitted, b"", embedding_model="hotmem-hash-v1", embedding_dim=64
+    )
     assert omitted_mem.promotion_state == "HOT"
     assert omitted_mem.promotion_candidate == 0
     assert omitted_mem.schema_version == 1
@@ -455,7 +457,9 @@ def test_legacy_defaults_distinguish_missing_from_explicit_empty_zero_or_false()
     assert explicit["promotion_candidate"] == 0
     assert explicit["promotion_state"] == "COLD"
     assert explicit["tier"] == "cold"
-    explicit_mem = record_to_memory_record(explicit, b"", "hotmem-hash-v1", 64)
+    explicit_mem = record_to_memory_record(
+        explicit, b"", embedding_model="hotmem-hash-v1", embedding_dim=64
+    )
     assert explicit_mem.source == ""
     assert explicit_mem.importance == 0.0
     assert explicit_mem.byte_offset == 0
