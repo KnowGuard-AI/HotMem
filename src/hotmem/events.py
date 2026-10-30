@@ -600,26 +600,266 @@ def query_events(
     }
 
 
-def replay(db: MemoryDB, *, after_seq: int = 0) -> Iterator[dict[str, Any]]:
+@dataclass(frozen=True)
+class ReplayResult:
+    """Result of a cursor-governed replay step (#94)."""
+
+    applied: int
+    skipped: int
+    events_scanned: int
+    cursor: str
+    completed: bool
+
+
+def validate_replay_cursor(
+    db: MemoryDB,
+    cursor: Any,
+    *,
+    target_db: MemoryDB | None = None,
+    namespace: str | None = None,
+    event_types: Sequence[str] | None = None,
+    allow_legacy_history: bool = True,
+) -> ReplayCursor:
+    """Validate a portable replay cursor against ``db`` and optional ``target_db`` (#94).
+
+    Runs strictly before any mutation. Raises ``ReplayCursorError`` with an
+    actionable reason and recovery instruction on any mismatch.
+    """
+    decoded = decode_cursor(cursor)
+    src_ident = db.mount_identity()
+    src_bounds = db.event_log_bounds()
+
+    if not allow_legacy_history and src_ident.legacy_history:
+        raise ReplayCursorError(
+            "legacy_history_unanchored",
+            f"Source store mount_id={src_ident.mount_id!r} has a pre-#94 legacy history "
+            "and allow_legacy_history=False.",
+            expected="anchored history",
+            actual="legacy_history",
+            recovery=(
+                "Export a full snapshot/package from the legacy store and hydrate a clean clone."
+            ),
+        )
+
+    if decoded.mount_id != src_ident.mount_id:
+        raise ReplayCursorError(
+            "wrong_source",
+            f"Cursor mount_id={decoded.mount_id!r} does not match source "
+            f"mount_id={src_ident.mount_id!r}.",
+            expected=src_ident.mount_id,
+            actual=decoded.mount_id,
+            recovery="Use a cursor issued for this logical mount or switch to the matching mount.",
+        )
+
+    if decoded.replica_id != src_ident.replica_id or decoded.history_id != src_ident.history_id:
+        raise ReplayCursorError(
+            "replaced_history",
+            f"Cursor replica/history ({decoded.replica_id!r}, {decoded.history_id!r}) "
+            f"does not match source ({src_ident.replica_id!r}, {src_ident.history_id!r}).",
+            expected={"replica_id": src_ident.replica_id, "history_id": src_ident.history_id},
+            actual={"replica_id": decoded.replica_id, "history_id": decoded.history_id},
+            recovery="Re-clone or restore from a current snapshot/package of the active replica.",
+        )
+
+    tgt_base_snap = target_db.mount_identity().base_snapshot_id if target_db is not None else ""
+    if src_ident.base_snapshot_id and decoded.base_snapshot_id != src_ident.base_snapshot_id:
+        raise ReplayCursorError(
+            "incompatible_base",
+            f"Cursor base_snapshot_id={decoded.base_snapshot_id!r} does not match "
+            f"source base_snapshot_id={src_ident.base_snapshot_id!r}.",
+            expected=src_ident.base_snapshot_id,
+            actual=decoded.base_snapshot_id,
+            recovery="Restore a clone from the matching base snapshot before replaying.",
+        )
+    if decoded.base_snapshot_id and decoded.base_snapshot_id not in (
+        src_ident.base_snapshot_id,
+        tgt_base_snap,
+    ):
+        raise ReplayCursorError(
+            "incompatible_base",
+            f"Cursor base_snapshot_id={decoded.base_snapshot_id!r} is incompatible with "
+            f"source base={src_ident.base_snapshot_id!r} and target base={tgt_base_snap!r}.",
+            expected=tgt_base_snap or src_ident.base_snapshot_id,
+            actual=decoded.base_snapshot_id,
+            recovery="Restore a clone from the matching base snapshot before replaying.",
+        )
+
+    if namespace is not None and namespace != decoded.namespace:
+        raise ReplayCursorError(
+            "scope_mismatch",
+            f"Requested replay namespace={namespace!r} does not match cursor "
+            f"scope.namespace={decoded.namespace!r}.",
+            expected=decoded.namespace,
+            actual=namespace,
+            recovery="Issue a replay cursor for the requested namespace scope.",
+        )
+
+    if event_types is not None:
+        norm_types = _normalize_event_types(event_types)
+        if norm_types != decoded.event_types:
+            raise ReplayCursorError(
+                "scope_mismatch",
+                f"Requested event_types={list(norm_types)!r} does not match cursor "
+                f"scope.event_types={list(decoded.event_types)!r}.",
+                expected=list(decoded.event_types),
+                actual=list(norm_types),
+                recovery="Issue a replay cursor with the matching event_types scope.",
+            )
+
+    trimmed_through = int(src_bounds["trimmed_through_seq"])
+    head_seq = int(src_bounds["head_seq"])
+    max_seq = int(src_bounds["max_seq"])
+
+    if head_seq == 0 and trimmed_through == 0:
+        if decoded.seq > 0:
+            raise ReplayCursorError(
+                "stale_base",
+                f"Source history is empty (head_seq=0); cursor seq={decoded.seq} "
+                "cannot be satisfied.",
+                expected=0,
+                actual=decoded.seq,
+                recovery=(
+                    "Issue a new cursor from the empty store or restore from a valid snapshot."
+                ),
+            )
+    else:
+        if decoded.seq < trimmed_through:
+            raise ReplayCursorError(
+                "stale_base",
+                f"Cursor seq={decoded.seq} precedes trimmed history watermark "
+                f"(trimmed_through_seq={trimmed_through}).",
+                expected=f"seq>={trimmed_through}",
+                actual=decoded.seq,
+                recovery="Export a fresh full snapshot/package and re-hydrate the target clone.",
+            )
+        if decoded.seq > max_seq:
+            raise ReplayCursorError(
+                "stale_base",
+                f"Cursor seq={decoded.seq} is not available in source events "
+                f"(max_seq={max_seq}, head_seq={head_seq}).",
+                expected=f"seq<={max_seq}",
+                actual=decoded.seq,
+                recovery="Export a fresh full snapshot/package and re-hydrate the target clone.",
+            )
+        if decoded.seq > 0:
+            anchor_row = db.event_at_seq(decoded.seq)
+            if anchor_row is None:
+                raise ReplayCursorError(
+                    "stale_base",
+                    f"Anchor event at seq={decoded.seq} is missing from source history.",
+                    expected=decoded.anchor_event_id,
+                    actual=None,
+                    recovery=(
+                        "Export a fresh full snapshot/package and re-hydrate the target clone."
+                    ),
+                )
+            actual_event_id = str(anchor_row["event_id"])
+            if actual_event_id != decoded.anchor_event_id:
+                raise ReplayCursorError(
+                    "incompatible_base",
+                    f"Anchor event mismatch at seq={decoded.seq}: cursor expects "
+                    f"{decoded.anchor_event_id!r}, source has {actual_event_id!r}.",
+                    expected=decoded.anchor_event_id,
+                    actual=actual_event_id,
+                    recovery=(
+                        "Source and cursor diverged at or before seq; "
+                        "restore from a clean snapshot."
+                    ),
+                )
+
+    if target_db is not None:
+        from hotmem.mount import compare_mount_lineage
+
+        tgt_ident = target_db.mount_identity()
+        tgt_bounds = target_db.event_log_bounds()
+        target_is_bound = bool(
+            tgt_ident.mount_bound
+            or tgt_bounds["head_seq"] > 0
+            or target_db.get_meta("last_replay_cursor")
+        )
+        if target_is_bound:
+            if tgt_ident.mount_id != src_ident.mount_id:
+                raise ReplayCursorError(
+                    "wrong_source",
+                    f"Target mount_id={tgt_ident.mount_id!r} does not match source "
+                    f"mount_id={src_ident.mount_id!r}.",
+                    expected=tgt_ident.mount_id,
+                    actual=src_ident.mount_id,
+                    recovery="Replay only into a clone/target bound to the same logical mount_id.",
+                )
+            rel = compare_mount_lineage(db, target_db)
+            if rel["relationship"] == "fork":
+                raise ReplayCursorError(
+                    "fork_diverged",
+                    f"Target replica {tgt_ident.replica_id!r} is a divergent runtime fork "
+                    f"of source {src_ident.replica_id!r} ({rel['reason']}); multi-writer "
+                    "conflict resolution is undefined.",
+                    expected="clean clone or follower replica",
+                    actual=rel["relationship"],
+                    recovery=(
+                        "Export and restore an authoritative full snapshot/package "
+                        "to resolve the fork."
+                    ),
+                )
+            if rel["relationship"] == "replacement":
+                raise ReplayCursorError(
+                    "replaced_history",
+                    f"Target replica {tgt_ident.replica_id!r} has an unanchored replacement "
+                    f"history incompatible with source {src_ident.replica_id!r}.",
+                    expected=src_ident.history_id,
+                    actual=tgt_ident.history_id,
+                    recovery="Re-hydrate the target from a snapshot/package of the source mount.",
+                )
+
+    return decoded
+
+
+def replay(
+    db: MemoryDB,
+    *,
+    after_seq: int = 0,
+    cursor: Any = None,
+    namespace: str | None = None,
+) -> Iterator[dict[str, Any]]:
     """Stream events from the log as an iterator (constant memory).
 
-    Yields event dicts in seq order, starting strictly after ``after_seq``.
-    The caller can reconstruct memory state by replaying ``memory.created``
-    events: each payload carries the full row snapshot (via
-    _build_memory_created_payload).
-
-    Note: only server ``/v1/add`` ingestion emits ``memory.created`` events
-    today — imported/hydrated state has no per-record events. Replay is an
-    audit/repair surface, not a proven replication log (#73).
+    When ``cursor`` is provided, validates it as an opaque portable
+    ``ReplayCursor`` against ``db`` (rejecting raw SQLite sequences or wrong
+    sources/bases before streaming) and filters by the cursor's scope.
+    When ``cursor`` is omitted, streams intra-store events strictly after
+    ``after_seq``.
     """
-    cursor = after_seq
+    allowed_types: tuple[str, ...] | None = None
+    filter_ns = namespace
+    if cursor is not None:
+        validated = validate_replay_cursor(db, cursor, namespace=namespace)
+        seq_cursor = validated.seq
+        filter_ns = validated.namespace
+        allowed_types = validated.event_types
+    else:
+        if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
+            raise ReplayCursorError(
+                "unanchored_sequence",
+                f"after_seq must be a non-negative integer, got {after_seq!r}.",
+            )
+        seq_cursor = after_seq
+
     while True:
-        result = query_events(db, after_seq=cursor, limit=500, ascending=True)
+        result = query_events(
+            db,
+            namespace=filter_ns,
+            after_seq=seq_cursor,
+            limit=500,
+            ascending=True,
+        )
         events = result["events"]
         if not events:
             break
-        yield from events
-        cursor = events[-1]["seq"]
+        for evt in events:
+            if allowed_types is not None and evt["event_type"] not in allowed_types:
+                continue
+            yield evt
+        seq_cursor = events[-1]["seq"]
         if result["next_seq"] is None or len(events) < 500:
             break
 
@@ -627,70 +867,229 @@ def replay(db: MemoryDB, *, after_seq: int = 0) -> Iterator[dict[str, Any]]:
 _REPLAY_BATCH = 1000
 
 
-def replay_into(db: MemoryDB, target_db: MemoryDB) -> int:
-    """Reconstruct memory state from the event log into ``target_db``.
-
-    Replays ``memory.created`` events and inserts them via bounded
-    ``insert_many_ignore`` batches (no per-record commits). Returns the
-    number of records actually applied -- records whose
-    ``(namespace, content_hash)`` already exists in the target are skipped and
-    NOT counted (#73/#100): the return value is truthful applied work, not
-    attempted work. Rows with an empty hash have no identity and rely on
-    their primary key.
-    Non-``memory.created`` events are skipped (they don't carry full rows).
-    """
-    import base64
-
+def _event_to_memory_record(event: dict[str, Any]) -> Any | None:
+    """Convert a ``memory.created`` event payload into a ``MemoryRecord``."""
     from hotmem.db import MemoryRecord
 
-    applied = 0
-    pending: list[MemoryRecord] = []
-    for event in replay(db):
-        if event["event_type"] != EventType.MEMORY_CREATED:
-            continue
-        p = event.get("payload") or {}
-        if not p.get("id"):
-            continue
-        emb_b64 = p.get("embedding_b64")
-        emb = base64.b64decode(emb_b64) if emb_b64 else b""
-        record = MemoryRecord(
-            id=p["id"],
-            identifier=p.get("identifier", ""),
-            fact_text=p.get("fact_text", ""),
-            embedding=emb,
-            embedding_dim=p.get("embedding_dim") or 0,
-            embedding_model=p.get("embedding_model") or "",
-            source=p.get("source") or "",
-            importance=p.get("importance") or 0.5,
-            metadata_json=p.get("metadata_json") or "{}",
-            content_hash=p.get("content_hash") or "",
-            ttl_seconds=p.get("ttl_seconds"),
-            namespace=p.get("namespace") or "",
-            tier=p.get("tier") or "hot",
-            memory_type=p.get("memory_type") or "fact",
-            source_uri=p.get("source_uri") or "",
-            source_format=p.get("source_format") or "",
-            source_checksum=p.get("source_checksum") or "",
-            byte_offset=p.get("byte_offset"),
-            byte_length=p.get("byte_length"),
-            promotion_state=p.get("promotion_state") or "HOT",
-            promotion_candidate=p.get("promotion_candidate") or 0,
-            tags=p.get("tags") or "[]",
-            fact_summary=p.get("fact_summary"),
-            provenance_json=p.get("provenance_json"),
-            snapshot_id=p.get("snapshot_id") or "",
-            parent_memory=p.get("parent_memory") or "",
-            related_memories=p.get("related_memories") or "[]",
-            created_at=p.get("created_at"),
-            updated_at=p.get("updated_at"),
+    p = event.get("payload") or {}
+    if not p.get("id"):
+        return None
+    emb_b64 = p.get("embedding_b64")
+    emb = base64.b64decode(emb_b64) if emb_b64 else b""
+    return MemoryRecord(
+        id=p["id"],
+        identifier=p.get("identifier", ""),
+        fact_text=p.get("fact_text", ""),
+        embedding=emb,
+        embedding_dim=p.get("embedding_dim") or 0,
+        embedding_model=p.get("embedding_model") or "",
+        source=p.get("source") or "",
+        importance=p.get("importance") or 0.5,
+        metadata_json=p.get("metadata_json") or "{}",
+        content_hash=p.get("content_hash") or "",
+        ttl_seconds=p.get("ttl_seconds"),
+        namespace=p.get("namespace") or "",
+        tier=p.get("tier") or "hot",
+        memory_type=p.get("memory_type") or "fact",
+        source_uri=p.get("source_uri") or "",
+        source_format=p.get("source_format") or "",
+        source_checksum=p.get("source_checksum") or "",
+        byte_offset=p.get("byte_offset"),
+        byte_length=p.get("byte_length"),
+        promotion_state=p.get("promotion_state") or "HOT",
+        promotion_candidate=p.get("promotion_candidate") or 0,
+        tags=p.get("tags") or "[]",
+        fact_summary=p.get("fact_summary"),
+        provenance_json=p.get("provenance_json"),
+        snapshot_id=p.get("snapshot_id") or "",
+        parent_memory=p.get("parent_memory") or "",
+        related_memories=p.get("related_memories") or "[]",
+        created_at=p.get("created_at"),
+        updated_at=p.get("updated_at"),
+    )
+
+
+def replay_with_cursor(
+    db: MemoryDB,
+    target_db: MemoryDB,
+    *,
+    cursor: Any = None,
+    max_events: int | None = None,
+    namespace: str | None = None,
+    allow_legacy_history: bool = True,
+) -> ReplayResult:
+    """Validate cursor and replay ``memory.created`` events into ``target_db`` (#94).
+
+    - Validates source identity, base/history identity, trim watermarks, and
+      target clone/fork compatibility before any target mutation.
+    - Runs all inserts and cursor checkpoint updates in one transaction on
+      ``target_db``; any failure rolls back so interrupted runs can resume
+      cleanly from the last committed cursor.
+    - Reusing a completed cursor is idempotent (``applied == 0``).
+    """
+    from hotmem.interchange.fingerprint import state_fingerprint
+
+    if max_events is not None and (isinstance(max_events, bool) or max_events <= 0):
+        raise ValueError("max_events must be a positive integer when provided")
+
+    if cursor is not None:
+        resolved_cursor = decode_cursor(cursor)
+    else:
+        saved_cursor = target_db.get_meta("last_replay_cursor") or target_db.get_meta("base_cursor")
+        if saved_cursor:
+            resolved_cursor = decode_cursor(saved_cursor)
+        else:
+            resolved_cursor = issue_replay_cursor(
+                db,
+                position="start",
+                namespace=namespace,
+            )
+
+    validated = validate_replay_cursor(
+        db,
+        resolved_cursor,
+        target_db=target_db,
+        namespace=namespace,
+        allow_legacy_history=allow_legacy_history,
+    )
+
+    # Scan candidate events after validated.seq in bounded pages before mutating.
+    seq_cursor = validated.seq
+    last_seq = validated.seq
+    last_event_id = validated.anchor_event_id
+    events_scanned = 0
+    reached_end = True
+    records_to_apply: list[Any] = []
+
+    while True:
+        page = query_events(
+            db,
+            namespace=validated.namespace,
+            after_seq=seq_cursor,
+            limit=500,
+            ascending=True,
         )
-        pending.append(record)
-        if len(pending) >= _REPLAY_BATCH:
-            applied += target_db.insert_many_ignore(pending)
-            pending.clear()
-    if pending:
-        applied += target_db.insert_many_ignore(pending)
-    return applied
+        events = page["events"]
+        if not events:
+            break
+        for idx, evt in enumerate(events):
+            last_seq = int(evt["seq"])
+            last_event_id = str(evt["event_id"])
+            events_scanned += 1
+            if (
+                evt["event_type"] in validated.event_types
+                and evt["event_type"] == EventType.MEMORY_CREATED
+            ):
+                rec = _event_to_memory_record(evt)
+                if rec is not None:
+                    records_to_apply.append(rec)
+            if max_events is not None and events_scanned >= max_events:
+                has_more_in_page = idx + 1 < len(events)
+                has_more_pages = (
+                    len(
+                        db.query_events(
+                            namespace=validated.namespace,
+                            after_seq=last_seq,
+                            limit=1,
+                            ascending=True,
+                        )
+                    )
+                    > 0
+                )
+                if has_more_in_page or has_more_pages:
+                    reached_end = False
+                break
+        if not reached_end or (max_events is not None and events_scanned >= max_events):
+            break
+        seq_cursor = events[-1]["seq"]
+        if page["next_seq"] is None or len(events) < 500:
+            break
+
+    next_cursor = ReplayCursor(
+        version=validated.version,
+        mount_id=validated.mount_id,
+        replica_id=validated.replica_id,
+        history_id=validated.history_id,
+        base_snapshot_id=validated.base_snapshot_id,
+        namespace=validated.namespace,
+        event_types=validated.event_types,
+        seq=last_seq,
+        anchor_event_id=last_event_id if last_seq > 0 else "",
+    )
+    encoded_next = next_cursor.encode()
+
+    # If the cursor was already at head and target is already bound with this cursor,
+    # return idempotently without mutating the target DB.
+    if events_scanned == 0 and target_db.get_meta("last_replay_cursor") == encoded_next:
+        return ReplayResult(
+            applied=0,
+            skipped=0,
+            events_scanned=0,
+            cursor=encoded_next,
+            completed=True,
+        )
+
+    applied = 0
+    attempted = len(records_to_apply)
+    src_ident = db.mount_identity()
+
+    try:
+        for start in range(0, attempted, _REPLAY_BATCH):
+            chunk = records_to_apply[start : start + _REPLAY_BATCH]
+            applied += target_db.insert_many_ignore(chunk, _commit=False)
+
+        target_fp = state_fingerprint(target_db.all_rows())
+        target_db.record_clone_lineage(
+            source_mount_id=src_ident.mount_id,
+            source_replica_id=src_ident.replica_id,
+            source_history_id=src_ident.history_id,
+            base_snapshot_id=validated.base_snapshot_id
+            or target_db.mount_identity().base_snapshot_id,
+            base_state_fingerprint=target_fp,
+            base_cursor=encoded_next,
+            adopt_mount_id=True,
+            _commit=False,
+        )
+        target_db.set_meta("last_replay_cursor", encoded_next, _commit=False)
+        target_db.commit()
+    except Exception:
+        target_db.rollback()
+        raise
+
+    skipped = max(0, attempted - applied)
+    return ReplayResult(
+        applied=applied,
+        skipped=skipped,
+        events_scanned=events_scanned,
+        cursor=encoded_next,
+        completed=reached_end,
+    )
+
+
+def replay_into(
+    db: MemoryDB,
+    target_db: MemoryDB,
+    *,
+    cursor: Any = None,
+    max_events: int | None = None,
+    namespace: str | None = None,
+    allow_legacy_history: bool = True,
+) -> int:
+    """Reconstruct memory state from the event log into ``target_db`` (#73/#94/#100).
+
+    Validates source/base/history identity before any mutation and replays
+    ``memory.created`` events via bounded ``insert_many_ignore`` batches in a
+    single transaction. Returns the number of records actually applied.
+    """
+    res = replay_with_cursor(
+        db,
+        target_db,
+        cursor=cursor,
+        max_events=max_events,
+        namespace=namespace,
+        allow_legacy_history=allow_legacy_history,
+    )
+    return res.applied
 
 
 def _row_to_event(row: dict[str, Any]) -> dict[str, Any]:
