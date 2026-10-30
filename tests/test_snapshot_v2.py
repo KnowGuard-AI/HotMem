@@ -1035,3 +1035,203 @@ def test_missing_or_mismatched_declared_attachment_fails_before_hydration(
         hydrate(target_db, snap_dir)
     assert target_db.count() == 0
     target_db.close()
+
+
+# ── Hydration mapping, validation, rollback & embeddings (#99 WP4) ──────────
+
+
+def test_hydrate_v2_rejects_malformed_record_values_and_rolls_back_on_midstream_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """#99 WP4: malformed record values in a checksum-valid Snapshot v2 are
+    rejected without storing invalid state, and a mid-stream failure after a
+    batch flush rolls back the entire transaction so target DB stays untouched."""
+    from hotmem.snapshot import reader as v2_reader
+    from hotmem.snapshot.format import FileEntry, Manifest, compute_overall, sha256_file
+
+    # 1. Checksum-valid Snapshot v2 containing 1 valid record and 3 malformed records.
+    snap_dir = tmp_path / "snap_malformed_records"
+    snap_dir.mkdir()
+    lines = [
+        json.dumps(
+            {
+                "id": "valid-1",
+                "identifier": "ops/valid",
+                "fact_text": "Valid record survives.",
+                "importance": 0.6,
+                "tier": "hot",
+                "promotion_state": "HOT",
+                "promotion_candidate": 0,
+            }
+        ),
+        json.dumps(
+            {
+                "id": "bad-state",
+                "identifier": "ops/bad-state",
+                "fact_text": "Invalid promotion state must be rejected.",
+                "promotion_state": "NOT_A_VALID_STATE",
+            }
+        ),
+        json.dumps(
+            {
+                "id": "bad-imp",
+                "identifier": "ops/bad-imp",
+                "fact_text": "Out of range importance must be rejected.",
+                "importance": 9.99,
+            }
+        ),
+        json.dumps(
+            {
+                "id": "bad-ttl",
+                "identifier": "ops/bad-ttl",
+                "fact_text": "Negative TTL must be rejected.",
+                "ttl_seconds": -30,
+            }
+        ),
+    ]
+    mem_path = snap_dir / MEMORIES_NAME
+    mem_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    mem_sha = sha256_file(mem_path)
+    mem_size = mem_path.stat().st_size
+    manifest = Manifest(
+        snapshot_id="a" * 64,
+        memory_count=len(lines),
+        inline_count=len(lines),
+        files={MEMORIES_NAME: FileEntry(size=mem_size, sha256=mem_sha)},
+        overall_sha256=compute_overall({MEMORIES_NAME: mem_sha}),
+    )
+    (snap_dir / MANIFEST_NAME).write_text(
+        json.dumps(manifest.to_dict(), sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    dst = MemoryDB(tmp_path / "dst_malformed.sqlite")
+    res = hydrate(dst, snap_dir)
+    assert res.loaded == 1
+    assert res.invalid == 3
+    assert dst.count() == 1
+    assert dst.get_memory("valid-1") is not None
+    assert dst.get_memory("bad-state") is None
+    assert dst.get_memory("bad-imp") is None
+    assert dst.get_memory("bad-ttl") is None
+    dst.close()
+
+    # 2. Multi-batch rollback: force HYDRATE_BATCH=1 so batch 1 flushes before
+    # batch 2 raises an error; verify db.rollback() leaves 0 rows in target DB.
+    monkeypatch.setattr(v2_reader, "HYDRATE_BATCH", 1)
+    snap_rollback = tmp_path / "snap_rollback"
+    snap_rollback.mkdir()
+    rb_lines = [
+        json.dumps({"id": "rb-1", "identifier": "ops/rb1", "fact_text": "First batch row."}),
+        json.dumps({"id": "rb-2", "identifier": "ops/rb2", "fact_text": "Second batch row."}),
+    ]
+    rb_mem = snap_rollback / MEMORIES_NAME
+    rb_mem.write_text("\n".join(rb_lines) + "\n", encoding="utf-8")
+    rb_sha = sha256_file(rb_mem)
+    rb_manifest = Manifest(
+        snapshot_id="b" * 64,
+        memory_count=2,
+        inline_count=2,
+        files={MEMORIES_NAME: FileEntry(size=rb_mem.stat().st_size, sha256=rb_sha)},
+        overall_sha256=compute_overall({MEMORIES_NAME: rb_sha}),
+    )
+    (snap_rollback / MANIFEST_NAME).write_text(
+        json.dumps(rb_manifest.to_dict(), sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    target_rb = MemoryDB(tmp_path / "target_rb.sqlite")
+    orig_insert_many = target_rb.insert_many_ignore
+    calls = 0
+
+    def fail_on_second_batch(records, *, _commit: bool = True):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated mid-hydration failure after batch 1 flush")
+        return orig_insert_many(records, _commit=_commit)
+
+    monkeypatch.setattr(target_rb, "insert_many_ignore", fail_on_second_batch)
+    with pytest.raises(RuntimeError, match="simulated mid-hydration failure"):
+        hydrate(target_rb, snap_rollback)
+
+    assert calls == 2
+    assert target_rb.count() == 0
+    target_rb.close()
+
+
+def test_hydrate_v2_preserves_compatible_embeddings_and_rebuilds_only_incompatible(
+    tmp_path: Path,
+):
+    """#99 WP4: compatible stored embeddings are preserved without calling the
+    embedder, while incompatible embeddings are rebuilt and restamped."""
+    from hotmem.embed import EmbeddingDescriptor
+
+    desc = EmbeddingDescriptor(
+        implementation="custom",
+        model="wp4-embed",
+        dimension=8,
+        revision="r1",
+        preprocessing="pp1",
+    )
+
+    class CountingEmbedder:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        @property
+        def descriptor(self) -> EmbeddingDescriptor:
+            return desc
+
+        def embed(self, text: str) -> list[float]:
+            self.calls.append(text)
+            norm = 8**0.5
+            return [(1.0 if i % 2 == 0 else -1.0) / norm for i in range(8)]
+
+    embedder = CountingEmbedder()
+    unit_blob = pack_embedding(embedder.embed("seed"))
+    embedder.calls.clear()
+
+    src = MemoryDB(tmp_path / "src_emb.sqlite")
+    # Row 1: already matches CountingEmbedder's descriptor -> must be reused.
+    src.insert(
+        id="emb-compat",
+        identifier="ops/compat",
+        fact_text="Compatible vector text.",
+        embedding=unit_blob,
+        embedding_dim=desc.dimension,
+        embedding_model=desc.key,
+        content_hash=hashlib.sha256(b"ops/compat:Compatible vector text.").hexdigest(),
+    )
+    # Row 2: carries foreign model -> must be rebuilt under CountingEmbedder.
+    src.insert(
+        id="emb-foreign",
+        identifier="ops/foreign",
+        fact_text="Foreign vector text.",
+        embedding=pack_embedding(embed_text("Foreign vector text.")),
+        embedding_dim=EMBEDDING_DIM,
+        embedding_model="foreign-model-v0",
+        content_hash=hashlib.sha256(b"ops/foreign:Foreign vector text.").hexdigest(),
+    )
+
+    snap_dir = tmp_path / "snap_emb"
+    write_snapshot_v2(src, snap_dir)
+    src.close()
+
+    dst = MemoryDB(tmp_path / "dst_emb.sqlite")
+    res = hydrate(dst, snap_dir, embedder=embedder)
+    assert res.loaded == 2
+    assert res.embedding_reused == 1
+    assert res.embedding_rebuilt == 1
+    assert embedder.calls == ["Foreign vector text."]
+
+    r_compat = dst.get_memory("emb-compat")
+    r_foreign = dst.get_memory("emb-foreign")
+    assert r_compat is not None and r_foreign is not None
+    assert r_compat["embedding"] == unit_blob
+    assert r_compat["embedding_model"] == desc.key
+    assert r_compat["embedding_dim"] == desc.dimension
+    assert r_foreign["embedding"] == unit_blob
+    assert r_foreign["embedding_model"] == desc.key
+    assert r_foreign["embedding_dim"] == desc.dimension
+    dst.close()

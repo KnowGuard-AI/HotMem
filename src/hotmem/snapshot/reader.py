@@ -252,7 +252,7 @@ def hydrate_v2(
                 records.append(
                     record_to_memory_record(rec, blob, embedding_model=model, embedding_dim=dim)
                 )
-            loaded = db.insert_many_ignore(records)
+            loaded = db.insert_many_ignore(records, _commit=False)
             counters["loaded"] += loaded
             counters["skipped"] += len(records) - loaded
 
@@ -260,65 +260,87 @@ def hydrate_v2(
                 db,
                 db_dups + intra_batch_dups,
                 counters,
-                # Per-batch autocommit path: no later commit exists to carry
-                # an all-duplicate batch's merge (durability, #79 review).
-                commit=True,
+                commit=False,
             )
             pending.clear()
             intra_batch_dups.clear()
             batch_seen.clear()
 
-        with open(memories_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                if not isinstance(record, dict):
-                    counters["invalid"] += 1
-                    continue
-                try:
-                    rec = normalize_record(record, default_source="snapshot")
-                    if target_namespace is not None and not rec.get("namespace"):
-                        rec["namespace"] = target_namespace
-                except AnnotationValidationError as err:
-                    counters["invalid"] += 1  # malformed envelope: skip record (#79)
-                    _trace.debug(
-                        "hydrate_v2",
-                        "skipping record with malformed annotations",
-                        detail={"error": str(err)},
-                    )
-                    continue
-                if has_annotations:
-                    metadata = rec.get("metadata") or {}
-                    if isinstance(metadata, dict) and "annotations" in metadata:
-                        try:
-                            validate_metadata(metadata, known_ids=known_ids)
-                        except AnnotationValidationError as err:
-                            counters["invalid"] += 1
-                            _trace.debug(
-                                "hydrate_v2",
-                                "skipping record with invalid annotations",
-                                detail={"id": rec["id"], "error": str(err)},
-                            )
-                            continue
-                if validate_record(rec):
-                    counters["invalid"] += 1
-                    continue
-                dedup_key = db.record_identity_key(rec)
-                if dedup_key[1] and dedup_key in batch_seen:
-                    counters["skipped"] += 1
-                    if isinstance(rec.get("metadata"), dict) and "annotations" in (
-                        rec["metadata"] or {}
-                    ):
-                        intra_batch_dups.append(rec)
-                    continue
-                if dedup_key[1]:
-                    batch_seen.add(dedup_key)
-                pending.append(rec)
-                if len(pending) >= HYDRATE_BATCH:
-                    flush()
-        flush()
+        try:
+            with open(memories_path, encoding="utf-8") as f:
+                for lineno, line in enumerate(f, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    record = json.loads(line)
+                    if not isinstance(record, dict):
+                        counters["invalid"] += 1
+                        _trace.debug(
+                            "hydrate_v2",
+                            "skipping non-object record",
+                            detail={"line": lineno},
+                        )
+                        continue
+                    try:
+                        rec = normalize_record(record, default_source="snapshot")
+                        if target_namespace is not None and not rec.get("namespace"):
+                            rec["namespace"] = target_namespace
+                    except AnnotationValidationError as err:
+                        counters["invalid"] += 1  # malformed envelope: skip record (#79)
+                        _trace.debug(
+                            "hydrate_v2",
+                            "skipping record with malformed annotations",
+                            detail={"line": lineno, "error": str(err)},
+                        )
+                        continue
+                    if has_annotations:
+                        metadata = rec.get("metadata") or {}
+                        if isinstance(metadata, dict) and "annotations" in metadata:
+                            try:
+                                validate_metadata(metadata, known_ids=known_ids)
+                            except AnnotationValidationError as err:
+                                counters["invalid"] += 1
+                                _trace.debug(
+                                    "hydrate_v2",
+                                    "skipping record with invalid annotations",
+                                    detail={
+                                        "line": lineno,
+                                        "id": rec["id"],
+                                        "error": str(err),
+                                    },
+                                )
+                                continue
+                    issues = validate_record(rec)
+                    if issues:
+                        counters["invalid"] += 1
+                        _trace.debug(
+                            "hydrate_v2",
+                            "skipping invalid record",
+                            detail={
+                                "line": lineno,
+                                "id": rec["id"],
+                                "issues": issues,
+                            },
+                        )
+                        continue
+                    dedup_key = db.record_identity_key(rec)
+                    if dedup_key[1] and dedup_key in batch_seen:
+                        counters["skipped"] += 1
+                        if isinstance(rec.get("metadata"), dict) and "annotations" in (
+                            rec["metadata"] or {}
+                        ):
+                            intra_batch_dups.append(rec)
+                        continue
+                    if dedup_key[1]:
+                        batch_seen.add(dedup_key)
+                    pending.append(rec)
+                    if len(pending) >= HYDRATE_BATCH:
+                        flush()
+            flush()
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
 
         loaded = counters["loaded"]
         skipped = counters["skipped"]
