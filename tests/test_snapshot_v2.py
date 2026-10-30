@@ -718,3 +718,126 @@ def test_v2_identity_is_namespace_scoped_and_repeat_is_idempotent(tmp_path: Path
     assert second.skipped_dupes == 2
     assert dst.count() == 2
     dst.close()
+
+
+# ── Maximal inline record v2 round-trip (#99 WP2) ───────────────────────────
+
+
+@pytest.mark.parametrize("stored_schema_version", [1, 2, 3])
+def test_maximal_inline_record_roundtrips_all_30_columns_across_clean_runtimes(
+    tmp_path: Path, stored_schema_version: int
+):
+    """#99 WP2: a maximal inline record exported via Snapshot v2, Interchange v1,
+    and JSONL hydrates into clean runtimes with every portable field equal and
+    compatible stored embeddings reused without recomputation."""
+    from hotmem.db import _MEMORY_COLUMNS
+    from hotmem.interchange.canonical import compute_content_hash
+    from hotmem.interchange.fingerprint import record_fingerprint
+    from hotmem.interchange.record import MEMORY_FIELD_INVENTORY
+    from hotmem.snapshot import verify as verify_snapshot
+
+    fact_text = "Maximal inline Memory Record v2 state fidelity check (#99)."
+    identifier = "ops/inline-maximal"
+    content_hash = compute_content_hash(identifier, fact_text)
+    vec_blob = pack_embedding(embed_text(fact_text))
+
+    src = MemoryDB(tmp_path / f"src_v{stored_schema_version}.sqlite")
+    src.insert(
+        id="inline-max-001",
+        identifier=identifier,
+        fact_text=fact_text,
+        embedding=vec_blob,
+        embedding_dim=EMBEDDING_DIM,
+        embedding_model=EMBEDDING_MODEL,
+        source="agent://investigator",
+        importance=0.85,
+        metadata_json=json.dumps(
+            {
+                "ticket": 99,
+                "nested": {"stage": "wp2", "ok": True},
+                "annotations": {
+                    "schema_version": 1,
+                    "confidence": [
+                        {
+                            "score": 0.95,
+                            "source": "human:reviewer",
+                            "timestamp": "2026-10-01T12:00:00Z",
+                            "rationale": "verified inline state",
+                        }
+                    ],
+                },
+            },
+            sort_keys=True,
+        ),
+        content_hash=content_hash,
+        ttl_seconds=86400,
+        created_at="2026-10-01T12:00:00Z",
+        namespace="ops/shared",
+        tier="warm",
+        memory_type="fact",
+        source_uri="",
+        source_format="",
+        source_checksum="",
+        byte_offset=None,
+        byte_length=None,
+        updated_at="2026-10-02T15:30:00Z",
+        snapshot_id="snap-lineage-prev-01",
+        promotion_state="READY",
+        promotion_candidate=1,
+        parent_memory="mem-parent-root",
+        related_memories=json.dumps(["mem-rel-a", "mem-rel-b"]),
+        tags=json.dumps(["model:gpt-5", "project:hotmem", "org:knowguard"]),
+        schema_version=stored_schema_version,
+        fact_summary="Short summary of maximal inline record",
+        provenance_json=json.dumps(
+            {
+                "caller_id": "caller-alpha",
+                "envelope_version": "hotmem-session-v1",
+                "harness_id": "codex",
+                "namespace": "ops/shared",
+                "session_id": "sess-wp2-01",
+                "source": "agent://investigator",
+                "store_id": "store-origin",
+            },
+            sort_keys=True,
+        ),
+    )
+    expected_row = src.get_memory("inline-max-001")
+    assert expected_row is not None
+    expected_fp = record_fingerprint(expected_row)
+
+    # 1. Snapshot v2 export -> verify -> clean hydrate
+    v2_dir = tmp_path / f"snap_v2_{stored_schema_version}"
+    snapshot(src, v2_dir)
+    verify_info = verify_snapshot(v2_dir)
+    assert verify_info["valid"] is True
+
+    # 2. Interchange v1 package export -> verify -> clean hydrate
+    pkg_dir = tmp_path / f"pkg_v1_{stored_schema_version}"
+    snapshot(src, pkg_dir, package=True)
+    assert verify_snapshot(pkg_dir)["valid"] is True
+
+    # 3. Legacy JSONL export -> clean hydrate
+    jsonl_path = tmp_path / f"swap_{stored_schema_version}.jsonl"
+    snapshot(src, jsonl_path)
+    src.close()
+
+    for label, artifact in (("v2", v2_dir), ("package", pkg_dir), ("jsonl", jsonl_path)):
+        dst = MemoryDB(tmp_path / f"dst_{label}_{stored_schema_version}.sqlite")
+        res = hydrate(dst, artifact)
+        assert res.loaded == 1
+        assert res.skipped_dupes == 0
+        assert res.invalid == 0
+        assert res.embedding_reused == 1
+        assert res.embedding_rebuilt == 0
+
+        restored = dst.get_memory("inline-max-001")
+        assert restored is not None
+        for col in _MEMORY_COLUMNS:
+            assert col in MEMORY_FIELD_INVENTORY
+            assert restored[col] == expected_row[col], (
+                f"{label} mismatch on column {col!r}: "
+                f"expected {expected_row[col]!r}, got {restored[col]!r}"
+            )
+        assert record_fingerprint(restored) == expected_fp
+        dst.close()

@@ -82,7 +82,7 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     """
     embedding_blob: bytes | None = row.get("embedding")
     embedding_b64 = base64.b64encode(embedding_blob).decode() if embedding_blob else None
-    return {
+    record: dict[str, Any] = {
         "schema_version": 2,
         "id": row["id"],
         "identifier": row["identifier"],
@@ -114,6 +114,9 @@ def _row_to_record(row: dict[str, Any]) -> dict[str, Any]:
         "promotion_state": row["promotion_state"],
         "promotion_candidate": row["promotion_candidate"],
     }
+    if row.get("schema_version") is not None and int(row["schema_version"]) != 2:
+        record["record_schema_version"] = int(row["schema_version"])
+    return record
 
 
 def write_snapshot_v2(

@@ -781,12 +781,14 @@ class HotMemRuntime:
                         embedding_model=active.descriptor.key,
                         source=effective_source,
                         importance=importance,
-                        metadata_json=json.dumps(meta_dict),
+                        metadata_json=json.dumps(meta_dict, sort_keys=True),
                         content_hash=content_hash,
-                        ttl_seconds=ttl_seconds,
-                        namespace=target_namespace,
-                        tags=tags_json,
-                        provenance_json=provenance_json,
+                ttl_seconds=ttl_seconds,
+                namespace=target_namespace,
+                tags=tags_json,
+                provenance_json=json.dumps(provenance_dict, sort_keys=True)
+                        if provenance_dict
+                        else None,
                         _commit=False,
                     )
                     record = db.get_memory(memory_id) or {}
