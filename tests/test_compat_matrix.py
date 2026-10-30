@@ -363,12 +363,11 @@ def test_legacy_v01_and_pre99_snapshot_v2_fixtures_hydrate_with_documented_defau
     (using legacy file_references and omitting v2 fields) hydrate with documented
     defaults, while unsupported future schema_version/format fails at the boundary."""
     from hotmem.snapshot.format import (
-        MEMORIES_NAME,
         SnapshotChecksumError,
         compute_overall,
         sha256_file,
     )
-    from hotmem.snapshot.reader import MANIFEST_NAME, verify_manifest
+    from hotmem.snapshot.reader import MANIFEST_NAME, MEMORIES_NAME, verify_manifest
 
     # 1. Pre-#99 Snapshot v2 fixture with legacy 'file_references' key and minimal fields.
     legacy_v2 = tmp_path / "legacy_v2_pre99"
@@ -632,12 +631,11 @@ def test_package_byte_integrity_and_semantic_record_fidelity_are_separate_proper
     from hotmem.interchange.record import normalize_record, validate_record
     from hotmem.snapshot import hydrate, snapshot
     from hotmem.snapshot.format import (
-        MEMORIES_NAME,
         SnapshotChecksumError,
         compute_overall,
         sha256_file,
     )
-    from hotmem.snapshot.reader import MANIFEST_NAME, verify_manifest
+    from hotmem.snapshot.reader import MANIFEST_NAME, MEMORIES_NAME, verify_manifest
 
     src = MemoryDB(tmp_path / "sep_src.sqlite")
     src.insert(
