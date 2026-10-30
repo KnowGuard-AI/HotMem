@@ -486,8 +486,14 @@ def test_legacy_defaults_distinguish_missing_from_explicit_empty_zero_or_false()
         ({"promotion_candidate": "maybe"}, "promotion_candidate"),
         ({"memory_type": "executable"}, "memory_type"),
         ({"byte_offset": -1}, "byte_offset"),
+        ({"byte_offset": 1.5}, "byte_offset"),
         ({"byte_length": -5}, "byte_length"),
+        ({"byte_length": 2.5}, "byte_length"),
         ({"memory_type": "file", "source_uri": "a.csv", "byte_length": -1}, "byte_length"),
+        ({"ttl_seconds": 1.5}, "ttl_seconds"),
+        ({"promotion_candidate": 1.5}, "promotion_candidate"),
+        ({"schema_version": 1.5}, "schema_version"),
+        ({"embedding_dim": 64.5}, "embedding_dim"),
         ({"schema_version": 0}, "schema_version"),
         ({"record_schema_version": -1}, "record_schema_version"),
         ({"metadata": ["not", "an", "object"]}, "metadata"),
@@ -517,3 +523,28 @@ def test_validate_record_rejects_malformed_values_without_leaking_content(
     for issue in issues:
         assert secret_canary not in issue
         assert "Confidential payload" not in issue
+
+
+def test_integral_floats_are_accepted_for_integer_fields():
+    """Integer fields accept exact integral floats (JSON 2.0) without
+    truncation, while non-integral floats are rejected (see parametrized
+    malformed-value test)."""
+    rec = normalize_record(
+        {
+            "identifier": "k",
+            "fact_text": "v",
+            "byte_offset": 0.0,
+            "byte_length": 0.0,
+            "ttl_seconds": 60.0,
+            "promotion_candidate": 1.0,
+            "schema_version": 2.0,
+            "embedding_dim": 64.0,
+        }
+    )
+    assert validate_record(rec) == []
+    assert rec["byte_offset"] == 0
+    assert rec["byte_length"] == 0
+    assert rec["ttl_seconds"] == 60
+    assert rec["promotion_candidate"] == 1
+    assert rec["schema_version"] == 2
+    assert rec["embedding_dim"] == 64

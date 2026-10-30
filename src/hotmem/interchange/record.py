@@ -525,6 +525,11 @@ def _append_issue(issues: list[str], message: str) -> None:
         issues.append(message)
 
 
+def _non_integral_number(value: Any) -> bool:
+    """True for floats that cannot represent an exact integer (incl. NaN/inf)."""
+    return isinstance(value, float) and (not math.isfinite(value) or not value.is_integer())
+
+
 def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> dict[str, Any]:
     """Normalize any record dialect into the canonical field set.
 
@@ -584,7 +589,7 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
     if (
         raw_byte_offset is not None
         and raw_byte_offset != ""
-        and (byte_offset is None or byte_offset < 0)
+        and (byte_offset is None or byte_offset < 0 or _non_integral_number(raw_byte_offset))
     ):
         _append_issue(
             validation_issues,
@@ -596,7 +601,7 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
     if (
         raw_byte_length is not None
         and raw_byte_length != ""
-        and (byte_length is None or byte_length < 0)
+        and (byte_length is None or byte_length < 0 or _non_integral_number(raw_byte_length))
     ):
         _append_issue(
             validation_issues,
@@ -734,7 +739,11 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
 
     raw_ttl = raw.get("ttl_seconds")
     ttl_seconds = _as_int(raw_ttl)
-    if raw_ttl is not None and raw_ttl != "" and (ttl_seconds is None or ttl_seconds <= 0):
+    if (
+        raw_ttl is not None
+        and raw_ttl != ""
+        and (ttl_seconds is None or ttl_seconds <= 0 or _non_integral_number(raw_ttl))
+    ):
         _append_issue(
             validation_issues,
             "invalid ttl_seconds: expected positive integer or null",
@@ -774,7 +783,7 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
             promotion_candidate: Any = int(raw_promotion_candidate)
         else:
             pc_val = _as_int(raw_promotion_candidate)
-            if pc_val not in (0, 1):
+            if pc_val not in (0, 1) or _non_integral_number(raw_promotion_candidate):
                 _append_issue(
                     validation_issues,
                     "invalid promotion_candidate: expected 0 or 1",
@@ -789,7 +798,7 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
         raw_sv = raw.get(sv_key)
         if raw_sv is not None and raw_sv != "":
             sv_val = _as_int(raw_sv)
-            if sv_val is None or sv_val <= 0:
+            if sv_val is None or sv_val <= 0 or _non_integral_number(raw_sv):
                 _append_issue(
                     validation_issues,
                     f"invalid {sv_key}: expected positive integer",
@@ -797,7 +806,11 @@ def normalize_record(raw: dict[str, Any], *, default_source: str = "swap") -> di
 
     raw_dim = raw.get("embedding_dim")
     embedding_dim = _as_int(raw_dim)
-    if raw_dim is not None and raw_dim != "" and (embedding_dim is None or embedding_dim <= 0):
+    if (
+        raw_dim is not None
+        and raw_dim != ""
+        and (embedding_dim is None or embedding_dim <= 0 or _non_integral_number(raw_dim))
+    ):
         _append_issue(
             validation_issues,
             "invalid embedding_dim: expected positive integer",
