@@ -1015,8 +1015,10 @@ class MemoryDB:
         # the snapshot's namespace scope and reference projection. Persist the
         # latter so lineage comparison can reproduce the manifest digest
         # exactly, including for scoped exports.
-        if base_snapshot_scope:
-            self.set_meta("base_snapshot_scope", base_snapshot_scope, _commit=False)
+        # Clear an earlier scope when the new base is unscoped. Empty
+        # snapshots can be hydrated repeatedly into the same clean store, so
+        # truthy-only writes would leave the previous semantic base behind.
+        self.set_meta("base_snapshot_scope", base_snapshot_scope or "", _commit=False)
         if base_state_fingerprint:
             self.set_meta("base_state_fingerprint", base_state_fingerprint, _commit=False)
         # Clone-base lineage includes portable relationship fields so a hydrated

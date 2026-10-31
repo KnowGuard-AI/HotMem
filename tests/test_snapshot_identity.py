@@ -996,6 +996,43 @@ def test_lineage_fallback_reproduces_scoped_semantic_base_snapshot_id(tmp_path: 
         clone.close()
 
 
+def test_empty_snapshot_hydration_replaces_previous_semantic_base_scope(tmp_path: Path):
+    """An unscoped empty base must clear scope retained from an earlier clone."""
+    from hotmem.mount import compare_mount_lineage
+
+    src = MemoryDB(tmp_path / "empty_scope_src.sqlite")
+    scoped_dir = tmp_path / "empty_scoped_snapshot"
+    unscoped_dir = tmp_path / "empty_unscoped_snapshot"
+    try:
+        snapshot(
+            src,
+            scoped_dir,
+            export_scope={"namespace": "ops", "permitted_namespaces": ["ops"]},
+        )
+        snapshot(src, unscoped_dir)
+
+        clone = MemoryDB(tmp_path / "empty_scope_clone.sqlite")
+        try:
+            hydrate(clone, scoped_dir)
+            assert clone.get_meta("base_snapshot_scope")
+
+            # Empty stores qualify for clone binding on repeated hydration.
+            hydrate(clone, unscoped_dir)
+            assert clone.get_meta("base_snapshot_scope") == ""
+
+            # Exercise the semantic snapshot-id fallback without the replica
+            # anchor, as a clone may be inspected after its source is reopened.
+            clone._conn.execute("DELETE FROM store_meta WHERE key = 'base_source_replica_id'")
+            clone.commit()
+            result = compare_mount_lineage(src, clone)
+            assert result["relationship"] == "clone"
+            assert result["reason"] == "clean_clone_of_mount"
+        finally:
+            clone.close()
+    finally:
+        src.close()
+
+
 def test_verify_manifest_enforces_state_fingerprint_without_cursor(tmp_path: Path):
     """#96 review: a versioned manifest always verifies its declared
     state_fingerprint, even when history was trimmed and no cursor was issued."""
