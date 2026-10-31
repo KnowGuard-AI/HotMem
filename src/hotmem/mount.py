@@ -539,6 +539,11 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
 def compare_mount_lineage(source: Any, target: Any) -> dict[str, Any]:
     """Classify the relationship between two mounts, replicas, or manifests (#94).
 
+    ``MemoryDB`` inputs compare full event-id sequences and state fingerprints.
+    ``MountIdentity`` and mapping/manifest inputs compare base links only
+    (head/event detail is unavailable), so event-level divergence requires
+    store handles.
+
     Returns a dictionary containing:
     - ``relationship``: one of ``same_replica``, ``clone``, ``fork``,
       ``replacement``, or ``different_mount``
@@ -591,8 +596,10 @@ def compare_mount_lineage(source: Any, target: Any) -> dict[str, Any]:
             src.state_fingerprint
             and dst.state_fingerprint
             and src.state_fingerprint != dst.state_fingerprint
-            and src.head_seq == dst.head_seq
         ):
+            # A replica's stored state must agree with its event lineage even
+            # when the two copies stop at different sequence heads (out-of-band
+            # imports or divergent writes).
             return {
                 **base_result,
                 "relationship": "fork",

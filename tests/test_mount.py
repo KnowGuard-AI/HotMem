@@ -206,3 +206,41 @@ def test_mount_identity_roundtrips_dict():
     )
     assert MountIdentity.from_dict(ident.to_dict()) == ident
     _ = compute_content_hash("x", "y")
+
+
+def test_copied_replica_with_different_head_and_imported_state_is_a_fork(tmp_path: Path):
+    """#94: same replica/history must not hide out-of-band state divergence just
+    because the sequence heads differ."""
+    import shutil
+
+    src = MemoryDB(tmp_path / "head_src.sqlite")
+    src.append_event(
+        event_id="evt-1",
+        event_type="memory.created",
+        occurred_at="2026-10-30T00:00:00Z",
+    )
+    src.close()
+    copy_path = tmp_path / "head_copy.sqlite"
+    shutil.copy2(tmp_path / "head_src.sqlite", copy_path)
+
+    src = MemoryDB(tmp_path / "head_src.sqlite")
+    copy = MemoryDB(copy_path)
+    try:
+        copy.append_event(
+            event_id="evt-2",
+            event_type="memory.created",
+            occurred_at="2026-10-30T00:00:00Z",
+        )
+        copy.insert(
+            id="imported-row",
+            identifier="imported",
+            fact_text="state imported without an event",
+            embedding=b"",
+            content_hash="imported-hash",
+        )
+        result = compare_mount_lineage(src, copy)
+        assert result["relationship"] == "fork"
+        assert result["reason"] == "divergent_state_on_copied_replica"
+    finally:
+        src.close()
+        copy.close()

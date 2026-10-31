@@ -281,9 +281,10 @@ def write_snapshot_v2(
         snapshot_id = compute_snapshot_id(content_hashes)
         ident = db.mount_identity()
         state_fp = state_fingerprint_from_list(record_fingerprints)
+        scope_candidate = export_scope.get("namespace") if isinstance(export_scope, dict) else None
         scope_ns = (
-            str(export_scope["namespace"])
-            if isinstance(export_scope, dict) and export_scope.get("namespace")
+            scope_candidate.strip()
+            if isinstance(scope_candidate, str) and scope_candidate.strip()
             else None
         )
         try:

@@ -432,6 +432,11 @@ def decode_cursor(raw: Any) -> ReplayCursor:
             "malformed_cursor",
             "Replay cursor payload is missing 'scope' object.",
         )
+    if "event_types" not in scope_raw:
+        raise ReplayCursorError(
+            "malformed_cursor",
+            "Replay cursor payload is missing scope.event_types.",
+        )
 
     return ReplayCursor(
         version=version,
@@ -1055,7 +1060,11 @@ def replay_with_cursor(
     - Runs all inserts and cursor checkpoint updates in one transaction on
       ``target_db``; any failure rolls back so interrupted runs can resume
       cleanly from the last committed cursor.
-    - Reusing a completed cursor is idempotent (``applied == 0``).
+    - Reusing a completed cursor is idempotent (``applied == 0``), including
+      when the target resumes from its hydrated ``base_cursor``.
+    - ``max_events`` bounds the number of source events examined per step
+      (including event types that are not replayed), so ``applied`` can be
+      lower than the budget. Memory is bounded by one page of source events.
     """
     from hotmem.annotations import AnnotationValidationError
     from hotmem.interchange.fingerprint import (
@@ -1063,7 +1072,7 @@ def replay_with_cursor(
         state_fingerprint_from_list,
     )
 
-    if max_events is not None and (isinstance(max_events, bool) or max_events <= 0):
+    if max_events is not None and (type(max_events) is not int or max_events <= 0):
         raise ValueError("max_events must be a positive integer when provided")
 
     if cursor is not None:
@@ -1200,9 +1209,18 @@ def replay_with_cursor(
     )
     encoded_next = next_cursor.encode()
 
-    # If the cursor was already at head and target is already bound with this cursor,
-    # return idempotently without mutating the target DB.
-    if events_scanned == 0 and saved_last_cursor == encoded_next:
+    # If the cursor was already at head and the target already records this
+    # checkpoint (last replay or hydrated base cursor), return idempotently
+    # without writing any metadata.
+    saved_checkpoints = {
+        cursor_value
+        for cursor_value in (
+            saved_last_cursor,
+            target_db.get_meta("base_cursor") or "",
+        )
+        if cursor_value
+    }
+    if events_scanned == 0 and encoded_next in saved_checkpoints:
         return ReplayResult(
             applied=0,
             skipped=0,
@@ -1300,8 +1318,10 @@ def replay_into(
     """Reconstruct memory state from the event log into ``target_db`` (#73/#94/#100).
 
     Validates source/base/history identity before any mutation and replays
-    ``memory.created`` events via bounded ``insert_many_ignore`` batches in a
-    single transaction. Returns the number of records actually applied.
+    ``memory.created`` events via bounded page batches in a single transaction.
+    A clean target becomes a clone of the source mount (identity binding is a
+    documented side effect); targets with foreign local state are rejected.
+    Returns the number of records actually applied.
     """
     res = replay_with_cursor(
         db,

@@ -845,6 +845,21 @@ def test_cursor_versioning_and_corruption_rejection(tmp_path: Path):
         with pytest.raises(ReplayCursorError) as exc_big:
             decode_cursor("hmc1." + ("a" * (64 * 1024 + 1)) + ".00000000")
         assert exc_big.value.reason == "malformed_cursor"
+
+        # A scope without event_types is malformed (scope is part of the token).
+        bad_scope_payload = cur.to_payload_dict()
+        bad_scope_payload["scope"] = {"namespace": None}
+        b64_scope = (
+            base64.urlsafe_b64encode(
+                json.dumps(bad_scope_payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+            )
+            .decode("ascii")
+            .rstrip("=")
+        )
+        sig_scope = hashlib.sha256(f"hmc1.{b64_scope}".encode("ascii")).hexdigest()[:8]
+        with pytest.raises(ReplayCursorError) as exc_scope_payload:
+            decode_cursor(f"hmc1.{b64_scope}.{sig_scope}")
+        assert exc_scope_payload.value.reason == "malformed_cursor"
     finally:
         src.close()
 
@@ -1385,3 +1400,56 @@ def test_read_only_store_without_identity_fails_with_actionable_diagnostic(tmp_p
         assert issue_replay_cursor(writable).mount_id.startswith("mnt-")
     finally:
         writable.close()
+
+
+def test_repeating_hydrated_base_cursor_does_not_mutate_metadata(tmp_path: Path, monkeypatch):
+    """#94: idempotent reuse includes the hydrated base checkpoint (no writes)."""
+    from hotmem.events import replay_with_cursor
+    from hotmem.interchange.hydrate import hydrate_package
+    from hotmem.interchange.package import write_package
+
+    src = MemoryDB(tmp_path / "idem_src.sqlite")
+    target = MemoryDB(tmp_path / "idem_target.sqlite")
+    pkg = tmp_path / "idem_pkg"
+    try:
+        for i in range(1, 3):
+            _emit_created_fact(src, i)
+        write_package(src, pkg)
+        hydrate_package(target, pkg)
+        base_cursor = target.get_meta("base_cursor")
+        base_fp = target.mount_identity().base_state_fingerprint
+        assert base_cursor
+        assert target.get_meta("last_replay_cursor") is None
+
+        writes: list[str] = []
+        original_set = target.set_meta
+
+        def record_set(key, value, *, _commit=True):
+            writes.append(key)
+            return original_set(key, value, _commit=_commit)
+
+        monkeypatch.setattr(target, "set_meta", record_set)
+        res = replay_with_cursor(src, target)
+        assert res.applied == 0
+        assert res.completed is True
+        assert writes == []
+        assert target.get_meta("base_cursor") == base_cursor
+        assert target.mount_identity().base_state_fingerprint == base_fp
+    finally:
+        src.close()
+        target.close()
+
+
+def test_max_events_requires_positive_integer(tmp_path: Path):
+    from hotmem.events import replay_with_cursor
+
+    src = MemoryDB(tmp_path / "max_src.sqlite")
+    target = MemoryDB(tmp_path / "max_target.sqlite")
+    try:
+        _emit_created_fact(src, 1)
+        for bad in (0, -1, 1.5, True, "2"):
+            with pytest.raises(ValueError):
+                replay_with_cursor(src, target, max_events=bad)
+    finally:
+        src.close()
+        target.close()
