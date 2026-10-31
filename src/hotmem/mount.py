@@ -443,8 +443,6 @@ class _LineageProbe:
 
 def _extract_lineage_probe(target: Any) -> _LineageProbe:
     """Normalize a MemoryDB, MountIdentity, manifest Path, or mapping for comparison."""
-    from hotmem.interchange.fingerprint import state_fingerprint as compute_state_fp
-
     if isinstance(target, MountIdentity):
         return _LineageProbe(
             identity=target,
@@ -479,21 +477,48 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
         )
 
     if hasattr(target, "mount_identity") and hasattr(target, "all_rows"):
+        from hotmem.annotations import AnnotationValidationError
+        from hotmem.interchange.canonical import logical_id
+        from hotmem.interchange.fingerprint import (
+            record_fingerprint,
+            state_fingerprint_from_list,
+        )
+
         ident = target.mount_identity()
         bounds = target.event_log_bounds()
-        rows = target.all_rows()
-        state_fp = compute_state_fp(rows)
-        from hotmem.interchange.canonical import logical_id
 
-        snap_id = logical_id(r.get("content_hash", "") for r in rows if r.get("content_hash"))
-        event_rows = target.query_events(limit=10000, ascending=True)
-        event_map = {int(r["seq"]): str(r["event_id"]) for r in event_rows}
+        # Stream rows to keep lineage checks O(batch) instead of loading every
+        # memory row and every event payload into memory (#94).
+        content_hashes: list[str] = []
+        state_fps: list[str] = []
+        for row in target.iter_rows(include_embedding=False):
+            content_hash = str(row.get("content_hash") or "")
+            if content_hash:
+                content_hashes.append(content_hash)
+            try:
+                state_fps.append(record_fingerprint(row))
+            except AnnotationValidationError:
+                continue
+        state_fp = state_fingerprint_from_list(state_fps)
+        snap_id = logical_id(content_hashes)
+
         anchor_seq = max(ident.cloned_at_seq, ident.forked_at_seq)
-        post_events = sum(
-            1
-            for r in event_rows
-            if int(r["seq"]) > anchor_seq and str(r["event_type"]) in MUTATING_EVENT_TYPES
-        )
+        event_map: dict[int, str] = {}
+        post_events = 0
+        event_cursor = 0
+        while True:
+            event_rows = target.event_id_page(after_seq=event_cursor, limit=1000)
+            if not event_rows:
+                break
+            for row in event_rows:
+                seq = int(row["seq"])
+                event_map[seq] = str(row["event_id"])
+                if seq > anchor_seq and str(row["event_type"]) in MUTATING_EVENT_TYPES:
+                    post_events += 1
+            event_cursor = event_rows[-1]["seq"]
+            if len(event_rows) < 1000:
+                break
+
         fp_diverged = bool(
             ident.base_state_fingerprint and state_fp != ident.base_state_fingerprint
         )

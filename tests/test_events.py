@@ -1192,6 +1192,35 @@ def test_replay_rejects_unbound_target_with_local_rows(tmp_path: Path):
         target.close()
 
 
+def test_replay_streams_event_pages_instead_of_materializing_history(tmp_path: Path, monkeypatch):
+    """#94: replay applies bounded pages rather than accumulating every record."""
+    from hotmem.events import replay_with_cursor
+
+    src = MemoryDB(tmp_path / "stream_src.sqlite")
+    target = MemoryDB(tmp_path / "stream_target.sqlite")
+    try:
+        for i in range(1, 1201):
+            _emit_created_fact(src, i)
+
+        batches: list[int] = []
+        original = target.insert_many_ignore
+
+        def record_batch(records, *, _commit=True):
+            batches.append(len(records))
+            return original(records, _commit=_commit)
+
+        monkeypatch.setattr(target, "insert_many_ignore", record_batch)
+        res = replay_with_cursor(src, target)
+        assert res.applied == 1200
+        assert res.completed is True
+        assert target.count() == 1200
+        assert len(batches) >= 3
+        assert max(batches) <= 500
+    finally:
+        src.close()
+        target.close()
+
+
 def test_advanced_cursor_into_target_without_base_state_is_rejected(tmp_path: Path):
     """#94: an advanced (mid/head) cursor must not replay a suffix into a target
     that has no event history or matching base checkpoint."""

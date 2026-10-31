@@ -1437,6 +1437,25 @@ class MemoryDB:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def event_id_page(
+        self,
+        *,
+        after_seq: int = 0,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Return lightweight ``(seq, event_id, event_type)`` rows after ``seq``.
+
+        Lineage comparisons use this instead of loading full event payloads, so
+        identity checks stay bounded for long histories (#94).
+        """
+        rows = self._conn.execute(
+            """SELECT seq, event_id, event_type
+               FROM events WHERE seq > ?
+               ORDER BY seq ASC LIMIT ?""",
+            (after_seq, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def event_log_bounds(self) -> dict[str, Any]:
         """Return current event-log sequence bounds and trim watermarks (#94)."""
         agg = self._conn.execute(

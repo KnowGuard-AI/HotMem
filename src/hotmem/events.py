@@ -974,7 +974,11 @@ def replay_with_cursor(
       cleanly from the last committed cursor.
     - Reusing a completed cursor is idempotent (``applied == 0``).
     """
-    from hotmem.interchange.fingerprint import state_fingerprint
+    from hotmem.annotations import AnnotationValidationError
+    from hotmem.interchange.fingerprint import (
+        record_fingerprint,
+        state_fingerprint_from_list,
+    )
 
     if max_events is not None and (isinstance(max_events, bool) or max_events <= 0):
         raise ValueError("max_events must be a positive integer when provided")
@@ -1000,13 +1004,36 @@ def replay_with_cursor(
         allow_legacy_history=allow_legacy_history,
     )
 
-    # Scan candidate events after validated.seq in bounded pages before mutating.
+    saved_last_cursor = target_db.get_meta("last_replay_cursor") or ""
+    tgt_guard_ident = target_db.mount_identity()
+    tgt_guard_saved = (
+        target_db.get_meta("last_replay_cursor") or target_db.get_meta("base_cursor") or ""
+    )
+    needs_foreign_guard = bool(
+        not tgt_guard_ident.mount_bound
+        and target_db.event_log_bounds()["head_seq"] == 0
+        and not tgt_guard_saved
+        and target_db.count() > 0
+    )
+    if needs_foreign_guard and max_events is not None:
+        raise ReplayCursorError(
+            "incompatible_base",
+            "Bounded replay cannot verify an unbound target that already holds local "
+            "records; run a full replay or replay into a clean target.",
+            expected="empty target or a bound clone of the source mount",
+            actual=f"{target_db.count()} local records",
+            recovery="Use max_events=None for the initial replay, or hydrate a clean clone first.",
+        )
+
+    # Pass 1 (no mutation): determine the replay window, checkpoint, and -- for a
+    # dedupe-only target -- the source identity keys. Records themselves are not
+    # retained, so memory stays bounded by one page (#94).
     seq_cursor = validated.seq
     last_seq = validated.seq
     last_event_id = validated.anchor_event_id
     events_scanned = 0
     reached_end = True
-    records_to_apply: list[Any] = []
+    source_keys: set[tuple[str, str]] = set()
 
     while True:
         page = query_events(
@@ -1019,6 +1046,7 @@ def replay_with_cursor(
         events = page["events"]
         if not events:
             break
+        stop = False
         for idx, evt in enumerate(events):
             last_seq = int(evt["seq"])
             last_event_id = str(evt["event_id"])
@@ -1026,10 +1054,11 @@ def replay_with_cursor(
             if (
                 evt["event_type"] in validated.event_types
                 and evt["event_type"] == EventType.MEMORY_CREATED
+                and needs_foreign_guard
             ):
                 rec = _event_to_memory_record(evt)
                 if rec is not None:
-                    records_to_apply.append(rec)
+                    source_keys.add(target_db.record_identity_key(rec))
             if max_events is not None and events_scanned >= max_events:
                 has_more_in_page = idx + 1 < len(events)
                 has_more_pages = (
@@ -1045,8 +1074,9 @@ def replay_with_cursor(
                 )
                 if has_more_in_page or has_more_pages:
                     reached_end = False
+                stop = True
                 break
-        if not reached_end or (max_events is not None and events_scanned >= max_events):
+        if stop:
             break
         seq_cursor = events[-1]["seq"]
         if page["next_seq"] is None or len(events) < 500:
@@ -1054,19 +1084,9 @@ def replay_with_cursor(
 
     # Replay is a one-way clone operation. An unbound target that already holds
     # rows is allowed only when every existing row is a duplicate of a source
-    # record (dedupe replay); foreign local rows would otherwise be laundered
+    # record (dedupe replay). Foreign local rows would otherwise be laundered
     # into the new clone base and mount identity (#94).
-    tgt_ident_for_guard = target_db.mount_identity()
-    tgt_saved_for_guard = (
-        target_db.get_meta("last_replay_cursor") or target_db.get_meta("base_cursor") or ""
-    )
-    if (
-        not tgt_ident_for_guard.mount_bound
-        and target_db.event_log_bounds()["head_seq"] == 0
-        and not tgt_saved_for_guard
-        and target_db.count() > 0
-    ):
-        source_keys = {target_db.record_identity_key(rec) for rec in records_to_apply}
+    if needs_foreign_guard:
         foreign_keys = {
             target_db.record_identity_key(row) for row in target_db.all_rows()
         } - source_keys
@@ -1099,7 +1119,7 @@ def replay_with_cursor(
 
     # If the cursor was already at head and target is already bound with this cursor,
     # return idempotently without mutating the target DB.
-    if events_scanned == 0 and target_db.get_meta("last_replay_cursor") == encoded_next:
+    if events_scanned == 0 and saved_last_cursor == encoded_next:
         return ReplayResult(
             applied=0,
             skipped=0,
@@ -1108,16 +1128,57 @@ def replay_with_cursor(
             completed=True,
         )
 
+    # Pass 2: stream the same window and insert one page at a time inside a
+    # single transaction. Any failure rolls back to the last committed cursor.
     applied = 0
-    attempted = len(records_to_apply)
+    skipped = 0
     src_ident = db.mount_identity()
 
     try:
-        for start in range(0, attempted, _REPLAY_BATCH):
-            chunk = records_to_apply[start : start + _REPLAY_BATCH]
-            applied += target_db.insert_many_ignore(chunk, _commit=False)
+        seq_cursor = validated.seq
+        stop = False
+        while not stop:
+            page = query_events(
+                db,
+                namespace=validated.namespace,
+                after_seq=seq_cursor,
+                limit=500,
+                ascending=True,
+            )
+            events = page["events"]
+            if not events:
+                break
+            page_records: list[Any] = []
+            for evt in events:
+                if max_events is not None and int(evt["seq"]) > last_seq:
+                    stop = True
+                    break
+                if (
+                    evt["event_type"] in validated.event_types
+                    and evt["event_type"] == EventType.MEMORY_CREATED
+                ):
+                    rec = _event_to_memory_record(evt)
+                    if rec is not None:
+                        page_records.append(rec)
+            if page_records:
+                inserted = target_db.insert_many_ignore(page_records, _commit=False)
+                applied += inserted
+                skipped += len(page_records) - inserted
+            if stop:
+                break
+            seq_cursor = events[-1]["seq"]
+            if max_events is not None and seq_cursor >= last_seq:
+                break
+            if page["next_seq"] is None or len(events) < 500:
+                break
 
-        target_fp = state_fingerprint(target_db.all_rows())
+        target_fps: list[str] = []
+        for row in target_db.iter_rows(include_embedding=False):
+            try:
+                target_fps.append(record_fingerprint(row))
+            except AnnotationValidationError:
+                continue
+        target_fp = state_fingerprint_from_list(target_fps)
         target_db.record_clone_lineage(
             source_mount_id=src_ident.mount_id,
             source_replica_id=src_ident.replica_id,
@@ -1135,7 +1196,6 @@ def replay_with_cursor(
         target_db.rollback()
         raise
 
-    skipped = max(0, attempted - applied)
     return ReplayResult(
         applied=applied,
         skipped=skipped,
