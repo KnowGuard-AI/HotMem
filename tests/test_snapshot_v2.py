@@ -2661,3 +2661,48 @@ def test_lineage_fallback_reproduces_scoped_semantic_base_snapshot_id(tmp_path: 
             reopened_src.close()
     finally:
         clone.close()
+
+
+def test_verify_manifest_enforces_state_fingerprint_without_cursor(tmp_path: Path):
+    """#96 review: a versioned manifest always verifies its declared
+    state_fingerprint, even when history was trimmed and no cursor was issued."""
+    from hotmem.interchange.fingerprint import record_fingerprint, state_fingerprint_from_list
+    from hotmem.snapshot.format import compute_overall, compute_semantic_snapshot_id, sha256_file
+    from hotmem.swap import add_memory
+
+    src = MemoryDB(tmp_path / "nofp.sqlite")
+    snap_dir = tmp_path / "nofp_snap"
+    try:
+        add_memory(src, "ops/fingerprint", "Fingerprint without cursor.")
+        snapshot(src, snap_dir)
+    finally:
+        src.close()
+
+    manifest_path = snap_dir / MANIFEST_NAME
+    mem_path = snap_dir / MEMORIES_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    record = json.loads(mem_path.read_text(encoding="utf-8").strip())
+    record["promotion_state"] = "READY"
+    mem_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+
+    new_sha = sha256_file(mem_path)
+    manifest["files"][MEMORIES_NAME] = {"size": mem_path.stat().st_size, "sha256": new_sha}
+    manifest["overall_sha256"] = compute_overall({MEMORIES_NAME: new_sha})
+    manifest["snapshot_id"] = compute_semantic_snapshot_id(
+        [record], file_backed_references=[], scope=manifest.get("scope")
+    )
+    # Simulate a trimmed-history export: no portable replay cursor.
+    manifest["replay_cursor"] = ""
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(SnapshotChecksumError) as exc:
+        verify_manifest(snap_dir)
+    assert exc.value.file == "state_fingerprint"
+
+    manifest["state_fingerprint"] = state_fingerprint_from_list([record_fingerprint(record)])
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    assert verify_manifest(snap_dir).snapshot_id == manifest["snapshot_id"]

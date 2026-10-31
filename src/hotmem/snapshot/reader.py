@@ -228,7 +228,7 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
                     # Untrusted payloads must fail closed with the verifier's
                     # own error, never leak a coercion exception (#96).
                     raise SnapshotChecksumError("malformed", file=MEMORIES_NAME) from err
-                if manifest.replay_cursor and manifest.state_fingerprint:
+                if manifest.state_fingerprint:
                     try:
                         normalized = normalize_record(record, default_source="snapshot")
                         if validate_record(normalized):
@@ -246,7 +246,7 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
                 expected=f"count={manifest.memory_count}",
                 actual=f"count={memory_count}",
             )
-        if manifest.replay_cursor and manifest.state_fingerprint:
+        if manifest.state_fingerprint:
             computed_fp = state_fingerprint_from_list(fingerprints)
             if computed_fp != manifest.state_fingerprint:
                 raise SnapshotChecksumError(
