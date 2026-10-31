@@ -665,9 +665,15 @@ def semantic_record_digest(raw: Mapping[str, Any], *, default_source: str = "sna
 def semantic_file_reference_projection(
     ref: FileReference | Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Canonical projection of a manifest ``FileReference`` entry."""
+    """Canonical projection of a manifest ``FileReference`` entry.
+
+    ``attachment`` is intentionally excluded: bundling a byte range into the
+    package is a packaging choice (like compression), not portable memory
+    state. The referenced bytes remain identified by ``source_uri``,
+    ``byte_offset``, ``byte_length``, ``source_format``, and
+    ``source_checksum`` (#96).
+    """
     if isinstance(ref, FileReference):
-        raw_att = ref.attachment
         raw_uri = ref.source_uri
         raw_mem_id = ref.memory_id
         raw_offset = ref.byte_offset
@@ -675,7 +681,6 @@ def semantic_file_reference_projection(
         raw_fmt = ref.source_format
         raw_chk = ref.source_checksum
     else:
-        raw_att = ref.get("attachment")
         raw_uri = ref.get("source_uri")
         raw_mem_id = ref.get("memory_id")
         raw_offset = ref.get("byte_offset")
@@ -683,11 +688,9 @@ def semantic_file_reference_projection(
         raw_fmt = ref.get("source_format")
         raw_chk = ref.get("source_checksum")
 
-    att_norm = _nfc(str(raw_att).strip()) if isinstance(raw_att, str) and raw_att.strip() else None
     uri_str = _nfc(str(raw_uri or "").strip())
     norm_uri = normalize_source_uri(uri_str) if uri_str else ""
     return {
-        "attachment": att_norm,
         "byte_length": int(raw_length or 0),
         "byte_offset": int(raw_offset or 0),
         "memory_id": _nfc(str(raw_mem_id or "").strip()),
@@ -728,13 +731,8 @@ def _derive_file_references_from_records(
     for rec in records:
         proj = semantic_record_projection(rec)
         if proj["memory_type"] == "file" and proj["source_uri"]:
-            raw_att = rec.get("attachment") if isinstance(rec, Mapping) else None
-            att_norm = (
-                _nfc(str(raw_att).strip()) if isinstance(raw_att, str) and raw_att.strip() else None
-            )
             derived.append(
                 {
-                    "attachment": att_norm,
                     "byte_length": int(proj["byte_length"] or 0),
                     "byte_offset": int(proj["byte_offset"] or 0),
                     "memory_id": proj["id"],
@@ -758,7 +756,6 @@ def _sort_file_ref_projections(
             r["byte_length"],
             r["source_format"],
             r["source_checksum"],
-            r["attachment"] or "",
         )
     )
     return projected

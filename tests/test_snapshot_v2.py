@@ -1923,7 +1923,6 @@ def test_semantic_snapshot_id_golden_vectors():
     expected_envelope = {
         "file_backed_references": [
             {
-                "attachment": "ab" * 32,
                 "byte_length": 128,
                 "byte_offset": 0,
                 "memory_id": "gold-file-01",
@@ -2010,9 +2009,9 @@ def test_semantic_snapshot_id_invariant_to_record_ref_and_json_key_ordering(tmp_
     assert id_forward == id_reversed
 
 
-def test_semantic_snapshot_id_changes_on_every_preserved_field_and_attachment_ref():
-    """#96 acceptance: every one of the 27 #99 preserve columns, plus attachment
-    references and semantic scope, changes semantic snapshot_id when mutated."""
+def test_semantic_snapshot_id_changes_on_every_preserved_field_and_reference_state():
+    """#96 acceptance: every one of the 27 #99 preserve columns, plus file-backed
+    reference state and semantic scope, changes semantic snapshot_id when mutated."""
     from hotmem.interchange.canonical import compute_content_hash
     from hotmem.interchange.record import MEMORY_FIELD_INVENTORY
     from hotmem.snapshot.format import (
@@ -2144,13 +2143,15 @@ def test_semantic_snapshot_id_changes_on_every_preserved_field_and_attachment_re
         source_checksum="aa" * 32,
         attachment="aa" * 32,
     )
+    # Attachment bundling is packaging, not portable state: it must not change
+    # semantic identity (#96 acceptance, docs/snapshot-v2.md#determinism).
     assert (
         compute_semantic_snapshot_id(
             [base_record],
             file_backed_references=[attached_ref],
             scope={"namespace": "ops/incident"},
         )
-        != base_id
+        == base_id
     )
     assert (
         compute_semantic_snapshot_id(
@@ -2567,3 +2568,45 @@ def test_verify_manifest_handles_uncoercible_promotion_candidate(tmp_path: Path)
         assert dst.count() == 0
     finally:
         dst.close()
+
+
+def test_semantic_snapshot_id_is_independent_of_attachment_bundling(tmp_path: Path):
+    """#96 review: bundling byte ranges (packaging) must not change semantic
+    identity; only referenced-byte state does."""
+    from hotmem.snapshot.format import compute_semantic_snapshot_id
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    data = workspace / "slice.bin"
+    data.write_bytes(b"0123456789" * 10)
+
+    db = MemoryDB(tmp_path / "bundle.sqlite")
+    try:
+        add_file_backed(
+            db,
+            "bundle/slice",
+            FileRef(
+                source_uri=str(data),
+                byte_offset=0,
+                byte_length=50,
+                source_format="bin",
+            ),
+            summary="bundled slice",
+        )
+        plain_dir = tmp_path / "bundle_plain"
+        attached_dir = tmp_path / "bundle_attached"
+        snapshot(db, plain_dir, base_dir=workspace)
+        snapshot(db, attached_dir, copy_attachments=True, base_dir=workspace)
+    finally:
+        db.close()
+
+    plain = verify_manifest(plain_dir)
+    attached = verify_manifest(attached_dir)
+    assert attached.file_backed_references[0].attachment is not None
+    assert plain.file_backed_references[0].attachment is None
+    assert plain.snapshot_id == attached.snapshot_id
+    assert plain.snapshot_id == compute_semantic_snapshot_id(
+        [json.loads((plain_dir / MEMORIES_NAME).read_text(encoding="utf-8").strip())],
+        file_backed_references=plain.file_backed_references,
+        scope=plain.scope,
+    )
