@@ -106,3 +106,26 @@ def assert_keys_exact(actual: dict, expected_keys: set[str], where: str) -> None
     assert actual_keys == expected_keys, (
         f"{where}: key drift. expected {sorted(expected_keys)}, got {sorted(actual_keys)}"
     )
+
+
+@pytest.fixture(scope="session")
+def golden_cursor_vectors() -> dict[str, str]:
+    """Locked opaque ``hmc1`` cursor tokens (full SHA-256 integrity digest)."""
+    return {
+        "start_v1": (
+            "hmc1.eyJhbmNob3JfZXZlbnRfaWQiOiIiLCJiYXNlX3NuYXBzaG90X2lkIjoiIiwiaGlzdG9yeV9pZCI"
+            "6Imhpc3QtMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJtb3VudF9pZCI6Im1udC0wMDA"
+            "wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInJlcGxpY2FfaWQiOiJyZXAtMDAwMDAwMDAwMDA"
+            "wMDAwMDAwMDAwMDAwMDAwMDAwMDEiLCJzY29wZSI6eyJldmVudF90eXBlcyI6WyJtZW1vcnkuY3JlYXR"
+            "lZCJdLCJuYW1lc3BhY2UiOm51bGx9LCJzZXEiOjAsInYiOjF9.8411dc0734cf905a6095435f659f8e"
+            "6b8a40cbf6212586d3eca4b6211e4df33c"
+        ),
+        "scoped_head_v1": (
+            "hmc1.eyJhbmNob3JfZXZlbnRfaWQiOiJldnQtMDAwMyIsImJhc2Vfc25hcHNob3RfaWQiOiJzbmFwLWJ"
+            "hc2UtMDEiLCJoaXN0b3J5X2lkIjoiaGlzdC0wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSI"
+            "sIm1vdW50X2lkIjoibW50LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwicmVwbGljYV9"
+            "pZCI6InJlcC0wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInNjb3BlIjp7ImV2ZW50X3R"
+            "5cGVzIjpbIm1lbW9yeS5jcmVhdGVkIl0sIm5hbWVzcGFjZSI6Im9wcyJ9LCJzZXEiOjMsInYiOjF9.80"
+            "5a1b108aa9900c1dfaa60f7adc585ac89b76b79277fe3ef378b32007b08f5d"
+        ),
+    }
