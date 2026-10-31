@@ -509,8 +509,15 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
             if len(event_rows) < 1000:
                 break
 
-        base_lineage_fp = ident.base_lineage_fingerprint or ident.base_state_fingerprint
-        fp_diverged = bool(base_lineage_fp and lineage_fp != base_lineage_fp)
+        if ident.base_lineage_fingerprint:
+            # New bindings use the lineage algorithm (relationship fields included).
+            fp_diverged = lineage_fp != ident.base_lineage_fingerprint
+        elif ident.base_state_fingerprint:
+            # Legacy bindings only have the delta state fingerprint; compare
+            # like with like instead of cross-comparing fingerprint algorithms.
+            fp_diverged = state_fp != ident.base_state_fingerprint
+        else:
+            fp_diverged = False
         post_mutations = post_events + (1 if fp_diverged else 0)
         return _LineageProbe(
             identity=ident,

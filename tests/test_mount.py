@@ -390,3 +390,47 @@ def test_hydrated_clone_relationship_only_divergence_is_a_fork(
     finally:
         src.close()
         clone.close()
+
+
+def test_legacy_state_only_base_binding_stays_clone_and_replayable(tmp_path: Path):
+    """#94: legacy bindings with only base_state_fingerprint must not be
+    cross-compared against the newer lineage fingerprint algorithm."""
+    from hotmem.events import append_event, replay_with_cursor
+    from hotmem.interchange.hydrate import hydrate_package
+    from hotmem.interchange.package import write_package
+
+    src = MemoryDB(tmp_path / "legacy_bind_src.sqlite")
+    add_memory(src, "legacy/bind", "legacy binding seed")
+    row = src.all_rows()[0]
+    append_event(
+        src,
+        event_type="memory.created",
+        occurred_at="2026-10-30T00:00:00Z",
+        memory_id=row["id"],
+        payload={"id": row["id"], "namespace": "", "content_hash": row["content_hash"]},
+    )
+    pkg = tmp_path / "legacy_bind_pkg"
+    write_package(src, pkg)
+
+    clone = MemoryDB(tmp_path / "legacy_bind_clone.sqlite")
+    try:
+        hydrate_package(clone, pkg)
+        # Simulate a binding created before base_lineage_fingerprint existed.
+        clone._conn.execute("DELETE FROM store_meta WHERE key = 'base_lineage_fingerprint'")
+        clone.commit()
+        ident = clone.mount_identity()
+        assert ident.base_lineage_fingerprint == ""
+        assert ident.base_state_fingerprint
+
+        result = compare_mount_lineage(src, clone)
+        assert result["relationship"] == "clone", result
+        assert result["reason"] == "clean_clone_of_mount"
+
+        before_rows = clone.count()
+        res = replay_with_cursor(src, clone)
+        assert res.applied == 0
+        assert res.completed is True
+        assert clone.count() == before_rows
+    finally:
+        src.close()
+        clone.close()
