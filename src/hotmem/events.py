@@ -772,6 +772,53 @@ def validate_replay_cursor(
 
         tgt_ident = target_db.mount_identity()
         tgt_bounds = target_db.event_log_bounds()
+        tgt_saved_cursor = (
+            target_db.get_meta("last_replay_cursor") or target_db.get_meta("base_cursor") or ""
+        )
+        target_has_events = tgt_bounds["head_seq"] > 0
+
+        # An advanced cursor asserts state that already existed at ``seq``. A
+        # target with no event history must prove it holds that base (matching
+        # saved checkpoint or base snapshot); otherwise suffix-only replay
+        # would silently produce a partial clone before mutation (#94).
+        if decoded.seq > 0 and not target_has_events:
+            saved_matches = False
+            saved_base_matches = False
+            saved_ahead = False
+            if tgt_saved_cursor:
+                try:
+                    saved = decode_cursor(tgt_saved_cursor)
+                except ReplayCursorError:
+                    saved = None
+                if saved is not None:
+                    same_history = (
+                        saved.mount_id == decoded.mount_id
+                        and saved.replica_id == decoded.replica_id
+                        and saved.history_id == decoded.history_id
+                    )
+                    saved_matches = saved.encode() == decoded.encode()
+                    saved_ahead = same_history and saved.seq >= decoded.seq
+                    saved_base_matches = bool(
+                        decoded.base_snapshot_id
+                        and saved.base_snapshot_id == decoded.base_snapshot_id
+                    )
+            base_matches = bool(
+                decoded.base_snapshot_id and tgt_ident.base_snapshot_id == decoded.base_snapshot_id
+            )
+            if not (saved_matches or saved_ahead or saved_base_matches or base_matches):
+                raise ReplayCursorError(
+                    "incompatible_base",
+                    f"Cursor seq={decoded.seq} requires target base state, but the target "
+                    "has no event history or matching saved checkpoint.",
+                    expected=f"checkpoint at seq={decoded.seq} or base_snapshot_id="
+                    f"{decoded.base_snapshot_id!r}",
+                    actual={"seq": 0, "base_snapshot_id": tgt_ident.base_snapshot_id},
+                    recovery=(
+                        "Hydrate the matching snapshot/package before resuming, or issue "
+                        "a start cursor for full replay."
+                    ),
+                )
+
         target_is_bound = bool(
             tgt_ident.mount_bound
             or tgt_bounds["head_seq"] > 0

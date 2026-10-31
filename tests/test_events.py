@@ -891,6 +891,7 @@ def test_stale_base_rejected_when_events_trimmed_or_cursor_ahead(tmp_path: Path)
 
     src = MemoryDB(tmp_path / "src.sqlite")
     target = MemoryDB(tmp_path / "target.sqlite")
+    target_pre = MemoryDB(tmp_path / "target_pre.sqlite")
     try:
         for i in range(1, 6):
             _emit_created_fact(src, i)
@@ -898,6 +899,9 @@ def test_stale_base_rejected_when_events_trimmed_or_cursor_ahead(tmp_path: Path)
         c_start = issue_replay_cursor(src, position="start").encode()
         c_seq2 = issue_replay_cursor(src, seq=2).encode()
         c_seq3 = issue_replay_cursor(src, seq=3).encode()
+
+        # Capture a target already at head before source retention runs.
+        assert replay_with_cursor(src, target_pre, cursor=c_start).applied == 5
 
         # Trim events seq 1 and 2 (trimmed_through_seq becomes 2; min_seq is 3).
         assert src.trim_events_before_seq(3) == 2
@@ -914,12 +918,19 @@ def test_stale_base_rejected_when_events_trimmed_or_cursor_ahead(tmp_path: Path)
         assert exc_seq2.value.reason == "stale_base"
         assert target.count() == 0
 
-        # c_seq3 (seq=3 is still present and >= trimmed_through_seq) succeeds,
-        # replaying events 4 and 5.
-        res = replay_with_cursor(src, target, cursor=c_seq3)
-        assert res.applied == 2
+        # c_seq3 (seq=3 is still present and >= trimmed_through_seq) succeeds
+        # against a target that already holds the base state; records 4-5 are
+        # already present, so this is an idempotent catch-up.
+        res = replay_with_cursor(src, target_pre, cursor=c_seq3)
+        assert res.applied == 0
         assert res.completed is True
-        assert target.count() == 2
+        assert target_pre.count() == 5
+
+        # The same advanced cursor cannot be applied to a target with no base.
+        with pytest.raises(ReplayCursorError) as exc_no_base:
+            replay_with_cursor(src, target, cursor=c_seq3)
+        assert exc_no_base.value.reason == "incompatible_base"
+        assert target.count() == 0
 
         # A cursor ahead of source max_seq fails with stale_base.
         ident = src.mount_identity()
@@ -933,10 +944,11 @@ def test_stale_base_rejected_when_events_trimmed_or_cursor_ahead(tmp_path: Path)
         with pytest.raises(ReplayCursorError) as exc_ahead:
             replay_with_cursor(src, target, cursor=ahead_cursor)
         assert exc_ahead.value.reason == "stale_base"
-        assert target.count() == 2
+        assert target.count() == 0
     finally:
         src.close()
         target.close()
+        target_pre.close()
 
 
 def test_replaced_history_and_incompatible_base_rejected_before_mutation(tmp_path: Path):
@@ -1149,6 +1161,47 @@ def test_reusing_completed_cursor_is_idempotent(tmp_path: Path):
     finally:
         src.close()
         target.close()
+
+
+def test_advanced_cursor_into_target_without_base_state_is_rejected(tmp_path: Path):
+    """#94: an advanced (mid/head) cursor must not replay a suffix into a target
+    that has no event history or matching base checkpoint."""
+    from hotmem.events import (
+        ReplayCursorError,
+        issue_replay_cursor,
+        replay_with_cursor,
+    )
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    try:
+        for i in range(1, 4):
+            _emit_created_fact(src, i)
+
+        head = issue_replay_cursor(src, position="head").encode()
+        mid = issue_replay_cursor(src, seq=1).encode()
+        start = issue_replay_cursor(src, position="start").encode()
+
+        for label, cursor in (("head", head), ("mid", mid)):
+            target = MemoryDB(tmp_path / f"empty_{label}.sqlite")
+            try:
+                with pytest.raises(ReplayCursorError) as exc_info:
+                    replay_with_cursor(src, target, cursor=cursor)
+                assert exc_info.value.reason == "incompatible_base"
+                assert target.count() == 0
+            finally:
+                target.close()
+
+        # A start cursor performs full replay and is accepted into an empty target.
+        target = MemoryDB(tmp_path / "empty_start.sqlite")
+        try:
+            res = replay_with_cursor(src, target, cursor=start)
+            assert res.applied == 3
+            assert res.completed is True
+            assert target.count() == 3
+        finally:
+            target.close()
+    finally:
+        src.close()
 
 
 def test_empty_and_legacy_histories_contract(tmp_path: Path):
