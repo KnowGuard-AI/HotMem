@@ -436,11 +436,15 @@ def bootstrap_mount(
     )
 
 
+_LINEAGE_RELATIONSHIP_FIELDS = ("parent_memory", "related_memories")
+
+
 @dataclass
 class _LineageProbe:
     identity: MountIdentity
     snapshot_id: str
     state_fingerprint: str
+    lineage_fingerprint: str
     head_seq: int
     head_event_id: str
     event_map: dict[int, str]
@@ -456,11 +460,12 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
     """
     if hasattr(target, "mount_identity") and hasattr(target, "all_rows"):
         from hotmem.annotations import AnnotationValidationError
-        from hotmem.interchange.canonical import logical_id
+        from hotmem.interchange.canonical import logical_id, sha256_bytes
         from hotmem.interchange.fingerprint import (
             record_fingerprint,
             state_fingerprint_from_list,
         )
+        from hotmem.interchange.record import normalize_record
 
         ident = target.mount_identity()
         bounds = target.event_log_bounds()
@@ -469,15 +474,33 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
         # memory row and every event payload into memory (#94).
         content_hashes: list[str] = []
         state_fps: list[str] = []
+        lineage_fps: list[str] = []
         for row in target.iter_rows(include_embedding=False):
             content_hash = str(row.get("content_hash") or "")
             if content_hash:
                 content_hashes.append(content_hash)
             try:
-                state_fps.append(record_fingerprint(row))
+                normalized = normalize_record(row)
+                state_fps.append(record_fingerprint(normalized))
             except AnnotationValidationError:
                 continue
+            # Lineage divergence must see portable relationship fields that the
+            # delta fingerprint contract intentionally excludes (#94).
+            relationship_state = {
+                field: normalized.get(field) for field in _LINEAGE_RELATIONSHIP_FIELDS
+            }
+            relationship_json = json.dumps(
+                relationship_state,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                default=str,
+            )
+            lineage_fps.append(
+                sha256_bytes(f"lineage-v1:{state_fps[-1]}:{relationship_json}".encode())
+            )
         state_fp = state_fingerprint_from_list(state_fps)
+        lineage_fp = state_fingerprint_from_list(lineage_fps)
         snap_id = logical_id(content_hashes)
 
         anchor_seq = max(ident.cloned_at_seq, ident.forked_at_seq)
@@ -505,6 +528,7 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
             identity=ident,
             snapshot_id=snap_id,
             state_fingerprint=state_fp,
+            lineage_fingerprint=lineage_fp,
             head_seq=int(bounds["head_seq"]),
             head_event_id=str(bounds["head_event_id"]),
             event_map=event_map,
@@ -522,9 +546,10 @@ def compare_mount_lineage(source: Any, target: Any) -> dict[str, Any]:
     """Classify the relationship between two store instances (#94).
 
     Both inputs must be ``MemoryDB``-like stores (mount identity, event log,
-    rows); classification compares full event-id sequences, state fingerprints,
-    and base links. Manifests and ``MountIdentity`` values fail closed because
-    they cannot prove event-level lineage.
+    rows); classification compares full event-id sequences, state fingerprints
+    (including portable relationship fields such as ``parent_memory`` and
+    ``related_memories``), and base links. Manifests and ``MountIdentity``
+    values fail closed because they cannot prove event-level lineage.
 
     Returns a dictionary containing:
     - ``relationship``: one of ``same_replica``, ``clone``, ``fork``,
@@ -575,9 +600,9 @@ def compare_mount_lineage(source: Any, target: Any) -> dict[str, Any]:
                     "reason": "divergent_event_id_at_same_seq",
                 }
         if (
-            src.state_fingerprint
-            and dst.state_fingerprint
-            and src.state_fingerprint != dst.state_fingerprint
+            src.lineage_fingerprint
+            and dst.lineage_fingerprint
+            and src.lineage_fingerprint != dst.lineage_fingerprint
         ):
             # A replica's stored state must agree with its event lineage even
             # when the two copies stop at different sequence heads (out-of-band
@@ -626,9 +651,9 @@ def compare_mount_lineage(source: Any, target: Any) -> dict[str, Any]:
             dst.post_base_mutations > 0
             or src.post_base_mutations > 0
             or (
-                src.state_fingerprint
-                and dst.state_fingerprint
-                and src.state_fingerprint != dst.state_fingerprint
+                src.lineage_fingerprint
+                and dst.lineage_fingerprint
+                and src.lineage_fingerprint != dst.lineage_fingerprint
             )
         ):
             return {

@@ -266,3 +266,68 @@ def test_compare_mount_lineage_requires_store_handles():
     ident = MountIdentity(mount_id="mnt-1", replica_id="rep-1", history_id="hist-1")
     with pytest.raises(TypeError, match="requires MemoryDB stores"):
         compare_mount_lineage(ident, ident)
+
+
+@pytest.mark.parametrize(
+    ("column", "changed_value"),
+    (
+        ("related_memories", '["mem-related-other"]'),
+        ("parent_memory", "mem-parent-other"),
+    ),
+)
+def test_copied_store_relationship_only_divergence_is_a_fork(
+    tmp_path: Path, column: str, changed_value: str
+):
+    """#94: portable relationship fields participate in lineage divergence even
+    though delta's record_fingerprint contract excludes them."""
+    import shutil
+
+    from hotmem.events import (
+        ReplayCursorError,
+        append_event,
+        issue_replay_cursor,
+        replay_with_cursor,
+    )
+    from hotmem.interchange.fingerprint import state_fingerprint
+
+    src_path = tmp_path / "rel_src.sqlite"
+    src = MemoryDB(src_path)
+    add_memory(src, "rel/seed", "relationship lineage seed")
+    row = src.all_rows()[0]
+    append_event(
+        src,
+        event_type="memory.created",
+        occurred_at="2026-10-30T00:00:00Z",
+        memory_id=row["id"],
+        payload={"id": row["id"], "namespace": "", "content_hash": row["content_hash"]},
+    )
+    src._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    src.close()
+
+    copy_path = tmp_path / "rel_copy.sqlite"
+    shutil.copy2(src_path, copy_path)
+    src = MemoryDB(src_path)
+    copy = MemoryDB(copy_path)
+    try:
+        copy._conn.execute(
+            f"UPDATE memories SET {column} = ? WHERE id = ?",
+            (changed_value, row["id"]),
+        )
+        copy.commit()
+        before_rows = copy.count()
+
+        # The shared delta fingerprint intentionally excludes these fields.
+        assert state_fingerprint(src.all_rows()) == state_fingerprint(copy.all_rows())
+
+        result = compare_mount_lineage(src, copy)
+        assert result["relationship"] == "fork", result
+        assert result["reason"] == "divergent_state_on_copied_replica"
+
+        cursor = issue_replay_cursor(src, position="start").encode()
+        with pytest.raises(ReplayCursorError) as exc_info:
+            replay_with_cursor(src, copy, cursor=cursor)
+        assert exc_info.value.reason == "fork_diverged"
+        assert copy.count() == before_rows
+    finally:
+        src.close()
+        copy.close()
