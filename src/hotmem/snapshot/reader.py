@@ -43,11 +43,15 @@ from hotmem.interchange.hydrate import _scan_annotation_context
 from hotmem.interchange.paths import confined_relpath
 from hotmem.interchange.record import normalize_record, validate_record
 from hotmem.snapshot.format import (
+    LEGACY_SNAPSHOT_ID_VERSION,
     MANIFEST_NAME,
+    SNAPSHOT_ID_VERSION,
     Manifest,
     SnapshotChecksumError,
+    compute_legacy_snapshot_id,
     compute_overall,
-    compute_snapshot_id,
+    compute_semantic_snapshot_id_from_digests,
+    semantic_record_digest,
     sha256_file,
 )
 from hotmem.swap import HYDRATE_BATCH, HydrateResult, record_to_memory_record
@@ -186,18 +190,20 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
                     actual=fentry.sha256,
                 )
 
-    # #94: manifests carrying a portable replay cursor must also have
-    # derivation-consistent identity fields. Recompute snapshot_id and
-    # state_fingerprint from the payload so tampered metadata is rejected
-    # before hydrate. Legacy manifests without a cursor keep byte-only
-    # verification for backward compatibility.
-    if manifest.replay_cursor:
+    # #94 / #96: versioned semantic manifests (snapshot_id_version in {1, 2})
+    # and manifests carrying a portable replay cursor must have
+    # derivation-consistent identity fields. Recompute snapshot_id (under the
+    # declared or legacy algorithm) and state_fingerprint from the payload so
+    # tampered metadata is rejected before hydrate. Pre-#94 unversioned
+    # manifests without a cursor keep byte-only verification for compatibility.
+    if manifest.snapshot_id_version or manifest.replay_cursor:
         from hotmem.interchange.fingerprint import (
             record_fingerprint,
             state_fingerprint_from_list,
         )
 
         content_hashes: list[str] = []
+        semantic_digests: list[str] = []
         fingerprints: list[str] = []
         memory_count = 0
         with open(d / MEMORIES_NAME, encoding="utf-8") as f:
@@ -213,31 +219,26 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
                 if not isinstance(record, dict):
                     raise SnapshotChecksumError("malformed", file=MEMORIES_NAME)
                 content_hashes.append(str(record.get("content_hash") or ""))
-                try:
-                    normalized = normalize_record(record, default_source="snapshot")
-                    if validate_record(normalized):
+                semantic_digests.append(semantic_record_digest(record, default_source="snapshot"))
+                if manifest.replay_cursor and manifest.state_fingerprint:
+                    try:
+                        normalized = normalize_record(record, default_source="snapshot")
+                        if validate_record(normalized):
+                            continue
+                        fingerprints.append(record_fingerprint(normalized))
+                    except AnnotationValidationError:
                         continue
-                    fingerprints.append(record_fingerprint(normalized))
-                except AnnotationValidationError:
-                    continue
 
-        if manifest.memory_count and memory_count != manifest.memory_count:
+        if (manifest.memory_count or manifest.snapshot_id_version) and (
+            memory_count != manifest.memory_count
+        ):
             raise SnapshotChecksumError(
                 "mismatch",
                 file="memory_count",
                 expected=f"count={manifest.memory_count}",
                 actual=f"count={memory_count}",
             )
-        if manifest.snapshot_id:
-            computed_snapshot_id = compute_snapshot_id(content_hashes)
-            if computed_snapshot_id != manifest.snapshot_id:
-                raise SnapshotChecksumError(
-                    "mismatch",
-                    file="snapshot_id",
-                    expected=manifest.snapshot_id,
-                    actual=computed_snapshot_id,
-                )
-        if manifest.state_fingerprint:
+        if manifest.replay_cursor and manifest.state_fingerprint:
             computed_fp = state_fingerprint_from_list(fingerprints)
             if computed_fp != manifest.state_fingerprint:
                 raise SnapshotChecksumError(
@@ -245,6 +246,42 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
                     file="state_fingerprint",
                     expected=manifest.state_fingerprint,
                     actual=computed_fp,
+                )
+        if manifest.snapshot_id_version == SNAPSHOT_ID_VERSION:
+            computed_snapshot_id = compute_semantic_snapshot_id_from_digests(
+                semantic_digests,
+                file_backed_references=manifest.file_backed_references,
+                scope=manifest.scope,
+            )
+            if not manifest.snapshot_id or computed_snapshot_id != manifest.snapshot_id:
+                raise SnapshotChecksumError(
+                    "mismatch",
+                    file="snapshot_id",
+                    expected=manifest.snapshot_id,
+                    actual=computed_snapshot_id,
+                )
+        elif manifest.snapshot_id_version == LEGACY_SNAPSHOT_ID_VERSION:
+            computed_legacy_id = compute_legacy_snapshot_id(content_hashes)
+            if not manifest.snapshot_id or computed_legacy_id != manifest.snapshot_id:
+                raise SnapshotChecksumError(
+                    "mismatch",
+                    file="snapshot_id",
+                    expected=manifest.snapshot_id,
+                    actual=computed_legacy_id,
+                )
+        elif manifest.snapshot_id:
+            computed_legacy_id = compute_legacy_snapshot_id(content_hashes)
+            computed_semantic_id = compute_semantic_snapshot_id_from_digests(
+                semantic_digests,
+                file_backed_references=manifest.file_backed_references,
+                scope=manifest.scope,
+            )
+            if manifest.snapshot_id not in (computed_legacy_id, computed_semantic_id):
+                raise SnapshotChecksumError(
+                    "mismatch",
+                    file="snapshot_id",
+                    expected=manifest.snapshot_id,
+                    actual=computed_legacy_id,
                 )
 
     return manifest

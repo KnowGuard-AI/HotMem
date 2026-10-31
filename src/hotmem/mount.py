@@ -443,6 +443,7 @@ def bootstrap_mount(
 class _LineageProbe:
     identity: MountIdentity
     snapshot_id: str
+    semantic_snapshot_id: str
     state_fingerprint: str
     lineage_fingerprint: str
     head_seq: int
@@ -467,6 +468,11 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
             state_fingerprint_from_list,
         )
         from hotmem.interchange.record import normalize_record
+        from hotmem.snapshot.format import (
+            FileReference,
+            compute_semantic_snapshot_id_from_digests,
+            semantic_record_digest,
+        )
 
         ident = target.mount_identity()
         bounds = target.event_log_bounds()
@@ -474,12 +480,27 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
         # Stream rows to keep lineage checks O(batch) instead of loading every
         # memory row and every event payload into memory (#94).
         content_hashes: list[str] = []
+        semantic_digests: list[str] = []
+        derived_file_refs: list[FileReference] = []
         state_fps: list[str] = []
         lineage_fps: list[str] = []
         for row in target.iter_rows(include_embedding=False):
             content_hash = str(row.get("content_hash") or "")
             if content_hash:
                 content_hashes.append(content_hash)
+            semantic_digests.append(semantic_record_digest(row, default_source="snapshot"))
+            if str(row.get("memory_type") or "") == "file" and row.get("source_uri"):
+                derived_file_refs.append(
+                    FileReference(
+                        memory_id=str(row.get("id") or ""),
+                        source_uri=str(row.get("source_uri") or ""),
+                        byte_offset=int(row.get("byte_offset") or 0),
+                        byte_length=int(row.get("byte_length") or 0),
+                        source_format=row.get("source_format"),
+                        source_checksum=row.get("source_checksum"),
+                        attachment=None,
+                    )
+                )
             try:
                 normalized = normalize_record(row)
                 state_fps.append(record_fingerprint(normalized))
@@ -491,6 +512,10 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
         state_fp = state_fingerprint_from_list(state_fps)
         lineage_fp = state_fingerprint_from_list(lineage_fps)
         snap_id = logical_id(content_hashes)
+        semantic_snap_id = compute_semantic_snapshot_id_from_digests(
+            semantic_digests,
+            file_backed_references=derived_file_refs,
+        )
 
         anchor_seq = max(ident.cloned_at_seq, ident.forked_at_seq)
         event_map: dict[int, str] = {}
@@ -522,6 +547,7 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
         return _LineageProbe(
             identity=ident,
             snapshot_id=snap_id,
+            semantic_snapshot_id=semantic_snap_id,
             state_fingerprint=state_fp,
             lineage_fingerprint=lineage_fp,
             head_seq=int(bounds["head_seq"]),
@@ -621,14 +647,16 @@ def compare_mount_lineage(source: Any, target: Any) -> dict[str, Any]:
         (t_id.base_source_replica_id and t_id.base_source_replica_id == s_id.replica_id)
         or (
             t_id.base_snapshot_id
-            and t_id.base_snapshot_id in (src.snapshot_id, s_id.base_snapshot_id)
+            and t_id.base_snapshot_id
+            in (src.snapshot_id, src.semantic_snapshot_id, s_id.base_snapshot_id)
         )
     )
     src_cloned_from_dst = bool(
         (s_id.base_source_replica_id and s_id.base_source_replica_id == t_id.replica_id)
         or (
             s_id.base_snapshot_id
-            and s_id.base_snapshot_id in (dst.snapshot_id, t_id.base_snapshot_id)
+            and s_id.base_snapshot_id
+            in (dst.snapshot_id, dst.semantic_snapshot_id, t_id.base_snapshot_id)
         )
     )
     explicit_fork_link = bool(

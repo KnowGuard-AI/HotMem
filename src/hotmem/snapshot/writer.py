@@ -34,13 +34,16 @@ from hotmem import __version__
 from hotmem.db import MemoryDB
 from hotmem.snapshot.format import (
     ATTACH_THRESHOLD,
+    SNAPSHOT_ID_ALGORITHM,
+    SNAPSHOT_ID_VERSION,
     AttachmentEntry,
     FileEntry,
     FileReference,
     Manifest,
     MetadataInfo,
     compute_overall,
-    compute_snapshot_id,
+    compute_semantic_snapshot_id_from_digests,
+    semantic_record_digest,
     sha256_bytes,
     sha256_file,
 )
@@ -167,7 +170,7 @@ def write_snapshot_v2(
             state_fingerprint_from_list,
         )
 
-        content_hashes: list[str] = []
+        record_semantic_digests: list[str] = []
         record_fingerprints: list[str] = []
         file_references: list[FileReference] = []
         copied: dict[str, str] = {}  # attachment filename -> memory_id (for trace)
@@ -228,8 +231,9 @@ def write_snapshot_v2(
                 else:
                     inline_count += 1
 
-                if rec["content_hash"]:
-                    content_hashes.append(rec["content_hash"])
+                record_semantic_digests.append(
+                    semantic_record_digest(rec, default_source="snapshot")
+                )
 
                 line = json.dumps(rec, sort_keys=True, default=str) + "\n"
                 encoded = line.encode("utf-8")
@@ -282,7 +286,11 @@ def write_snapshot_v2(
                     )
 
         overall = compute_overall({name: e.sha256 for name, e in per_file.items()})
-        snapshot_id = compute_snapshot_id(content_hashes)
+        snapshot_id = compute_semantic_snapshot_id_from_digests(
+            record_semantic_digests,
+            file_backed_references=file_references,
+            scope=export_scope,
+        )
         ident = db.mount_identity()
         state_fp = state_fingerprint_from_list(record_fingerprints)
         scope_candidate = export_scope.get("namespace") if isinstance(export_scope, dict) else None
@@ -304,6 +312,8 @@ def write_snapshot_v2(
 
         manifest = Manifest(
             snapshot_id=snapshot_id,
+            snapshot_id_version=SNAPSHOT_ID_VERSION,
+            snapshot_id_algorithm=SNAPSHOT_ID_ALGORITHM,
             created_at=_utc_now_iso(),
             hotmem_version=__version__,
             memory_count=memory_count,

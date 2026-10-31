@@ -1634,7 +1634,7 @@ def test_hydrate_duplicate_records_remains_a_clone_not_a_fork(tmp_path: Path):
         )
         manifest["memory_count"] = len(records)
         manifest["inline_count"] = int(manifest.get("inline_count") or 0) + 1
-        manifest["snapshot_id"] = compute_snapshot_id([r["content_hash"] for r in records])
+        manifest["snapshot_id"] = compute_snapshot_id(records)
         manifest["state_fingerprint"] = state_fingerprint_from_list(
             [record_fingerprint(r) for r in records]
         )
@@ -1706,3 +1706,90 @@ def test_snapshot_same_mount_bootstrap_clone_records_clone_lineage_and_replays(
         assert compare_mount_lineage(populated_db, clone)["relationship"] == "clone"
     finally:
         clone.close()
+
+
+# ── Semantic snapshot identity (#96) ─────────────────────────────────────────
+
+
+def test_semantic_snapshot_id_distinguishes_namespace_and_preserves_legacy_v1_and_lineage(
+    tmp_path: Path,
+):
+    """#96 MVT-1: semantic snapshot_id (v2) distinguishes identical content_hash
+    across namespaces and portable state while keeping legacy v1 manifests and
+    #94 clone/cursor lineage compatible."""
+    from hotmem.interchange.canonical import compute_content_hash
+    from hotmem.mount import compare_mount_lineage
+    from hotmem.snapshot.format import (
+        LEGACY_SNAPSHOT_ID_ALGORITHM,
+        LEGACY_SNAPSHOT_ID_VERSION,
+        SNAPSHOT_ID_ALGORITHM,
+        SNAPSHOT_ID_VERSION,
+        compute_legacy_snapshot_id,
+    )
+
+    ch = compute_content_hash("shared/topic", "Identical fact across namespaces.")
+    db_a = MemoryDB(tmp_path / "ns_a.sqlite")
+    db_b = MemoryDB(tmp_path / "ns_b.sqlite")
+    try:
+        for db_inst, ns, state in ((db_a, "ns/alpha", "HOT"), (db_b, "ns/beta", "READY")):
+            db_inst.insert(
+                id="same-id-1",
+                identifier="shared/topic",
+                fact_text="Identical fact across namespaces.",
+                embedding=pack_embedding(embed_text("Identical fact across namespaces.")),
+                embedding_dim=EMBEDDING_DIM,
+                embedding_model=EMBEDDING_MODEL,
+                source="agent://test",
+                importance=0.5,
+                metadata_json="{}",
+                content_hash=ch,
+                created_at="2026-10-30T10:00:00Z",
+                namespace=ns,
+                tier="hot",
+                promotion_state=state,
+                promotion_candidate=0,
+            )
+
+        snap_a = tmp_path / "snap_a"
+        snap_b = tmp_path / "snap_b"
+        snapshot(db_a, snap_a)
+        snapshot(db_b, snap_b)
+
+        man_a = verify_manifest(snap_a)
+        man_b = verify_manifest(snap_b)
+        assert man_a.snapshot_id_version == SNAPSHOT_ID_VERSION
+        assert man_a.snapshot_id_algorithm == SNAPSHOT_ID_ALGORITHM
+        assert man_a.snapshot_id != man_b.snapshot_id
+        assert man_a.snapshot_id != compute_legacy_snapshot_id([ch])
+
+        # Fallback base_snapshot_id lineage check works for both v2 semantic ID
+        # and legacy v1 content-hash-list ID even without base_source_replica_id.
+        clone_v2 = MemoryDB(tmp_path / "clone_v2.sqlite")
+        clone_v1 = MemoryDB(tmp_path / "clone_v1.sqlite")
+        try:
+            hydrate(clone_v2, snap_a)
+            clone_v2._conn.execute("DELETE FROM store_meta WHERE key = 'base_source_replica_id'")
+            clone_v2.commit()
+            assert compare_mount_lineage(db_a, clone_v2)["relationship"] == "clone"
+
+            # Convert snap_a manifest to explicit v1 legacy content-hash-list identity.
+            raw_man = json.loads((snap_a / MANIFEST_NAME).read_text(encoding="utf-8"))
+            raw_man["snapshot_id"] = compute_legacy_snapshot_id([ch])
+            raw_man["snapshot_id_version"] = LEGACY_SNAPSHOT_ID_VERSION
+            raw_man["snapshot_id_algorithm"] = LEGACY_SNAPSHOT_ID_ALGORITHM
+            (snap_a / MANIFEST_NAME).write_text(
+                json.dumps(raw_man, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+            )
+            verified_v1 = verify_manifest(snap_a)
+            assert verified_v1.snapshot_id_version == LEGACY_SNAPSHOT_ID_VERSION
+
+            hydrate(clone_v1, snap_a)
+            clone_v1._conn.execute("DELETE FROM store_meta WHERE key = 'base_source_replica_id'")
+            clone_v1.commit()
+            assert compare_mount_lineage(db_a, clone_v1)["relationship"] == "clone"
+        finally:
+            clone_v2.close()
+            clone_v1.close()
+    finally:
+        db_a.close()
+        db_b.close()
