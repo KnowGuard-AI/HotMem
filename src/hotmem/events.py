@@ -99,6 +99,23 @@ class ReplayCursorError(ValueError):
         super().__init__(f"{reason}: {message} (recovery: {self.recovery})")
 
 
+def _require_persistent_identity(ident: Any, where: str) -> None:
+    """Fail with an actionable diagnostic when a store has no persistent identity (#94)."""
+    if not (ident.mount_id and ident.replica_id and ident.history_id):
+        raise ReplayCursorError(
+            "no_persistent_identity",
+            f"{where} store has no persistent mount/replica/history identity "
+            "(pre-#94 database or read-only open).",
+            expected="persisted mount_id, replica_id, and history_id",
+            actual={
+                "mount_id": ident.mount_id,
+                "replica_id": ident.replica_id,
+                "history_id": ident.history_id,
+            },
+            recovery="Open the store once in writable mode to initialize its identity.",
+        )
+
+
 def _normalize_event_types(event_types: Sequence[str] | None) -> tuple[str, ...]:
     if event_types is None:
         return DEFAULT_REPLAY_EVENT_TYPES
@@ -447,6 +464,7 @@ def issue_replay_cursor(
       exist in ``db`` when ``n > 0``).
     """
     ident = db.mount_identity()
+    _require_persistent_identity(ident, "Source")
     bounds = db.event_log_bounds()
     trimmed_through = int(bounds["trimmed_through_seq"])
     resolved_base = base_snapshot_id if base_snapshot_id is not None else ident.base_snapshot_id
@@ -691,6 +709,7 @@ def validate_replay_cursor(
     """
     decoded = decode_cursor(cursor)
     src_ident = db.mount_identity()
+    _require_persistent_identity(src_ident, "Source")
     src_bounds = db.event_log_bounds()
 
     if not allow_legacy_history and src_ident.legacy_history:

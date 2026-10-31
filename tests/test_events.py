@@ -1355,3 +1355,33 @@ def test_empty_and_legacy_histories_contract(tmp_path: Path):
     finally:
         reopened.close()
         leg_target.close()
+
+
+def test_read_only_store_without_identity_fails_with_actionable_diagnostic(tmp_path: Path):
+    """#94: identity cannot be backfilled on a read-only connection; report it."""
+    from hotmem.events import ReplayCursorError, issue_replay_cursor
+
+    db_path = tmp_path / "readonly_legacy.sqlite"
+    db = MemoryDB(db_path)
+    _emit_created_fact(db, 1)
+    db._conn.execute(
+        "DELETE FROM store_meta "
+        "WHERE key IN ('mount_id', 'replica_id', 'history_id', 'legacy_history')"
+    )
+    db.commit()
+    db.close()
+
+    read_only = MemoryDB(db_path, read_only=True)
+    try:
+        with pytest.raises(ReplayCursorError) as exc_info:
+            issue_replay_cursor(read_only)
+        assert exc_info.value.reason == "no_persistent_identity"
+        assert "writable" in exc_info.value.recovery
+    finally:
+        read_only.close()
+
+    writable = MemoryDB(db_path)
+    try:
+        assert issue_replay_cursor(writable).mount_id.startswith("mnt-")
+    finally:
+        writable.close()

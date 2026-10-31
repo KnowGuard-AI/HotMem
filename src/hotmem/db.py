@@ -470,20 +470,45 @@ class MemoryDB:
 
         self._ensure_mount_identity()
 
-    def _discover_mount_manifest_id(self) -> str:
-        """Read ``mount_id`` from a sibling mount ``manifest.json`` if present."""
+    def _mount_manifest_file(self) -> Path | None:
+        """Return the sibling mount manifest path when this DB lives in a mount."""
         if not self.db_path or self.db_path == ":memory:":
-            return ""
+            return None
         try:
             manifest_path = Path(self.db_path).resolve().parent / "manifest.json"
             if not manifest_path.is_file():
-                return ""
+                return None
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict) or data.get("format"):
-                return ""
+                return None
+            return manifest_path
+        except Exception:
+            return None
+
+    def _discover_mount_manifest_id(self) -> str:
+        """Read ``mount_id`` from a sibling mount ``manifest.json`` if present."""
+        manifest_path = self._mount_manifest_file()
+        if manifest_path is None:
+            return ""
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
             return str(data.get("mount_id") or "").strip()
         except Exception:
             return ""
+
+    def _backfill_mount_manifest_id(self, mount_id: str) -> None:
+        """Persist the store's logical mount_id into a legacy mount manifest."""
+        manifest_path = self._mount_manifest_file()
+        if manifest_path is None:
+            return
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(data, dict) or data.get("mount_id") == mount_id:
+            return
+        data["mount_id"] = mount_id
+        manifest_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
 
     def _ensure_mount_identity(self) -> None:
         """Ensure logical mount_id, runtime replica_id, and history_id exist in store_meta (#94)."""
@@ -493,6 +518,7 @@ class MemoryDB:
         existing_replica_id = self.get_meta("replica_id")
         existing_history_id = self.get_meta("history_id")
         manifest_mount_id = self._discover_mount_manifest_id()
+        manifest_file = self._mount_manifest_file()
         dirty = False
 
         if not existing_mount_id:
@@ -505,9 +531,28 @@ class MemoryDB:
                 self.set_meta("mount_id", manifest_mount_id, _commit=False)
                 self.set_meta("mount_bound", "1", _commit=False)
             else:
-                self.set_meta("mount_id", new_mount_id(), _commit=False)
+                minted_mount_id = new_mount_id()
+                self.set_meta("mount_id", minted_mount_id, _commit=False)
+                if manifest_file is not None:
+                    # Legacy mount manifest: persist the DB's identity so the
+                    # directory remains portable (#94).
+                    self._backfill_mount_manifest_id(minted_mount_id)
+                    self.set_meta("mount_bound", "1", _commit=False)
             dirty = True
-        elif manifest_mount_id and existing_mount_id == manifest_mount_id:
+        elif manifest_mount_id and existing_mount_id != manifest_mount_id:
+            raise ValueError(
+                f"Store at {self.db_path} is bound to mount_id={existing_mount_id!r}, "
+                f"but its mount manifest declares mount_id={manifest_mount_id!r}; "
+                "refusing to mix logical identities."
+            )
+        elif manifest_mount_id:
+            if self.get_meta("mount_bound") != "1":
+                self.set_meta("mount_bound", "1", _commit=False)
+                dirty = True
+        elif manifest_file is not None:
+            # A mount directory with a legacy manifest: backfill the manifest
+            # from the store's authoritative identity.
+            self._backfill_mount_manifest_id(existing_mount_id)
             if self.get_meta("mount_bound") != "1":
                 self.set_meta("mount_bound", "1", _commit=False)
                 dirty = True
@@ -1037,10 +1082,12 @@ class MemoryDB:
         keep_mount_id: bool = True,
         _commit: bool = True,
     ) -> Any:
-        """Record a database/history replacement for the mount (#94).
+        """Record a history replacement for the mount (#94).
 
-        Rotates ``replica_id`` and ``history_id`` and clears clone/fork base
-        links so cursors bound to the replaced history fail closed before mutation.
+        Rotates ``replica_id`` and ``history_id``, clears clone/fork base links
+        and retention watermarks, and starts a new history epoch. Existing
+        event rows remain as immutable audit history; cursors bound to the
+        previous replica/history ids fail closed before mutation.
         """
         from hotmem.mount import new_history_id, new_mount_id, new_replica_id
 
@@ -1525,6 +1572,7 @@ class MemoryDB:
                         "last_known_head_event_id", str(head_row["event_id"]), _commit=False
                     )
         self._conn.commit()
+        self._conn.execute("PRAGMA recursive_triggers = ON")
         self._conn.execute(
             "CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events "
             "BEGIN SELECT RAISE(ABORT, 'events table is append-only: DELETE is forbidden'); END"

@@ -732,3 +732,81 @@ def test_pre_94_database_with_rows_marks_legacy_history_on_open(tmp_path):
         assert ident.legacy_history is True
     finally:
         reopened.close()
+
+
+def test_mount_manifest_identity_mismatch_fails_closed(tmp_path):
+    import json
+
+    from hotmem.mount import bootstrap_mount
+
+    mount_dir = tmp_path / "mismatch_mount"
+    cfg = bootstrap_mount(mount_dir, mount_id="mnt-original")
+    db = MemoryDB(cfg.db_path)
+    assert db.mount_identity().mount_id == "mnt-original"
+    db.close()
+
+    manifest = json.loads(cfg.manifest_path.read_text())
+    manifest["mount_id"] = "mnt-other"
+    cfg.manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="refusing to mix logical identities"):
+        MemoryDB(cfg.db_path)
+
+
+def test_legacy_mount_manifest_is_backfilled_from_store_identity(tmp_path):
+    import json
+
+    from hotmem.mount import bootstrap_mount
+
+    mount_dir = tmp_path / "legacy_mount_94"
+    mount_dir.mkdir()
+    manifest_path = mount_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "hotmem_version": "0.1.0",
+                "created_at": "2024-01-01T00:00:00Z",
+                "mount_path": str(mount_dir),
+            }
+        )
+    )
+    cfg = bootstrap_mount(mount_dir)
+    assert cfg.mount_id == ""
+
+    db = MemoryDB(cfg.db_path)
+    try:
+        ident = db.mount_identity()
+        assert ident.mount_id.startswith("mnt-")
+        assert ident.mount_bound is True
+    finally:
+        db.close()
+
+    persisted = json.loads(manifest_path.read_text())
+    assert persisted["mount_id"] == ident.mount_id
+    assert persisted["created_at"] == "2024-01-01T00:00:00Z"
+
+    reopened = MemoryDB(cfg.db_path)
+    try:
+        assert reopened.mount_identity().mount_id == ident.mount_id
+    finally:
+        reopened.close()
+
+
+def test_trim_events_restores_recursive_triggers_pragma(tmp_path):
+    db = MemoryDB(tmp_path / "pragma.sqlite")
+    try:
+        db.append_event(
+            event_id="evt-1",
+            event_type="memory.created",
+            occurred_at="2026-10-30T00:00:00Z",
+        )
+        db.append_event(
+            event_id="evt-2",
+            event_type="memory.created",
+            occurred_at="2026-10-30T00:00:00Z",
+        )
+        db.trim_events_before_seq(2)
+        enabled = db._conn.execute("PRAGMA recursive_triggers").fetchone()[0]
+        assert int(enabled) == 1
+    finally:
+        db.close()
