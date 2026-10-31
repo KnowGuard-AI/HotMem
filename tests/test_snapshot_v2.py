@@ -2610,3 +2610,54 @@ def test_semantic_snapshot_id_is_independent_of_attachment_bundling(tmp_path: Pa
         file_backed_references=plain.file_backed_references,
         scope=plain.scope,
     )
+
+
+def test_lineage_fallback_reproduces_scoped_semantic_base_snapshot_id(tmp_path: Path):
+    """#96 review: a scoped/attachment-bundled snapshot must still classify as a
+    clone when the replica-id anchor is absent, and a fork must still diverge."""
+    from hotmem.mount import compare_mount_lineage
+    from hotmem.swap import add_memory
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    data = workspace / "slice.bin"
+    data.write_bytes(b"abcdefghij" * 20)
+
+    src = MemoryDB(tmp_path / "lineage_src.sqlite")
+    snap_dir = tmp_path / "lineage_snap"
+    try:
+        add_memory(src, "lineage/inline", "Scoped lineage fallback.")
+        add_file_backed(
+            src,
+            "lineage/slice",
+            FileRef(source_uri=str(data), byte_offset=0, byte_length=40, source_format="bin"),
+            summary="scoped slice",
+        )
+        scope = {"namespace": "ops", "permitted_namespaces": ["ops", "public"]}
+        snapshot(src, snap_dir, copy_attachments=True, base_dir=workspace, export_scope=scope)
+    finally:
+        src.close()
+
+    clone = MemoryDB(tmp_path / "lineage_clone.sqlite")
+    try:
+        hydrate(clone, snap_dir)
+        assert json.loads(clone.get_meta("base_snapshot_scope")) == {
+            "namespace": "ops",
+            "permitted_namespaces": ["ops", "public"],
+        }
+        clone._conn.execute("DELETE FROM store_meta WHERE key = 'base_source_replica_id'")
+        clone.commit()
+
+        reopened_src = MemoryDB(tmp_path / "lineage_src.sqlite")
+        try:
+            result = compare_mount_lineage(reopened_src, clone)
+            assert result["relationship"] == "clone"
+            assert result["reason"] == "clean_clone_of_mount"
+
+            add_memory(clone, "lineage/fork", "Local divergence after clone.")
+            forked = compare_mount_lineage(reopened_src, clone)
+            assert forked["relationship"] != "clone"
+        finally:
+            reopened_src.close()
+    finally:
+        clone.close()

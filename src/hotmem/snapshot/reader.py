@@ -52,6 +52,7 @@ from hotmem.snapshot.format import (
     compute_overall,
     compute_semantic_snapshot_id_from_digests,
     semantic_record_digest,
+    semantic_scope_projection,
     sha256_file,
 )
 from hotmem.swap import HYDRATE_BATCH, HydrateResult, record_to_memory_record
@@ -457,6 +458,14 @@ def hydrate_v2(
             if record_clone:
                 from hotmem.interchange.fingerprint import state_fingerprint
 
+                # Persist the semantic identity inputs (#96) so lineage
+                # comparison can reproduce this manifest's snapshot_id.
+                scope_projection = semantic_scope_projection(manifest.scope)
+                base_scope = (
+                    json.dumps(scope_projection, sort_keys=True, separators=(",", ":"))
+                    if scope_projection is not None
+                    else ""
+                )
                 # Lineage must describe the state actually loaded (skipped
                 # duplicates/invalid records make the manifest fingerprint an
                 # unreliable base anchor).
@@ -467,6 +476,7 @@ def hydrate_v2(
                     base_snapshot_id=manifest.snapshot_id,
                     base_state_fingerprint=state_fingerprint(db.all_rows()),
                     base_cursor=manifest.replay_cursor,
+                    base_snapshot_scope=base_scope,
                     adopt_mount_id=(target_namespace is None),
                     _commit=False,
                 )
