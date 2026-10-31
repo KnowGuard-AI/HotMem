@@ -223,3 +223,47 @@ def test_op_records_carry_full_canonical_state(base_pkg: Path, src_db: MemoryDB,
     assert len(rec["embedding"]) > 0
     assert rec["embedding_dim"] == EMBEDDING_DIM
     assert rec["embedding_model"] == EMBEDDING_MODEL
+
+
+def test_delta_cursor_is_anchored_to_producer_source_not_delta_base(tmp_path: Path):
+    """#94: a delta produced against another base package must still emit a
+    source cursor that validates against the producing store itself."""
+    from hotmem.events import decode_cursor, validate_replay_cursor
+    from hotmem.interchange.delta import verify_delta
+    from hotmem.interchange.hydrate import PackageError, hydrate_package
+    from hotmem.swap import add_memory
+
+    base_a = MemoryDB(tmp_path / "base_a.sqlite")
+    base_b = MemoryDB(tmp_path / "base_b.sqlite")
+    add_memory(base_a, "base-a", "base A fact")
+    add_memory(base_b, "base-b", "base B fact")
+    pkg_a = tmp_path / "pkg_a"
+    pkg_b = tmp_path / "pkg_b"
+    write_package(base_a, pkg_a)
+    write_package(base_b, pkg_b)
+
+    src = MemoryDB(tmp_path / "cursor_src.sqlite")
+    hydrate_package(src, pkg_a)
+    add_memory(src, "later", "record added after base hydrate")
+    delta_dir = tmp_path / "delta_cursor"
+    produce_delta(src, pkg_b, delta_dir)
+
+    manifest = json.loads((delta_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    token = manifest["source"]["replay_cursor"]
+    decoded = decode_cursor(token)
+    source_base = src.mount_identity().base_snapshot_id
+    base_b_logical = json.loads((pkg_b / PKG_MANIFEST).read_text(encoding="utf-8"))["logical_id"]
+
+    assert decoded.base_snapshot_id == source_base
+    assert decoded.base_snapshot_id != base_b_logical
+    assert validate_replay_cursor(src, token).seq == decoded.seq
+    assert verify_delta(delta_dir).manifest["source"]["replay_cursor"] == token
+
+    manifest["source"]["replica_id"] = "rep-tampered"
+    (delta_dir / MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(PackageError) as exc_info:
+        verify_delta(delta_dir)
+    assert exc_info.value.reason == "cursor_manifest_mismatch"
+
+    for db in (base_a, base_b, src):
+        db.close()

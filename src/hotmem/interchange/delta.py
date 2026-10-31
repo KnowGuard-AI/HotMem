@@ -175,12 +175,13 @@ def produce_delta(
             from hotmem.events import ReplayCursorError, issue_replay_cursor
 
             ident = db.mount_identity()
-            base_lid = str(base.manifest.get("logical_id") or "")
             try:
+                # Anchor to the source store's own base, not the delta base
+                # package: validate_replay_cursor must accept this token against
+                # the producing store itself (#94).
                 cursor_token = issue_replay_cursor(
                     db,
                     position="head",
-                    base_snapshot_id=base_lid,
                 ).encode()
             except ReplayCursorError:
                 cursor_token = ""
@@ -394,12 +395,24 @@ def _load_delta_manifest(pkg: Path) -> dict[str, Any]:
                 detail=str(err),
             ) from err
         block_mount = str(block.get("mount_id") or "")
-        if block_mount and decoded.mount_id != block_mount:
+        block_replica = str(block.get("replica_id") or "")
+        block_history = str(block.get("history_id") or "")
+        if (
+            (block_mount and decoded.mount_id != block_mount)
+            or (block_replica and decoded.replica_id != block_replica)
+            or (block_history and decoded.history_id != block_history)
+        ):
             raise PackageError(
                 "cursor_manifest_mismatch",
                 file=MANIFEST_NAME,
-                expected=f"{block_name}.mount_id={block_mount!r}",
-                actual=decoded.mount_id,
+                expected=(
+                    f"{block_name}.mount_id={block_mount!r}, "
+                    f"replica_id={block_replica!r}, history_id={block_history!r}"
+                ),
+                actual=(
+                    f"mount_id={decoded.mount_id!r}, replica_id={decoded.replica_id!r}, "
+                    f"history_id={decoded.history_id!r}"
+                ),
             )
     return manifest
 
