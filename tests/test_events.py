@@ -1163,6 +1163,35 @@ def test_reusing_completed_cursor_is_idempotent(tmp_path: Path):
         target.close()
 
 
+def test_replay_rejects_unbound_target_with_local_rows(tmp_path: Path):
+    """#94: replay must not adopt the source mount identity for a target that
+    already holds local records; that would launder foreign state as clone base."""
+    from hotmem.events import ReplayCursorError, replay_with_cursor
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    target = MemoryDB(tmp_path / "target.sqlite")
+    try:
+        _emit_created_fact(src, 1)
+        target.insert(
+            id="local-1",
+            identifier="local",
+            fact_text="foreign local row",
+            embedding=b"",
+            content_hash="local-hash",
+        )
+        target_mount = target.mount_identity().mount_id
+
+        with pytest.raises(ReplayCursorError) as exc_info:
+            replay_with_cursor(src, target)
+        assert exc_info.value.reason == "incompatible_base"
+        assert target.count() == 1
+        assert target.mount_identity().mount_id == target_mount
+        assert target.get_memory("local-1") is not None
+    finally:
+        src.close()
+        target.close()
+
+
 def test_advanced_cursor_into_target_without_base_state_is_rejected(tmp_path: Path):
     """#94: an advanced (mid/head) cursor must not replay a suffix into a target
     that has no event history or matching base checkpoint."""

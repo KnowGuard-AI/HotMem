@@ -1052,6 +1052,38 @@ def replay_with_cursor(
         if page["next_seq"] is None or len(events) < 500:
             break
 
+    # Replay is a one-way clone operation. An unbound target that already holds
+    # rows is allowed only when every existing row is a duplicate of a source
+    # record (dedupe replay); foreign local rows would otherwise be laundered
+    # into the new clone base and mount identity (#94).
+    tgt_ident_for_guard = target_db.mount_identity()
+    tgt_saved_for_guard = (
+        target_db.get_meta("last_replay_cursor") or target_db.get_meta("base_cursor") or ""
+    )
+    if (
+        not tgt_ident_for_guard.mount_bound
+        and target_db.event_log_bounds()["head_seq"] == 0
+        and not tgt_saved_for_guard
+        and target_db.count() > 0
+    ):
+        source_keys = {target_db.record_identity_key(rec) for rec in records_to_apply}
+        foreign_keys = {
+            target_db.record_identity_key(row) for row in target_db.all_rows()
+        } - source_keys
+        if foreign_keys:
+            sample = sorted(key[1] or key[0] for key in foreign_keys)[:5]
+            raise ReplayCursorError(
+                "incompatible_base",
+                "Target contains local records that are not part of the source replay; "
+                "refusing to adopt the source mount identity and mix state.",
+                expected="empty target or a bound clone of the source mount",
+                actual=f"{len(foreign_keys)} foreign record(s), e.g. {sample}",
+                recovery=(
+                    "Replay into a clean target, or hydrate this store from its own "
+                    "mount snapshot before replaying."
+                ),
+            )
+
     next_cursor = ReplayCursor(
         version=validated.version,
         mount_id=validated.mount_id,
