@@ -170,8 +170,10 @@ def logical_id(content_hashes: list[str]) -> str:
     SHA-256 over the sorted content_hash concatenation: equal for equivalent
     content sets regardless of record order, compression, export time, or
     embeddings. This is a content-set digest, not the per-record identity
-    tuple; it does not encode namespaces (#100). Same algorithm as Snapshot
-    v2's ``snapshot_id``.
+    tuple; it does not encode namespaces (#100). Same algorithm as the legacy
+    Snapshot v2 v1 ``snapshot_id`` (``compute_legacy_snapshot_id``); v2
+    semantic identities (``hotmem-snapshot-id-v2``, #96) cover portable record
+    state and namespace scope instead.
     """
     return sha256_bytes("".join(sorted(content_hashes)).encode())
 

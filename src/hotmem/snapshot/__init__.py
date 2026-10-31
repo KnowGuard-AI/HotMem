@@ -41,7 +41,17 @@ from hotmem.embed import Embedder
 from hotmem.interchange.hydrate import PackageError, hydrate_package, verify_package
 from hotmem.interchange.package import FORMAT_ID as PACKAGE_FORMAT_ID
 from hotmem.interchange.package import MANIFEST_NAME as PACKAGE_MANIFEST_NAME
-from hotmem.snapshot.format import SnapshotChecksumError
+from hotmem.snapshot.format import (
+    LEGACY_SNAPSHOT_ID_ALGORITHM,
+    LEGACY_SNAPSHOT_ID_VERSION,
+    SNAPSHOT_ID_ALGORITHM,
+    SNAPSHOT_ID_VERSION,
+    SnapshotChecksumError,
+    compute_legacy_snapshot_id,
+    compute_semantic_snapshot_id,
+    semantic_record_projection,
+    semantic_snapshot_projection,
+)
 from hotmem.snapshot.reader import MANIFEST_NAME, MEMORIES_NAME, detect_v2, hydrate_v2
 from hotmem.snapshot.reader import verify_manifest as verify_v2_manifest
 from hotmem.snapshot.writer import write_snapshot_v2
@@ -250,6 +260,10 @@ def verify(path: str | Path) -> dict:
             "valid": True,
             "record_count": manifest.memory_count,
             "snapshot_id": manifest.snapshot_id,
+            # Report exactly what the manifest declares: 0/"" means
+            # unversioned (pre-#96), not an assumed v1 algorithm.
+            "snapshot_id_version": manifest.snapshot_id_version,
+            "snapshot_id_algorithm": manifest.snapshot_id_algorithm,
             "payload": MEMORIES_NAME,
         }
     raise ValueError(f"not a verifiable snapshot directory: {path} (detected {fmt})")
@@ -257,13 +271,21 @@ def verify(path: str | Path) -> dict:
 
 __all__ = [
     "HydrateResult",
+    "LEGACY_SNAPSHOT_ID_ALGORITHM",
+    "LEGACY_SNAPSHOT_ID_VERSION",
     "PackageError",
+    "SNAPSHOT_ID_ALGORITHM",
+    "SNAPSHOT_ID_VERSION",
     "SnapshotChecksumError",
     "SnapshotResult",
+    "compute_legacy_snapshot_id",
+    "compute_semantic_snapshot_id",
     "detect_bundle",
     "detect_format",
     "detect_v2",
     "hydrate",
+    "semantic_record_projection",
+    "semantic_snapshot_projection",
     "snapshot",
     "verify",
 ]

@@ -443,6 +443,9 @@ def bootstrap_mount(
 class _LineageProbe:
     identity: MountIdentity
     snapshot_id: str
+    record_digests: list[str]
+    file_references: list[Any]
+    base_scope: dict[str, Any] | None
     state_fingerprint: str
     lineage_fingerprint: str
     head_seq: int
@@ -467,13 +470,29 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
             state_fingerprint_from_list,
         )
         from hotmem.interchange.record import normalize_record
+        from hotmem.snapshot.format import FileReference, semantic_record_digest
 
         ident = target.mount_identity()
         bounds = target.event_log_bounds()
 
+        # A snapshot's semantic id (#96) also covers the export's namespace
+        # scope, which is not derivable from rows. Hydration persists it so
+        # clone-base comparison can reproduce the manifest digest exactly.
+        get_meta = getattr(target, "get_meta", None)
+        base_scope: dict[str, Any] | None = None
+        if callable(get_meta):
+            raw_scope = get_meta("base_snapshot_scope") or ""
+            if raw_scope:
+                with contextlib.suppress(json.JSONDecodeError, TypeError):
+                    parsed_scope = json.loads(raw_scope)
+                    if isinstance(parsed_scope, dict):
+                        base_scope = parsed_scope
+
         # Stream rows to keep lineage checks O(batch) instead of loading every
         # memory row and every event payload into memory (#94).
         content_hashes: list[str] = []
+        semantic_digests: list[str] = []
+        derived_file_refs: list[FileReference] = []
         state_fps: list[str] = []
         lineage_fps: list[str] = []
         for row in target.iter_rows(include_embedding=False):
@@ -482,12 +501,28 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
                 content_hashes.append(content_hash)
             try:
                 normalized = normalize_record(row)
-                state_fps.append(record_fingerprint(normalized))
+            except AnnotationValidationError:
+                normalized = None
+            semantic_digests.append(
+                semantic_record_digest(row, default_source="snapshot", normalized=normalized)
+            )
+            if str(row.get("memory_type") or "") == "file" and row.get("source_uri"):
+                derived_file_refs.append(
+                    FileReference(
+                        memory_id=str(row.get("id") or ""),
+                        source_uri=str(row.get("source_uri") or ""),
+                        byte_offset=int(row.get("byte_offset") or 0),
+                        byte_length=int(row.get("byte_length") or 0),
+                        source_format=row.get("source_format"),
+                        source_checksum=row.get("source_checksum"),
+                        attachment=None,
+                    )
+                )
+            if normalized is not None:
+                state_fps.append(record_fingerprint(normalized, normalized=normalized))
                 # Lineage divergence also sees portable relationship fields
                 # that the delta fingerprint contract intentionally excludes.
-                lineage_fps.append(lineage_record_fingerprint(normalized))
-            except AnnotationValidationError:
-                continue
+                lineage_fps.append(lineage_record_fingerprint(normalized, normalized=normalized))
         state_fp = state_fingerprint_from_list(state_fps)
         lineage_fp = state_fingerprint_from_list(lineage_fps)
         snap_id = logical_id(content_hashes)
@@ -522,6 +557,9 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
         return _LineageProbe(
             identity=ident,
             snapshot_id=snap_id,
+            record_digests=semantic_digests,
+            file_references=derived_file_refs,
+            base_scope=base_scope,
             state_fingerprint=state_fp,
             lineage_fingerprint=lineage_fp,
             head_seq=int(bounds["head_seq"]),
@@ -534,6 +572,21 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
         "compare_mount_lineage requires MemoryDB stores with event history; "
         f"got {type(target).__name__}. Hydrate the manifest/package into a store "
         "and compare the stores, or compare persisted identity fields directly."
+    )
+
+
+def _semantic_probe_id(probe: _LineageProbe, scope: dict[str, Any] | None) -> str:
+    """Recompute a semantic snapshot id over probe rows under ``scope`` (#96).
+
+    The scope belongs to the *base snapshot* being tested (persisted on the
+    clone), not to the store whose rows are being hashed.
+    """
+    from hotmem.snapshot.format import compute_semantic_snapshot_id_from_digests
+
+    return compute_semantic_snapshot_id_from_digests(
+        probe.record_digests,
+        file_backed_references=probe.file_references,
+        scope=scope,
     )
 
 
@@ -621,14 +674,24 @@ def compare_mount_lineage(source: Any, target: Any) -> dict[str, Any]:
         (t_id.base_source_replica_id and t_id.base_source_replica_id == s_id.replica_id)
         or (
             t_id.base_snapshot_id
-            and t_id.base_snapshot_id in (src.snapshot_id, s_id.base_snapshot_id)
+            and t_id.base_snapshot_id
+            in (
+                src.snapshot_id,
+                _semantic_probe_id(src, dst.base_scope),
+                s_id.base_snapshot_id,
+            )
         )
     )
     src_cloned_from_dst = bool(
         (s_id.base_source_replica_id and s_id.base_source_replica_id == t_id.replica_id)
         or (
             s_id.base_snapshot_id
-            and s_id.base_snapshot_id in (dst.snapshot_id, t_id.base_snapshot_id)
+            and s_id.base_snapshot_id
+            in (
+                dst.snapshot_id,
+                _semantic_probe_id(dst, src.base_scope),
+                t_id.base_snapshot_id,
+            )
         )
     )
     explicit_fork_link = bool(

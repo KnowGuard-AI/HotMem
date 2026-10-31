@@ -709,6 +709,19 @@ def test_package_byte_integrity_and_semantic_record_fidelity_are_separate_proper
         verify_manifest(snap_dir)
     assert exc_fp.value.file == "state_fingerprint"
 
+    # Re-sealing state_fingerprint while leaving snapshot_id stale still fails
+    # verification under #96's canonical semantic snapshot identity.
+    from hotmem.interchange.fingerprint import state_fingerprint_from_list
+
+    orig_state_fp = mdata["state_fingerprint"]
+    mdata["state_fingerprint"] = state_fingerprint_from_list([record_fingerprint(rec_dict)])
+    manifest_path.write_text(json.dumps(mdata, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError) as exc_snap_id:
+        verify_manifest(snap_dir)
+    assert exc_snap_id.value.file == "snapshot_id"
+    mdata["state_fingerprint"] = orig_state_fp
+    manifest_path.write_text(json.dumps(mdata, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
     # Property B: Restore exact semantic record (validate_record == [] and
     # record_fingerprint == orig_fp), but append a harmless newline so file bytes
     # differ from manifest. Semantic validation of the record PASSES, while

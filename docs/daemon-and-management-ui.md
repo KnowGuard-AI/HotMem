@@ -895,9 +895,12 @@ Portable mount identity and opaque `hmc1` replay cursors are delivered in
 workspace identity vs. `replica_id` runtime SQLite instance vs. `history_id`
 event-log epoch vs. `runtime_generation` process lifespan vs. `store_id` daemon
 routing; multi-writer ordering and conflict resolution remain intentionally
-undefined). Portable-state acceptance continues across
+undefined). Canonical semantic Snapshot v2 identity (`snapshot_id_version: 2`,
+`hotmem-snapshot-id-v2` over all 27 `#99` `preserve` columns, attachment
+references, and semantic namespace scope, with explicit v1 legacy compatibility)
+is delivered in [#96](https://github.com/KnowGuard-AI/HotMem/issues/96).
+Portable-state acceptance continues across
 [#95](https://github.com/KnowGuard-AI/HotMem/issues/95),
-[#96](https://github.com/KnowGuard-AI/HotMem/issues/96),
 [#97](https://github.com/KnowGuard-AI/HotMem/issues/97),
 [#98](https://github.com/KnowGuard-AI/HotMem/issues/98),
 [#99](https://github.com/KnowGuard-AI/HotMem/issues/99), and

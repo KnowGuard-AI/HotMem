@@ -1634,7 +1634,7 @@ def test_hydrate_duplicate_records_remains_a_clone_not_a_fork(tmp_path: Path):
         )
         manifest["memory_count"] = len(records)
         manifest["inline_count"] = int(manifest.get("inline_count") or 0) + 1
-        manifest["snapshot_id"] = compute_snapshot_id([r["content_hash"] for r in records])
+        manifest["snapshot_id"] = compute_snapshot_id(records)
         manifest["state_fingerprint"] = state_fingerprint_from_list(
             [record_fingerprint(r) for r in records]
         )

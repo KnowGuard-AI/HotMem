@@ -980,6 +980,7 @@ class MemoryDB:
         base_snapshot_id: str = "",
         base_state_fingerprint: str = "",
         base_cursor: str = "",
+        base_snapshot_scope: str = "",
         adopt_mount_id: bool = True,
         _commit: bool = True,
     ) -> Any:
@@ -1010,6 +1011,14 @@ class MemoryDB:
             self.set_meta("base_history_id", src_history, _commit=False)
         if base_snapshot_id:
             self.set_meta("base_snapshot_id", base_snapshot_id, _commit=False)
+        # Semantic snapshot identity (#96) is derived from record state plus
+        # the snapshot's namespace scope and reference projection. Persist the
+        # latter so lineage comparison can reproduce the manifest digest
+        # exactly, including for scoped exports.
+        # Clear an earlier scope when the new base is unscoped. Empty
+        # snapshots can be hydrated repeatedly into the same clean store, so
+        # truthy-only writes would leave the previous semantic base behind.
+        self.set_meta("base_snapshot_scope", base_snapshot_scope or "", _commit=False)
         if base_state_fingerprint:
             self.set_meta("base_state_fingerprint", base_state_fingerprint, _commit=False)
         # Clone-base lineage includes portable relationship fields so a hydrated
@@ -1039,6 +1048,7 @@ class MemoryDB:
         base_snapshot_id: str = "",
         base_state_fingerprint: str = "",
         base_cursor: str = "",
+        base_snapshot_scope: str = "",
         _commit: bool = True,
     ) -> Any:
         """Restore a mount from a snapshot/package: keep mount_id, rotate replica/history (#94)."""
@@ -1053,6 +1063,7 @@ class MemoryDB:
             base_snapshot_id=base_snapshot_id,
             base_state_fingerprint=base_state_fingerprint,
             base_cursor=base_cursor,
+            base_snapshot_scope=base_snapshot_scope,
             adopt_mount_id=True,
             _commit=_commit,
         )

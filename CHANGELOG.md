@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed (snapshot identity, contract)
+
+- Snapshot v2 `snapshot_id` is now a canonical semantic digest
+  (`snapshot_id_version: 2`, `hotmem-snapshot-id-v2`) over the 27 portable
+  fields from `MEMORY_FIELD_INVENTORY` (#99), file-reference state, and the
+  semantic namespace scope (#96). Reordering records or JSON keys, attachment
+  bundling, packaging timestamps, and regenerated embeddings do not change it;
+  legacy content-hash-list manifests stay verifiable under an explicit v1
+  compatibility rule.
+- Manifests now declare `snapshot_id_version`/`snapshot_id_algorithm`; a
+  declared `state_fingerprint` is verified even without a replay cursor.
+  `hmc1` v1 cursors are unchanged, and clone bindings persist the base
+  snapshot's semantic scope so lineage comparison reproduces v2 ids.
+
 ### Security
 
 - Daemon mode authenticates before disclosing the store id, and scoped
