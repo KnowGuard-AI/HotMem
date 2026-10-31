@@ -139,6 +139,7 @@ def _write_payload(
     fetchmany batches and written one line at a time (interchange
     #67/#69 streaming requirement).
     """
+    from hotmem.annotations import AnnotationValidationError
     from hotmem.interchange.fingerprint import record_fingerprint
 
     content_hashes: list[str] = []
@@ -158,7 +159,9 @@ def _write_payload(
         hasher.update(data)
         sink.write(data)
         content_hashes.append(row["content_hash"] or "")
-        with contextlib.suppress(Exception):
+        # Only annotation-invalid rows are excluded from the state fingerprint
+        # (they are still exported and counted). Unexpected failures surface.
+        with contextlib.suppress(AnnotationValidationError):
             record_fingerprints.append(record_fingerprint(rec))
         if row.get("embedding"):
             # Legacy rows may carry a blob with an empty model string -- the

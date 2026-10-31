@@ -160,6 +160,7 @@ def write_snapshot_v2(
         # Streaming export (interchange #67): rows stream in id order
         # (fetchmany batches) and the payload digest is computed while
         # writing — one pass, O(batch) memory.
+        from hotmem.annotations import AnnotationValidationError
         from hotmem.events import ReplayCursorError, issue_replay_cursor
         from hotmem.interchange.fingerprint import (
             record_fingerprint,
@@ -189,7 +190,10 @@ def write_snapshot_v2(
                     row = transformed
                 rec = _row_to_record(row)
                 memory_count += 1
-                with contextlib.suppress(Exception):
+                # Only annotation-invalid rows are excluded from the state
+                # fingerprint (they are still exported and counted); other
+                # failures must surface instead of silently weakening identity.
+                with contextlib.suppress(AnnotationValidationError):
                     record_fingerprints.append(record_fingerprint(rec))
 
                 if rec["memory_type"] == "file":

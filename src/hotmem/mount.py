@@ -129,6 +129,12 @@ class MountIdentity:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> MountIdentity:
+        def _as_int(value: Any) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
         source_block = data.get("source") if isinstance(data.get("source"), Mapping) else {}
         return cls(
             mount_id=str(data.get("mount_id") or source_block.get("mount_id") or ""),
@@ -149,10 +155,10 @@ class MountIdentity:
             base_history_id=str(data.get("base_history_id") or ""),
             base_cursor=str(data.get("base_cursor") or data.get("replay_cursor") or ""),
             parent_replica_id=str(data.get("parent_replica_id") or ""),
-            forked_at_seq=int(data.get("forked_at_seq") or 0),
+            forked_at_seq=_as_int(data.get("forked_at_seq")),
             forked_at_event_id=str(data.get("forked_at_event_id") or ""),
-            cloned_at_seq=int(data.get("cloned_at_seq") or 0),
-            trimmed_through_seq=int(data.get("trimmed_through_seq") or 0),
+            cloned_at_seq=_as_int(data.get("cloned_at_seq")),
+            trimmed_through_seq=_as_int(data.get("trimmed_through_seq")),
             legacy_history=bool(data.get("legacy_history", False)),
             mount_bound=bool(data.get("mount_bound", False)),
         )

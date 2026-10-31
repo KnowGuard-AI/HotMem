@@ -244,3 +244,17 @@ def test_copied_replica_with_different_head_and_imported_state_is_a_fork(tmp_pat
     finally:
         src.close()
         copy.close()
+
+
+def test_mount_identity_from_dict_tolerates_malformed_numeric_fields():
+    ident = MountIdentity.from_dict(
+        {
+            "mount_id": "mnt-1",
+            "replica_id": "rep-1",
+            "history_id": "hist-1",
+            "forked_at_seq": "not-a-number",
+            "cloned_at_seq": None,
+            "trimmed_through_seq": {"bad": "type"},
+        }
+    )
+    assert (ident.forked_at_seq, ident.cloned_at_seq, ident.trimmed_through_seq) == (0, 0, 0)

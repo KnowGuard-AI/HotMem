@@ -258,11 +258,15 @@ Snapshot v2 manifests carry additive lineage and replay cursor fields:
   distinct `replica_id`.
 - `history_id`: source replica event-log epoch (`hist-<hex>`). Regenerated
   whenever a replica is cloned, restored, forked, or replaced.
-- `state_fingerprint`: canonical state fingerprint over the exported records.
+- `state_fingerprint`: canonical state fingerprint over exported records that
+  fingerprint successfully (annotation-invalid rows are exported and counted but
+  excluded from this digest).
 - `replay_cursor`: opaque, versioned `hmc1.<payload>.<checksum>` replay cursor
   bound to `(mount_id, replica_id, history_id, base_snapshot_id, scope, seq,
   anchor_event_id)`. The checksum detects accidental corruption only; it is not
   authentication. Cursors and manifests must be treated as untrusted input.
+  Scope (`namespace`, `event_types`) is fixed at issuance; replay callers cannot
+  narrow it later.
 
 Derived identity fields on a manifest that carries `replay_cursor` are verified
 against the payload during `verify_manifest` (`snapshot_id`, `memory_count`,
