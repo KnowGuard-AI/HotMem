@@ -268,3 +268,58 @@ def test_package_manifest_carries_mount_identity_and_replay_cursor_and_rejects_t
     with pytest.raises(PackageError) as exc_info:
         verify_package(out)
     assert exc_info.value.reason == "invalid_cursor"
+
+
+def test_same_mount_bootstrap_clone_records_clone_lineage_and_replays(
+    src_db: MemoryDB, tmp_path: Path
+):
+    """#94: bootstrapping a mount with the source mount_id and hydrating its
+    package must record clone lineage (not replacement) and accept cursor replay."""
+    from hotmem.events import _build_memory_created_payload, append_event, replay_with_cursor
+    from hotmem.interchange.hydrate import hydrate_package
+    from hotmem.mount import bootstrap_mount, compare_mount_lineage
+    from hotmem.swap import add_memory
+
+    for memory_id in ("m1", "m2"):
+        row = src_db.get_memory(memory_id)
+        assert row is not None
+        append_event(
+            src_db,
+            event_type="memory.created",
+            memory_id=memory_id,
+            namespace=row.get("namespace") or "",
+            payload=_build_memory_created_payload(row),
+        )
+
+    out = tmp_path / "pkg_same_mount"
+    write_package(src_db, out)
+    src_mount = src_db.mount_identity().mount_id
+
+    clone_mount = tmp_path / "clone_mount"
+    bootstrap_mount(clone_mount, mount_id=src_mount)
+    clone = MemoryDB(clone_mount / "hotmem.sqlite")
+    try:
+        assert clone.mount_identity().mount_bound is True
+        hydrate_package(clone, out)
+        assert clone.count() == 2
+        lineage = compare_mount_lineage(src_db, clone)
+        assert lineage["relationship"] == "clone", lineage
+        assert clone.mount_identity().base_source_replica_id == src_db.mount_identity().replica_id
+        assert clone.mount_identity().base_snapshot_id
+
+        add_memory(src_db, "later", "record created after export")
+        new_row = src_db.all_rows(include_embedding=True)[-1]
+        append_event(
+            src_db,
+            event_type="memory.created",
+            memory_id=new_row["id"],
+            namespace=new_row.get("namespace") or "",
+            payload=_build_memory_created_payload(new_row),
+        )
+        res = replay_with_cursor(src_db, clone)
+        assert res.applied == 1
+        assert res.completed is True
+        assert clone.count() == 3
+        assert compare_mount_lineage(src_db, clone)["relationship"] == "clone"
+    finally:
+        clone.close()

@@ -1553,3 +1553,53 @@ def test_snapshot_v2_manifest_carries_mount_identity_and_replay_cursor(
     with pytest.raises(SnapshotChecksumError) as exc_info2:
         verify_manifest(bad_dir)
     assert exc_info2.value.file == "replay_cursor"
+
+
+def test_snapshot_same_mount_bootstrap_clone_records_clone_lineage_and_replays(
+    populated_db: MemoryDB, tmp_path: Path
+):
+    """#94: snapshot hydrate into a bootstrapped same-mount clone records clone
+    lineage and accepts cursor replay, instead of being classified replacement."""
+    from hotmem.events import _build_memory_created_payload, append_event, replay_with_cursor
+    from hotmem.mount import bootstrap_mount, compare_mount_lineage
+    from hotmem.swap import add_memory
+
+    for row in populated_db.all_rows(include_embedding=True):
+        append_event(
+            populated_db,
+            event_type="memory.created",
+            memory_id=row["id"],
+            namespace=row.get("namespace") or "",
+            payload=_build_memory_created_payload(row),
+        )
+
+    snap_dir = tmp_path / "snap_same_mount"
+    snapshot(populated_db, snap_dir)
+    src_mount = populated_db.mount_identity().mount_id
+
+    clone_mount = tmp_path / "snap_clone_mount"
+    bootstrap_mount(clone_mount, mount_id=src_mount)
+    clone = MemoryDB(clone_mount / "hotmem.sqlite")
+    try:
+        hydrate(clone, snap_dir)
+        lineage = compare_mount_lineage(populated_db, clone)
+        assert lineage["relationship"] == "clone", lineage
+        assert clone.mount_identity().base_source_replica_id == (
+            populated_db.mount_identity().replica_id
+        )
+
+        add_memory(populated_db, "snap-later", "created after snapshot export")
+        new_row = populated_db.all_rows(include_embedding=True)[-1]
+        append_event(
+            populated_db,
+            event_type="memory.created",
+            memory_id=new_row["id"],
+            namespace=new_row.get("namespace") or "",
+            payload=_build_memory_created_payload(new_row),
+        )
+        res = replay_with_cursor(populated_db, clone)
+        assert res.applied == 1
+        assert res.completed is True
+        assert compare_mount_lineage(populated_db, clone)["relationship"] == "clone"
+    finally:
+        clone.close()

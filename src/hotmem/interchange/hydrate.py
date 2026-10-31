@@ -366,10 +366,21 @@ def hydrate_package(
     pkg_dir = Path(pkg_dir)
     with Timer() as t:
         verified = verify_package(pkg_dir)
-        was_empty = (
-            db.count() == 0
-            and db.event_log_bounds()["head_seq"] == 0
-            and not db.mount_identity().mount_bound
+        pkg_source = (
+            verified.manifest.get("source")
+            if isinstance(verified.manifest.get("source"), dict)
+            else {}
+        )
+        pkg_mount_id = str(verified.manifest.get("mount_id") or pkg_source.get("mount_id") or "")
+        tgt_ident = db.mount_identity()
+        is_empty_store = db.count() == 0 and db.event_log_bounds()["head_seq"] == 0
+        # A clean store may receive clone lineage even when it is already bound
+        # to the same logical mount (the supported bootstrap-then-hydrate clone
+        # workflow). A store bound to a different mount keeps its own identity.
+        record_clone = bool(
+            is_empty_store
+            and pkg_mount_id
+            and (not tgt_ident.mount_bound or tgt_ident.mount_id == pkg_mount_id)
         )
 
         counters = {
@@ -483,15 +494,7 @@ def hydrate_package(
                 if len(pending) >= HYDRATE_BATCH:
                     flush()
             flush()
-            pkg_source = (
-                verified.manifest.get("source")
-                if isinstance(verified.manifest.get("source"), dict)
-                else {}
-            )
-            pkg_mount_id = str(
-                verified.manifest.get("mount_id") or pkg_source.get("mount_id") or ""
-            )
-            if was_empty and pkg_mount_id:
+            if record_clone:
                 from hotmem.interchange.fingerprint import state_fingerprint
 
                 manifest_fp = str(verified.manifest.get("state_fingerprint") or "")

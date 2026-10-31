@@ -213,10 +213,15 @@ def hydrate_v2(
         if not memories_path.is_file():
             raise SnapshotChecksumError("missing_file", file=MEMORIES_NAME)
 
-        was_empty = (
-            db.count() == 0
-            and db.event_log_bounds()["head_seq"] == 0
-            and not db.mount_identity().mount_bound
+        tgt_ident = db.mount_identity()
+        is_empty_store = db.count() == 0 and db.event_log_bounds()["head_seq"] == 0
+        # A clean store may receive clone lineage even when it is already bound
+        # to the same logical mount (the supported bootstrap-then-hydrate clone
+        # workflow). A store bound to a different mount keeps its own identity.
+        record_clone = bool(
+            is_empty_store
+            and manifest.mount_id
+            and (not tgt_ident.mount_bound or tgt_ident.mount_id == manifest.mount_id)
         )
 
         counters = {
@@ -343,7 +348,7 @@ def hydrate_v2(
                     if len(pending) >= HYDRATE_BATCH:
                         flush()
             flush()
-            if was_empty and manifest.mount_id:
+            if record_clone:
                 from hotmem.interchange.fingerprint import state_fingerprint
 
                 base_fp = (
