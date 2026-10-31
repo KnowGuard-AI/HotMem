@@ -29,7 +29,7 @@ Interface:
      semantic_record_projection(record) -> dict
      semantic_snapshot_projection(records, ...) -> dict
 
-Deps: stdlib + hotmem.interchange.canonical / record
+Deps: stdlib + hotmem.annotations + hotmem.interchange.canonical / record
 Extension: bump SCHEMA_VERSION and add fields here for future formats.
 """
 

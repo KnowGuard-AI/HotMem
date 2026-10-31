@@ -260,10 +260,10 @@ def verify(path: str | Path) -> dict:
             "valid": True,
             "record_count": manifest.memory_count,
             "snapshot_id": manifest.snapshot_id,
-            "snapshot_id_version": manifest.snapshot_id_version or LEGACY_SNAPSHOT_ID_VERSION,
-            "snapshot_id_algorithm": (
-                manifest.snapshot_id_algorithm or LEGACY_SNAPSHOT_ID_ALGORITHM
-            ),
+            # Report exactly what the manifest declares: 0/"" means
+            # unversioned (pre-#96), not an assumed v1 algorithm.
+            "snapshot_id_version": manifest.snapshot_id_version,
+            "snapshot_id_algorithm": manifest.snapshot_id_algorithm,
             "payload": MEMORIES_NAME,
         }
     raise ValueError(f"not a verifiable snapshot directory: {path} (detected {fmt})")

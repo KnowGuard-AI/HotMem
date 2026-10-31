@@ -129,8 +129,9 @@ Three digest layers, computed in this order:
    encode namespaces (#100); it is not a per-record identity check. Snapshot v2
    manifests (`hotmem-snapshot-v2`) additionally version their `snapshot_id`
    with `snapshot_id_version: 2` (`hotmem-snapshot-id-v2`, issue #96) over all
-   27 `preserve` columns, attachment references, and semantic namespace scope
-   (see `docs/snapshot-v2.md`).
+   27 `preserve` columns, file-reference state, and semantic namespace scope
+   (see `docs/snapshot-v2.md`). Attachment bundling is packaging and does not
+   participate in identity.
 3. **File**: per-file `{size, sha256}` of the bytes actually stored, plus
    `decompressed_sha256` for compressed payloads.
 

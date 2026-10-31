@@ -231,14 +231,22 @@ Hydration semantics (shared with the interchange contract,
 
 ## Determinism
 
-Identical DBs produce byte-identical `memories.jsonl` and `attachments/`
-contents, and an identical `snapshot_id`. `memories.jsonl` is always written as
-raw UTF-8 with LF (`\n`) record terminators on every platform (including
-Windows) so on-disk file sizes and SHA-256 digests match `manifest.json`
-regardless of host OS newline conventions. `manifest.json` bytes may differ by
-the informational `created_at`/`hotmem_version` fields, and `metadata.json`
-by `created_at`/`host` — neither is checksummed, so verification and logical
-identity are unaffected.
+Identical DBs exported with the same semantic scope produce byte-identical
+`memories.jsonl` and `attachments/` contents and an identical v2 `snapshot_id`.
+`memories.jsonl` is always written as raw UTF-8 with LF (`\n`) record
+terminators on every platform (including Windows) so on-disk file sizes and
+SHA-256 digests match `manifest.json` regardless of host OS newline
+conventions.
+
+Semantic `snapshot_id` is independent of packaging choices: bundling byte
+ranges (`copy_attachments`), attachment filenames, packaging timestamps
+(`created_at`), `hotmem_version`, `metadata.json`, and regenerated embedding
+columns never change it. It does depend on the semantic namespace scope
+(`namespace`, `permitted_namespaces`) recorded in `scope`, so exporting the
+same DB under different scopes yields different identities.
+`manifest.json` bytes may differ by the informational `created_at`/
+`hotmem_version` fields, and `metadata.json` by `created_at`/`host` — neither
+is checksummed, so byte verification is unaffected.
 
 ## Legacy compatibility
 
@@ -287,16 +295,26 @@ identity** (`(namespace, content_hash)`, #100), **delta CAS fingerprinting**
      `-0.0` to `0.0`, normalizes `source_uri` via `normalize_source_uri`, and
      resolves omitted/null values to their documented defaults while preserving
      explicit `source: ""` and `byte_offset: 0` / `byte_length: 0`.
+   - Lifecycle enums default only when absent or blank (`tier` -> `"hot"`,
+     `promotion_state` -> `"HOT"`); invalid non-blank values are preserved
+     verbatim so distinct invalid states never collide with a real default.
+     Non-object `provenance` is preserved as `{"value": ...}` (mirroring
+     metadata) rather than silently dropped.
    - Domain prefix: `hotmem-snapshot-record-v2:<canonical_json>`.
 2. **Snapshot envelope (`semantic_snapshot_projection` /
    `compute_semantic_snapshot_id`)**:
    - `records`: ascending-sorted list of per-record `semantic_record_digest`
      hex strings (order-independent over `memories.jsonl` lines; duplicate
-     logical records are preserved as a deterministic sorted multiset).
+     logical records are preserved as a deterministic sorted multiset). Note
+     that hydration deduplicates by `(namespace, content_hash)`, so a snapshot
+     containing duplicate logical records does not reproduce its `snapshot_id`
+     when re-exported from the hydrated store.
    - `file_backed_references`: canonically sorted list of projected
      `FileReference` dicts (`memory_id`, normalized `source_uri`,
-     `byte_offset`, `byte_length`, `source_format`, `source_checksum`,
-     `attachment`).
+     `byte_offset`, `byte_length`, `source_format`, `source_checksum`).
+     The `attachment` binding is deliberately excluded: bundling bytes is a
+     packaging choice, while the referenced slice is identified by the
+     reference fields above.
    - `scope`: `{"namespace": ..., "permitted_namespaces": [...]}` when a
      semantic namespace filter is present, or `null` when unscoped (excluding
      transient caller/session/counter fields).
@@ -312,11 +330,17 @@ identity** (`(namespace, content_hash)`, #100), **delta CAS fingerprinting**
    - `snapshot_id_version: 1` (`"hotmem-snapshot-id-v1"`): recomputes and
      enforces the legacy v1 content-hash-list digest
      (`compute_legacy_snapshot_id`).
+   - A declared `state_fingerprint` is always verified, including on
+     versioned manifests whose history was trimmed and therefore carry no
+     `replay_cursor`.
    - Unversioned legacy manifests: cursor-bearing (#94) manifests verify
      against the v1 (or v2) digest; pre-#94 cursorless manifests preserve
-     byte-integrity compatibility. Unknown or mismatched
-     `(snapshot_id_version, snapshot_id_algorithm)` metadata fails closed with
-     `SnapshotChecksumError("malformed")`.
+     byte-integrity compatibility. `hotmem verify` reports the manifest's
+     declared `snapshot_id_version`/`snapshot_id_algorithm` (`0`/`""` when
+     unversioned).
+   - Unknown or mismatched `(snapshot_id_version, snapshot_id_algorithm)`
+     metadata fails closed with `SnapshotChecksumError("malformed")`, as does a
+     record whose semantic projection cannot be coerced.
 
 ## Portable mount identity and replay cursors (issue #94)
 
@@ -342,10 +366,11 @@ Snapshot v2 manifests carry additive lineage and replay cursor fields:
   Scope (`namespace`, `event_types`) is fixed at issuance; replay callers cannot
   narrow it later.
 
-Derived identity fields on a manifest that carries `replay_cursor` are verified
-against the payload during `verify_manifest` (`snapshot_id`, `memory_count`,
-`state_fingerprint`), and identity fields are required alongside the cursor.
-Legacy manifests without a cursor keep byte-only verification.
+Versioned (v1/v2) manifests and manifests carrying `replay_cursor` have their
+derived identity fields verified against the payload during `verify_manifest`
+(`snapshot_id`, `memory_count`, and any declared `state_fingerprint`); identity
+fields are required alongside the cursor. Pre-#94 manifests with neither a
+version nor a cursor keep byte-only verification.
 
 Verification and hydration rules:
 
@@ -356,9 +381,11 @@ Verification and hydration rules:
   `replica_id`, and `history_id` before any record is read. Legacy pre-#94
   manifests without `replay_cursor` remain readable.
 - Hydrating into an empty/clean store adopts `mount_id` (when `target_namespace`
-  is unset) and records `base_snapshot_id`, `base_state_fingerprint`,
-  `base_source_replica_id`, `base_history_id`, and `base_cursor`, establishing
-  a `"clone"` relationship (`compare_mount_lineage`).
+  is unset) and records `base_snapshot_id`, `base_snapshot_scope` (the
+  semantic namespace scope needed to reproduce a v2 `snapshot_id`),
+  `base_state_fingerprint`, `base_source_replica_id`, `base_history_id`, and
+  `base_cursor`, establishing a `"clone"` relationship
+  (`compare_mount_lineage`).
 - Independent local writes on a cloned replica transition its lineage to
   `"fork"`. Multi-writer ordering and automatic fork conflict resolution are
   intentionally undefined; cursor replay against a wrong source, stale/trimmed
