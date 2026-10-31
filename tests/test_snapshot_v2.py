@@ -1554,6 +1554,15 @@ def test_snapshot_v2_manifest_carries_mount_identity_and_replay_cursor(
         verify_manifest(bad_dir)
     assert exc_info2.value.file == "replay_cursor"
 
+    # A cursor without its identity fields is rejected.
+    no_identity = dict(raw_manifest)
+    for key in ("mount_id", "replica_id", "history_id"):
+        no_identity.pop(key, None)
+    (bad_dir / MANIFEST_NAME).write_text(json.dumps(no_identity), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError) as exc_no_ident:
+        verify_manifest(bad_dir)
+    assert exc_no_ident.value.file == "replay_cursor"
+
     # Derived identity fields are recomputed from the payload for #94 exports.
     for field, value in (("state_fingerprint", "f" * 64), ("snapshot_id", "0" * 64)):
         tampered = dict(raw_manifest)

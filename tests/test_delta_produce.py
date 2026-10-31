@@ -265,5 +265,11 @@ def test_delta_cursor_is_anchored_to_producer_source_not_delta_base(tmp_path: Pa
         verify_delta(delta_dir)
     assert exc_info.value.reason == "cursor_manifest_mismatch"
 
+    manifest["source"].pop("mount_id", None)
+    (delta_dir / MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(PackageError) as exc_no_ident:
+        verify_delta(delta_dir)
+    assert exc_no_ident.value.reason == "missing_cursor_identity"
+
     for db in (base_a, base_b, src):
         db.close()

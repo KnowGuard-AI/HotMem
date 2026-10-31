@@ -840,6 +840,11 @@ def test_cursor_versioning_and_corruption_rejection(tmp_path: Path):
         with pytest.raises(ReplayCursorError) as exc_chk:
             decode_cursor(f"hmc1.{parts[1]}.00000000")
         assert exc_chk.value.reason == "malformed_cursor"
+
+        # Oversized tokens are rejected before parsing.
+        with pytest.raises(ReplayCursorError) as exc_big:
+            decode_cursor("hmc1." + ("a" * (64 * 1024 + 1)) + ".00000000")
+        assert exc_big.value.reason == "malformed_cursor"
     finally:
         src.close()
 

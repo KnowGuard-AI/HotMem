@@ -307,6 +307,13 @@ class Manifest:
         if cursor_str:
             from hotmem.events import ReplayCursorError, decode_cursor
 
+            if not (mount_id_str and replica_id_str and history_id_str):
+                raise SnapshotChecksumError(
+                    "missing_metadata",
+                    file="replay_cursor",
+                    expected="mount_id, replica_id, and history_id alongside replay_cursor",
+                    actual="missing identity field(s)",
+                )
             try:
                 decoded = decode_cursor(cursor_str)
             except ReplayCursorError as err:

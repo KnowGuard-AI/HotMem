@@ -261,7 +261,13 @@ Snapshot v2 manifests carry additive lineage and replay cursor fields:
 - `state_fingerprint`: canonical state fingerprint over the exported records.
 - `replay_cursor`: opaque, versioned `hmc1.<payload>.<checksum>` replay cursor
   bound to `(mount_id, replica_id, history_id, base_snapshot_id, scope, seq,
-  anchor_event_id)`.
+  anchor_event_id)`. The checksum detects accidental corruption only; it is not
+  authentication. Cursors and manifests must be treated as untrusted input.
+
+Derived identity fields on a manifest that carries `replay_cursor` are verified
+against the payload during `verify_manifest` (`snapshot_id`, `memory_count`,
+`state_fingerprint`), and identity fields are required alongside the cursor.
+Legacy manifests without a cursor keep byte-only verification.
 
 Verification and hydration rules:
 

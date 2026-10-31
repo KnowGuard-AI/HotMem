@@ -142,6 +142,18 @@ def _load_manifest(pkg: Path) -> dict[str, Any]:
     if cursor_str:
         from hotmem.events import ReplayCursorError, decode_cursor
 
+        source_block = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+        if not (
+            (manifest.get("mount_id") or source_block.get("mount_id"))
+            and (manifest.get("replica_id") or source_block.get("replica_id"))
+            and (manifest.get("history_id") or source_block.get("history_id"))
+        ):
+            raise PackageError(
+                "missing_cursor_identity",
+                file=MANIFEST_NAME,
+                expected="mount_id, replica_id, and history_id alongside replay_cursor",
+                actual="missing identity field(s)",
+            )
         try:
             decoded = decode_cursor(cursor_str)
         except ReplayCursorError as err:

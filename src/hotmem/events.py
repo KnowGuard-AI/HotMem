@@ -35,6 +35,11 @@ Event ordering:
      Multi-writer ordering and automatic fork conflict resolution are
      intentionally undefined.
 
+     Serialized cursors (``hmc1.<payload>.<checksum>``) are opaque to callers.
+     The 8-hex checksum detects accidental corruption only; it is not a
+     signature or authentication mechanism. Treat cursors and manifests as
+     untrusted input and verify source/base identity before replay.
+
 Payload contract:
      ``payload`` is a free-form dict, stored as JSON. The ``memory.created``
      payload captures the full memory row (all columns) so that replay can
@@ -66,6 +71,11 @@ from hotmem.db import MemoryDB
 CURSOR_VERSION = 1
 CURSOR_PREFIX = "hmc1"
 DEFAULT_REPLAY_EVENT_TYPES: tuple[str, ...] = ("memory.created",)
+# Untrusted cursor inputs are bounded to keep parsing cheap (resource safety).
+MAX_CURSOR_TOKEN = 64 * 1024
+MAX_CURSOR_FIELD = 512
+MAX_CURSOR_EVENT_TYPES = 256
+MAX_CURSOR_EVENT_TYPE_LEN = 128
 
 
 class ReplayCursorError(ValueError):
@@ -195,8 +205,32 @@ class ReplayCursor:
                 "malformed_cursor",
                 "Cursor base_snapshot_id must be a string.",
             )
+        for name, value in (
+            ("mount_id", self.mount_id),
+            ("replica_id", self.replica_id),
+            ("history_id", self.history_id),
+            ("anchor_event_id", self.anchor_event_id),
+            ("base_snapshot_id", self.base_snapshot_id),
+        ):
+            if len(value) > MAX_CURSOR_FIELD:
+                raise ReplayCursorError(
+                    "malformed_cursor",
+                    f"Cursor {name} exceeds {MAX_CURSOR_FIELD} characters.",
+                )
         norm_ns = _normalize_scope_namespace(self.namespace)
         norm_types = _normalize_event_types(self.event_types)
+        if len(norm_types) > MAX_CURSOR_EVENT_TYPES or any(
+            len(item) > MAX_CURSOR_EVENT_TYPE_LEN for item in norm_types
+        ):
+            raise ReplayCursorError(
+                "malformed_cursor",
+                "Cursor scope.event_types exceeds size limits.",
+            )
+        if norm_ns is not None and len(norm_ns) > MAX_CURSOR_FIELD:
+            raise ReplayCursorError(
+                "malformed_cursor",
+                f"Cursor scope.namespace exceeds {MAX_CURSOR_FIELD} characters.",
+            )
         object.__setattr__(self, "namespace", norm_ns)
         object.__setattr__(self, "event_types", norm_types)
 
@@ -300,6 +334,11 @@ def decode_cursor(raw: Any) -> ReplayCursor:
         )
 
     token = raw.strip()
+    if len(token) > MAX_CURSOR_TOKEN:
+        raise ReplayCursorError(
+            "malformed_cursor",
+            f"Replay cursor token exceeds {MAX_CURSOR_TOKEN} bytes.",
+        )
     if not token or token.lstrip("-+").isdigit():
         raise ReplayCursorError(
             "unanchored_sequence",

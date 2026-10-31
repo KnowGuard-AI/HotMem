@@ -397,6 +397,13 @@ def _load_delta_manifest(pkg: Path) -> dict[str, Any]:
         block_mount = str(block.get("mount_id") or "")
         block_replica = str(block.get("replica_id") or "")
         block_history = str(block.get("history_id") or "")
+        if not block_mount or (block_name == "source" and not (block_replica and block_history)):
+            raise PackageError(
+                "missing_cursor_identity",
+                file=MANIFEST_NAME,
+                expected=f"{block_name} identity fields alongside replay_cursor",
+                actual="missing identity field(s)",
+            )
         if (
             (block_mount and decoded.mount_id != block_mount)
             or (block_replica and decoded.replica_id != block_replica)

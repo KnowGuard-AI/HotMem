@@ -269,6 +269,17 @@ def test_package_manifest_carries_mount_identity_and_replay_cursor_and_rejects_t
         verify_package(out)
     assert exc_info.value.reason == "invalid_cursor"
 
+    # A cursor without identity metadata on the manifest/source blocks is rejected.
+    no_identity = dict(manifest)
+    for key in ("mount_id", "replica_id", "history_id"):
+        no_identity.pop(key, None)
+        no_identity["source"].pop(key, None)
+    no_identity["replay_cursor"] = manifest["replay_cursor"]
+    (out / MANIFEST_NAME).write_text(json.dumps(no_identity), encoding="utf-8")
+    with pytest.raises(PackageError) as exc_no_ident:
+        verify_package(out)
+    assert exc_no_ident.value.reason == "missing_cursor_identity"
+
 
 def test_same_mount_bootstrap_clone_records_clone_lineage_and_replays(
     src_db: MemoryDB, tmp_path: Path
