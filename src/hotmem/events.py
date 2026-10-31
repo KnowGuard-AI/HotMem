@@ -409,7 +409,32 @@ def issue_replay_cursor(
     """
     ident = db.mount_identity()
     bounds = db.event_log_bounds()
+    trimmed_through = int(bounds["trimmed_through_seq"])
     resolved_base = base_snapshot_id if base_snapshot_id is not None else ident.base_snapshot_id
+
+    # Never mint a cursor whose anchor the validator will immediately reject:
+    # a full-history start cursor is unavailable after retention trimming, and
+    # a head cursor is unusable once every replayable event has been trimmed.
+    if ((seq is None and position == "start") or seq == 0) and trimmed_through > 0:
+        raise ReplayCursorError(
+            "stale_base",
+            f"Cannot issue a start cursor: history has been trimmed through seq={trimmed_through}.",
+            expected=f"seq>={trimmed_through}",
+            actual=0,
+            recovery=(
+                "Export a full snapshot/package and hydrate a clean clone before resuming replay."
+            ),
+        )
+    if position == "head" and seq is None and int(bounds["head_seq"]) > int(bounds["max_seq"]):
+        raise ReplayCursorError(
+            "stale_base",
+            "Cannot issue a head cursor: the event history has been fully trimmed.",
+            expected="at least one replayable event",
+            actual={"head_seq": bounds["head_seq"], "max_seq": bounds["max_seq"]},
+            recovery=(
+                "Export a full snapshot/package and hydrate a clean clone before resuming replay."
+            ),
+        )
 
     if seq is not None:
         if type(seq) is not int or seq < 0:

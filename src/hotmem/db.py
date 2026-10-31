@@ -1069,6 +1069,11 @@ class MemoryDB:
         self.set_meta("forked_at_seq", "0", _commit=False)
         self.set_meta("forked_at_event_id", "", _commit=False)
         self.set_meta("cloned_at_seq", "0", _commit=False)
+        # A replacement starts a new history epoch; retention watermarks from
+        # the previous epoch must not make new cursors unusable (#94).
+        self.set_meta("trimmed_through_seq", "0", _commit=False)
+        self.set_meta("last_known_head_seq", "0", _commit=False)
+        self.set_meta("last_known_head_event_id", "", _commit=False)
         if _commit:
             self._conn.commit()
         return self.mount_identity()

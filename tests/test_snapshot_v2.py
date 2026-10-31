@@ -1564,6 +1564,33 @@ def test_snapshot_v2_manifest_carries_mount_identity_and_replay_cursor(
         assert exc_derived.value.file == field
 
 
+def test_snapshot_fully_trimmed_history_exports_without_cursor(
+    populated_db: MemoryDB, tmp_path: Path
+):
+    """#94: a fully trimmed event history cannot anchor a cursor; export must
+    omit it instead of emitting an unusable token."""
+    populated_db.append_event(
+        event_id="trim-evt",
+        event_type="memory.created",
+        occurred_at="2026-10-30T00:00:00Z",
+    )
+    assert populated_db.trim_events_by_count(0) == 1
+
+    snap_dir = tmp_path / "trimmed_snap"
+    snapshot(populated_db, snap_dir)
+    manifest = json.loads((snap_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert not manifest.get("replay_cursor")
+    assert manifest["mount_id"] == populated_db.mount_identity().mount_id
+
+    target = MemoryDB(tmp_path / "trimmed_target.sqlite")
+    try:
+        result = hydrate(target, snap_dir)
+        assert result.loaded == populated_db.count()
+        assert target.count() == populated_db.count()
+    finally:
+        target.close()
+
+
 def test_hydrate_duplicate_records_remains_a_clone_not_a_fork(tmp_path: Path):
     """#94: skipped duplicate records must not make a clean clone look divergent."""
     from hotmem.interchange.fingerprint import (

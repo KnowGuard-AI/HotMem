@@ -216,7 +216,7 @@ def write_package(
     hasher = hashlib.sha256()
 
     try:
-        from hotmem.events import issue_replay_cursor
+        from hotmem.events import ReplayCursorError, issue_replay_cursor
         from hotmem.interchange.fingerprint import state_fingerprint_from_list
 
         payload_path = staging / payload_name
@@ -251,11 +251,15 @@ def write_package(
             if isinstance(export_scope, dict) and export_scope.get("namespace")
             else None
         )
-        cursor_token = issue_replay_cursor(
-            db,
-            position="head",
-            namespace=scope_ns,
-        ).encode()
+        try:
+            cursor_token = issue_replay_cursor(
+                db,
+                position="head",
+                namespace=scope_ns,
+            ).encode()
+        except ReplayCursorError:
+            # Fully trimmed history has no replayable anchor (#94).
+            cursor_token = ""
 
         manifest = {
             "format": FORMAT_ID,

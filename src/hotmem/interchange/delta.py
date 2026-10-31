@@ -172,15 +172,18 @@ def produce_delta(
 
             removed_since_base = len(base_ids - current_ids)
             resulting = state_fingerprint_from_list(current_fingerprints)
-            from hotmem.events import issue_replay_cursor
+            from hotmem.events import ReplayCursorError, issue_replay_cursor
 
             ident = db.mount_identity()
             base_lid = str(base.manifest.get("logical_id") or "")
-            cursor_token = issue_replay_cursor(
-                db,
-                position="head",
-                base_snapshot_id=base_lid,
-            ).encode()
+            try:
+                cursor_token = issue_replay_cursor(
+                    db,
+                    position="head",
+                    base_snapshot_id=base_lid,
+                ).encode()
+            except ReplayCursorError:
+                cursor_token = ""
             base_mount_id = base.manifest.get("mount_id") or (
                 base.manifest.get("source") or {}
             ).get("mount_id")

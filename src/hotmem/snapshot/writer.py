@@ -160,7 +160,7 @@ def write_snapshot_v2(
         # Streaming export (interchange #67): rows stream in id order
         # (fetchmany batches) and the payload digest is computed while
         # writing — one pass, O(batch) memory.
-        from hotmem.events import issue_replay_cursor
+        from hotmem.events import ReplayCursorError, issue_replay_cursor
         from hotmem.interchange.fingerprint import (
             record_fingerprint,
             state_fingerprint_from_list,
@@ -286,11 +286,16 @@ def write_snapshot_v2(
             if isinstance(export_scope, dict) and export_scope.get("namespace")
             else None
         )
-        cursor_token = issue_replay_cursor(
-            db,
-            position="head",
-            namespace=scope_ns,
-        ).encode()
+        try:
+            cursor_token = issue_replay_cursor(
+                db,
+                position="head",
+                namespace=scope_ns,
+            ).encode()
+        except ReplayCursorError:
+            # Fully trimmed history has no replayable anchor; export records
+            # without a cursor rather than an unusable one (#94).
+            cursor_token = ""
 
         manifest = Manifest(
             snapshot_id=snapshot_id,

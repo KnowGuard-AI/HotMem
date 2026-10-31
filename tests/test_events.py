@@ -1221,6 +1221,46 @@ def test_replay_streams_event_pages_instead_of_materializing_history(tmp_path: P
         target.close()
 
 
+def test_trimmed_history_cursor_issuance_fails_closed_and_replacement_resets(tmp_path: Path):
+    """#94: issuing a cursor that validation would immediately reject must fail
+    at issuance, and history replacement must clear retention watermarks."""
+    from hotmem.events import (
+        ReplayCursorError,
+        issue_replay_cursor,
+        validate_replay_cursor,
+    )
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    try:
+        for i in range(1, 4):
+            _emit_created_fact(src, i)
+
+        assert src.trim_events_before_seq(2) == 1
+        with pytest.raises(ReplayCursorError) as exc_start:
+            issue_replay_cursor(src, position="start")
+        assert exc_start.value.reason == "stale_base"
+        with pytest.raises(ReplayCursorError):
+            issue_replay_cursor(src, seq=0)
+
+        head = issue_replay_cursor(src, position="head")
+        assert head.seq == 3
+        assert validate_replay_cursor(src, head).seq == 3
+
+        assert src.trim_events_by_count(0) == 2
+        with pytest.raises(ReplayCursorError) as exc_head:
+            issue_replay_cursor(src, position="head")
+        assert exc_head.value.reason == "stale_base"
+
+        src.replace_history(keep_mount_id=True)
+        assert src.event_log_bounds()["trimmed_through_seq"] == 0
+        assert src.event_log_bounds()["head_seq"] == 0
+        restarted = issue_replay_cursor(src, position="start")
+        assert restarted.seq == 0
+        assert validate_replay_cursor(src, restarted).seq == 0
+    finally:
+        src.close()
+
+
 def test_advanced_cursor_into_target_without_base_state_is_rejected(tmp_path: Path):
     """#94: an advanced (mid/head) cursor must not replay a suffix into a target
     that has no event history or matching base checkpoint."""
