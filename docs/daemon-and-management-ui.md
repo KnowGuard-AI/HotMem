@@ -890,8 +890,12 @@ Begin with these existing code boundaries, inspected on 2026-10-21 at
 Host setup is tracked in [#109](https://github.com/KnowGuard-AI/HotMem/issues/109),
 export privacy in [#110](https://github.com/KnowGuard-AI/HotMem/issues/110), and
 session context in [#111](https://github.com/KnowGuard-AI/HotMem/issues/111).
-Portable-state acceptance remains in
-[#94](https://github.com/KnowGuard-AI/HotMem/issues/94),
+Portable mount identity and opaque `hmc1` replay cursors are delivered in
+[#94](https://github.com/KnowGuard-AI/HotMem/issues/94) (`mount_id` logical
+workspace identity vs. `replica_id` runtime SQLite instance vs. `history_id`
+event-log epoch vs. `runtime_generation` process lifespan vs. `store_id` daemon
+routing; multi-writer ordering and conflict resolution remain intentionally
+undefined). Portable-state acceptance continues across
 [#95](https://github.com/KnowGuard-AI/HotMem/issues/95),
 [#96](https://github.com/KnowGuard-AI/HotMem/issues/96),
 [#97](https://github.com/KnowGuard-AI/HotMem/issues/97),

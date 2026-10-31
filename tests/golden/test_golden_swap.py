@@ -275,8 +275,59 @@ def test_jsonl_snapshot_values_are_json_serializable_and_maskable(tmp_path: Path
         snapshot(db, swap)
         records = _all_records(swap)
         masked = mask(records[0])
-        # The masked record must be a pure dict of sentinels — no raw bytes.
+        # The masked record must be a pure dict of sentinels -- no raw bytes.
         assert isinstance(masked, dict)
         assert all(isinstance(v, str) for v in masked.values())
     finally:
         db.close()
+
+
+# -- Golden replay cursor vectors (#94) --------------------------------------
+
+
+def test_golden_replay_cursor_hmc1_vectors_are_locked(golden_cursor_vectors):
+    """#94 acceptance: the cursor format is opaque to callers, versioned,
+    serializable, and covered by golden fixtures."""
+    from hotmem.events import (
+        CURSOR_PREFIX,
+        CURSOR_VERSION,
+        ReplayCursor,
+        decode_cursor,
+        encode_cursor,
+    )
+
+    c_start = ReplayCursor(
+        mount_id="mnt-00000000000000000000000000000001",
+        replica_id="rep-00000000000000000000000000000001",
+        history_id="hist-00000000000000000000000000000001",
+        seq=0,
+        anchor_event_id="",
+    )
+    assert encode_cursor(c_start) == golden_cursor_vectors["start_v1"]
+    assert decode_cursor(golden_cursor_vectors["start_v1"]) == c_start
+    assert set(c_start.to_payload_dict()) == {
+        "anchor_event_id",
+        "base_snapshot_id",
+        "history_id",
+        "mount_id",
+        "replica_id",
+        "scope",
+        "seq",
+        "v",
+    }
+
+    c_scoped = ReplayCursor(
+        mount_id="mnt-00000000000000000000000000000001",
+        replica_id="rep-00000000000000000000000000000001",
+        history_id="hist-00000000000000000000000000000001",
+        seq=3,
+        anchor_event_id="evt-0003",
+        base_snapshot_id="snap-base-01",
+        namespace="ops",
+    )
+    assert encode_cursor(c_scoped) == golden_cursor_vectors["scoped_head_v1"]
+    decoded = decode_cursor(golden_cursor_vectors["scoped_head_v1"])
+    assert decoded == c_scoped
+    assert decoded.version == CURSOR_VERSION == 1
+    assert golden_cursor_vectors["scoped_head_v1"].startswith(f"{CURSOR_PREFIX}.")
+    assert decoded.scope == {"event_types": ["memory.created"], "namespace": "ops"}

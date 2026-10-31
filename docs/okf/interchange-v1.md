@@ -295,6 +295,20 @@ Normative fields (readers MUST understand these):
   `permitted_namespaces`, `share_approvals`, `exported_count`,
   `omitted_count`, and `store_id`. It is excluded from logical identity and
   digests; readers ignore it if unknown.
+- `mount_id`, `replica_id`, `history_id`, `state_fingerprint`, and
+  `replay_cursor` (plus `source.mount_id`, `source.replica_id`, and
+  `source.history_id`) are **additive optional** fields (issue #94); readers
+  that do not know them ignore them. When `replay_cursor` is present, the
+  identity fields are required and `verify_package` validates the cursor and
+  recomputes `logical_id`/`state_fingerprint` from the payload before any target
+  write. `state_fingerprint` covers records that fingerprint successfully;
+  `logical_id` and `record_count` cover every exported record. Legacy manifests
+  that omit these fields remain readable. Hydrating into a clean target store
+  adopts `mount_id` and records the clone base lineage (including a target
+  already bound to the same `mount_id`); targets bound to a different mount keep
+  their identity. `compare_mount_lineage` classifies `"same_replica"`,
+  `"clone"`, `"fork"`, `"replacement"`, and `"different_mount"`. Multi-writer
+  ordering and conflict resolution across divergent runtime forks are undefined.
 
 ### 6.1 Proposed fields (NOT emitted — pending contract review per ADR-003)
 

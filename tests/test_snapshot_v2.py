@@ -1496,3 +1496,213 @@ def test_manifest_falls_back_to_legacy_file_references_when_new_key_empty(
     assert len(parsed.file_backed_references) == 1
     assert parsed.file_backed_references[0].memory_id == mid
     assert parsed.file_backed_references[0].attachment == legacy_refs[0]["attachment"]
+
+
+def test_snapshot_v2_manifest_carries_mount_identity_and_replay_cursor(
+    populated_db: MemoryDB, tmp_path: Path
+):
+    """#94: Snapshot v2 manifest records mount_id, replica_id, history_id,
+    state_fingerprint, and an opaque hmc1 replay_cursor; clean hydrate records
+    clone lineage while tampered cursors fail verification before mutation."""
+    import shutil
+
+    from hotmem.events import decode_cursor
+    from hotmem.mount import compare_mount_lineage
+
+    snap_dir = tmp_path / "snap_cursor_v2"
+    snapshot(populated_db, snap_dir)
+
+    raw_manifest = json.loads((snap_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    src_ident = populated_db.mount_identity()
+    assert raw_manifest["mount_id"] == src_ident.mount_id
+    assert raw_manifest["replica_id"] == src_ident.replica_id
+    assert raw_manifest["history_id"] == src_ident.history_id
+    assert raw_manifest["state_fingerprint"]
+    assert raw_manifest["replay_cursor"].startswith("hmc1.")
+
+    decoded = decode_cursor(raw_manifest["replay_cursor"])
+    assert decoded.mount_id == src_ident.mount_id
+    assert decoded.replica_id == src_ident.replica_id
+    assert decoded.history_id == src_ident.history_id
+
+    # Hydrating into a clean target adopts mount_id and records clone lineage.
+    clone_db = MemoryDB(tmp_path / "clone_from_v2.sqlite")
+    try:
+        hydrate(clone_db, snap_dir)
+        cmp_res = compare_mount_lineage(populated_db, clone_db)
+        assert cmp_res["relationship"] == "clone"
+        assert clone_db.mount_identity().mount_id == src_ident.mount_id
+        assert clone_db.mount_identity().replica_id != src_ident.replica_id
+        assert clone_db.mount_identity().base_cursor == raw_manifest["replay_cursor"]
+    finally:
+        clone_db.close()
+
+    # Tampering replay_cursor with a bare sequence or mismatched mount_id fails verification.
+    bad_dir = tmp_path / "snap_bad_cursor"
+    shutil.copytree(snap_dir, bad_dir)
+    bad_manifest = dict(raw_manifest)
+    bad_manifest["replay_cursor"] = "1"
+    (bad_dir / MANIFEST_NAME).write_text(json.dumps(bad_manifest), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError) as exc_info:
+        verify_manifest(bad_dir)
+    assert exc_info.value.file == "replay_cursor"
+
+    bad_manifest["mount_id"] = "mnt-wrong-mount"
+    bad_manifest["replay_cursor"] = raw_manifest["replay_cursor"]
+    (bad_dir / MANIFEST_NAME).write_text(json.dumps(bad_manifest), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError) as exc_info2:
+        verify_manifest(bad_dir)
+    assert exc_info2.value.file == "replay_cursor"
+
+    # A cursor without its identity fields is rejected.
+    no_identity = dict(raw_manifest)
+    for key in ("mount_id", "replica_id", "history_id"):
+        no_identity.pop(key, None)
+    (bad_dir / MANIFEST_NAME).write_text(json.dumps(no_identity), encoding="utf-8")
+    with pytest.raises(SnapshotChecksumError) as exc_no_ident:
+        verify_manifest(bad_dir)
+    assert exc_no_ident.value.file == "replay_cursor"
+
+    # Derived identity fields are recomputed from the payload for #94 exports.
+    for field, value in (("state_fingerprint", "f" * 64), ("snapshot_id", "0" * 64)):
+        tampered = dict(raw_manifest)
+        tampered[field] = value
+        (bad_dir / MANIFEST_NAME).write_text(json.dumps(tampered), encoding="utf-8")
+        with pytest.raises(SnapshotChecksumError) as exc_derived:
+            verify_manifest(bad_dir)
+        assert exc_derived.value.file == field
+
+
+def test_snapshot_fully_trimmed_history_exports_without_cursor(
+    populated_db: MemoryDB, tmp_path: Path
+):
+    """#94: a fully trimmed event history cannot anchor a cursor; export must
+    omit it instead of emitting an unusable token."""
+    populated_db.append_event(
+        event_id="trim-evt",
+        event_type="memory.created",
+        occurred_at="2026-10-30T00:00:00Z",
+    )
+    assert populated_db.trim_events_by_count(0) == 1
+
+    snap_dir = tmp_path / "trimmed_snap"
+    snapshot(populated_db, snap_dir)
+    manifest = json.loads((snap_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert not manifest.get("replay_cursor")
+    assert manifest["mount_id"] == populated_db.mount_identity().mount_id
+
+    target = MemoryDB(tmp_path / "trimmed_target.sqlite")
+    try:
+        result = hydrate(target, snap_dir)
+        assert result.loaded == populated_db.count()
+        assert target.count() == populated_db.count()
+    finally:
+        target.close()
+
+
+def test_hydrate_duplicate_records_remains_a_clone_not_a_fork(tmp_path: Path):
+    """#94: skipped duplicate records must not make a clean clone look divergent."""
+    from hotmem.interchange.fingerprint import (
+        record_fingerprint,
+        state_fingerprint,
+        state_fingerprint_from_list,
+    )
+    from hotmem.mount import compare_mount_lineage
+    from hotmem.snapshot.format import compute_overall, compute_snapshot_id
+    from hotmem.swap import add_memory
+
+    src = MemoryDB(tmp_path / "dup_src.sqlite")
+    snap_dir = tmp_path / "dup_snap"
+    try:
+        add_memory(src, "dup/x", "One duplicated fact")
+        snapshot(src, snap_dir)
+        manifest = json.loads((snap_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+        payload_path = snap_dir / MEMORIES_NAME
+        lines = payload_path.read_text(encoding="utf-8").splitlines()
+        duplicate = json.loads(lines[0])
+        duplicate["id"] = "dup-alternate-id"
+        records = [json.loads(lines[0]), duplicate]
+        payload = ("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n").encode()
+        payload_path.write_bytes(payload)
+
+        manifest["files"][MEMORIES_NAME] = {
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        manifest["overall_sha256"] = compute_overall(
+            {name: entry["sha256"] for name, entry in manifest["files"].items()}
+        )
+        manifest["memory_count"] = len(records)
+        manifest["inline_count"] = int(manifest.get("inline_count") or 0) + 1
+        manifest["snapshot_id"] = compute_snapshot_id([r["content_hash"] for r in records])
+        manifest["state_fingerprint"] = state_fingerprint_from_list(
+            [record_fingerprint(r) for r in records]
+        )
+        (snap_dir / MANIFEST_NAME).write_text(
+            json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8"
+        )
+
+        target = MemoryDB(tmp_path / "dup_target.sqlite")
+        try:
+            result = hydrate(target, snap_dir)
+            assert result.loaded == 1
+            assert result.skipped_dupes == 1
+            assert target.count() == 1
+            assert compare_mount_lineage(src, target)["relationship"] == "clone"
+            assert target.mount_identity().base_state_fingerprint == state_fingerprint(
+                target.all_rows()
+            )
+        finally:
+            target.close()
+    finally:
+        src.close()
+
+
+def test_snapshot_same_mount_bootstrap_clone_records_clone_lineage_and_replays(
+    populated_db: MemoryDB, tmp_path: Path
+):
+    """#94: snapshot hydrate into a bootstrapped same-mount clone records clone
+    lineage and accepts cursor replay, instead of being classified replacement."""
+    from hotmem.events import _build_memory_created_payload, append_event, replay_with_cursor
+    from hotmem.mount import bootstrap_mount, compare_mount_lineage
+    from hotmem.swap import add_memory
+
+    for row in populated_db.all_rows(include_embedding=True):
+        append_event(
+            populated_db,
+            event_type="memory.created",
+            memory_id=row["id"],
+            namespace=row.get("namespace") or "",
+            payload=_build_memory_created_payload(row),
+        )
+
+    snap_dir = tmp_path / "snap_same_mount"
+    snapshot(populated_db, snap_dir)
+    src_mount = populated_db.mount_identity().mount_id
+
+    clone_mount = tmp_path / "snap_clone_mount"
+    bootstrap_mount(clone_mount, mount_id=src_mount)
+    clone = MemoryDB(clone_mount / "hotmem.sqlite")
+    try:
+        hydrate(clone, snap_dir)
+        lineage = compare_mount_lineage(populated_db, clone)
+        assert lineage["relationship"] == "clone", lineage
+        assert clone.mount_identity().base_source_replica_id == (
+            populated_db.mount_identity().replica_id
+        )
+
+        add_memory(populated_db, "snap-later", "created after snapshot export")
+        new_row = populated_db.all_rows(include_embedding=True)[-1]
+        append_event(
+            populated_db,
+            event_type="memory.created",
+            memory_id=new_row["id"],
+            namespace=new_row.get("namespace") or "",
+            payload=_build_memory_created_payload(new_row),
+        )
+        res = replay_with_cursor(populated_db, clone)
+        assert res.applied == 1
+        assert res.completed is True
+        assert compare_mount_lineage(populated_db, clone)["relationship"] == "clone"
+    finally:
+        clone.close()

@@ -169,6 +169,9 @@ class HotMemRuntime:
         if not self.policy.store_id:
             self.policy.store_id = self.store_id
         self.runtime_generation: str = uuid.uuid4().hex[:12]
+        self.mount_id: str = ""
+        self.replica_id: str = ""
+        self.history_id: str = ""
         self.start_time: float = 0.0
         self.write_timeout_s: float = write_timeout_s
         self.db: MemoryDB | None = None
@@ -210,6 +213,10 @@ class HotMemRuntime:
                     self.policy.store_id = stored_store_id
             else:
                 self.db.set_meta("store_id", self.store_id)
+            mount_ident = self.db.mount_identity(runtime_generation=self.runtime_generation)
+            self.mount_id = mount_ident.mount_id
+            self.replica_id = mount_ident.replica_id
+            self.history_id = mount_ident.history_id
             self._store_lock.store_id = self.store_id
             self._store_lock.write_owner()
 

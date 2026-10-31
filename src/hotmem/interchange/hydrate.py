@@ -69,11 +69,13 @@ class PackageError(Exception):
         file: str | None = None,
         expected: str | None = None,
         actual: str | None = None,
+        detail: str | None = None,
     ) -> None:
         self.reason = reason
         self.file = file
         self.expected = expected
         self.actual = actual
+        self.detail = detail
         super().__init__(
             f"{reason}: {file or 'package'}"
             + (f" (expected {expected}, got {actual})" if expected else "")
@@ -127,6 +129,56 @@ def _load_manifest(pkg: Path) -> dict[str, Any]:
             expected=f"schema_version<={_SUPPORTED_SCHEMA}",
             actual=str(manifest.get("schema_version")),
         )
+    for key in ("mount_id", "replica_id", "history_id", "state_fingerprint", "replay_cursor"):
+        val = manifest.get(key)
+        if val is not None and not isinstance(val, str):
+            raise PackageError(
+                "malformed_manifest",
+                file=MANIFEST_NAME,
+                expected=f"{key}: string",
+                actual=str(val),
+            )
+    cursor_str = str(manifest.get("replay_cursor") or "")
+    if cursor_str:
+        from hotmem.events import ReplayCursorError, decode_cursor
+
+        source_block = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+        if not (
+            (manifest.get("mount_id") or source_block.get("mount_id"))
+            and (manifest.get("replica_id") or source_block.get("replica_id"))
+            and (manifest.get("history_id") or source_block.get("history_id"))
+        ):
+            raise PackageError(
+                "missing_cursor_identity",
+                file=MANIFEST_NAME,
+                expected="mount_id, replica_id, and history_id alongside replay_cursor",
+                actual="missing identity field(s)",
+            )
+        try:
+            decoded = decode_cursor(cursor_str)
+        except ReplayCursorError as err:
+            raise PackageError(
+                "invalid_cursor",
+                file=MANIFEST_NAME,
+                expected="valid hmc1 replay_cursor",
+                actual=cursor_str,
+                detail=str(err),
+            ) from err
+        source_block = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+        mount_id_str = str(manifest.get("mount_id") or source_block.get("mount_id") or "")
+        replica_id_str = str(manifest.get("replica_id") or source_block.get("replica_id") or "")
+        history_id_str = str(manifest.get("history_id") or source_block.get("history_id") or "")
+        if (
+            (mount_id_str and decoded.mount_id != mount_id_str)
+            or (replica_id_str and decoded.replica_id != replica_id_str)
+            or (history_id_str and decoded.history_id != history_id_str)
+        ):
+            raise PackageError(
+                "cursor_manifest_mismatch",
+                file=MANIFEST_NAME,
+                expected=f"mount_id={mount_id_str!r}, replica_id={replica_id_str!r}",
+                actual=cursor_str,
+            )
     return manifest
 
 
@@ -172,6 +224,30 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
 
     spool: Path | None = None
     record_count = 0
+    content_hashes: list[str] = []
+    fingerprints: list[str] = []
+
+    def _scan_identity_line(line: bytes) -> None:
+        from hotmem.interchange.fingerprint import record_fingerprint
+
+        text = line.strip()
+        if not text:
+            return
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError as err:
+            raise PackageError("malformed_payload", file=payload_name) from err
+        if not isinstance(record, dict):
+            raise PackageError("malformed_payload", file=payload_name)
+        content_hashes.append(str(record.get("content_hash") or ""))
+        try:
+            normalized = normalize_record(record, default_source="interchange")
+            if validate_record(normalized):
+                return
+            fingerprints.append(record_fingerprint(normalized))
+        except AnnotationValidationError:
+            return
+
     try:
         if payload_name == PAYLOAD_GZ:
             expected_decompressed = entry.get("decompressed_sha256")
@@ -204,6 +280,9 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
                     expected=expected_decompressed,
                     actual=decompressed_sha.hexdigest(),
                 )
+            with open(spool, "rb") as f:
+                for line in f:
+                    _scan_identity_line(line)
         else:
             payload_sha = hashlib.sha256()
             with open(payload_path, "rb") as f:
@@ -218,6 +297,9 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
                     expected=str(entry.get("sha256")),
                     actual=payload_sha.hexdigest(),
                 )
+            with open(payload_path, "rb") as f:
+                for line in f:
+                    _scan_identity_line(line)
 
         expected_count = int(manifest.get("record_count") or 0)
         if record_count != expected_count:
@@ -227,6 +309,33 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
                 expected=str(expected_count),
                 actual=str(record_count),
             )
+
+        # #94: packages carrying a portable replay cursor must have
+        # derivation-consistent identity fields. Legacy packages without a
+        # cursor keep byte-only verification.
+        if str(manifest.get("replay_cursor") or ""):
+            from hotmem.interchange.canonical import logical_id
+            from hotmem.interchange.fingerprint import state_fingerprint_from_list
+
+            expected_logical = str(manifest.get("logical_id") or "")
+            computed_logical = logical_id(content_hashes)
+            if expected_logical and computed_logical != expected_logical:
+                raise PackageError(
+                    "logical_id_mismatch",
+                    file=payload_name,
+                    expected=expected_logical,
+                    actual=computed_logical,
+                )
+            expected_fp = str(manifest.get("state_fingerprint") or "")
+            if expected_fp:
+                computed_fp = state_fingerprint_from_list(fingerprints)
+                if computed_fp != expected_fp:
+                    raise PackageError(
+                        "state_fingerprint_mismatch",
+                        file=payload_name,
+                        expected=expected_fp,
+                        actual=computed_fp,
+                    )
     except PackageError:
         if spool is not None:
             spool.unlink(missing_ok=True)
@@ -326,6 +435,22 @@ def hydrate_package(
     pkg_dir = Path(pkg_dir)
     with Timer() as t:
         verified = verify_package(pkg_dir)
+        pkg_source = (
+            verified.manifest.get("source")
+            if isinstance(verified.manifest.get("source"), dict)
+            else {}
+        )
+        pkg_mount_id = str(verified.manifest.get("mount_id") or pkg_source.get("mount_id") or "")
+        tgt_ident = db.mount_identity()
+        is_empty_store = db.count() == 0 and db.event_log_bounds()["head_seq"] == 0
+        # A clean store may receive clone lineage even when it is already bound
+        # to the same logical mount (the supported bootstrap-then-hydrate clone
+        # workflow). A store bound to a different mount keeps its own identity.
+        record_clone = bool(
+            is_empty_store
+            and pkg_mount_id
+            and (not tgt_ident.mount_bound or tgt_ident.mount_id == pkg_mount_id)
+        )
 
         counters = {
             "loaded": 0,
@@ -438,6 +563,26 @@ def hydrate_package(
                 if len(pending) >= HYDRATE_BATCH:
                     flush()
             flush()
+            if record_clone:
+                from hotmem.interchange.fingerprint import state_fingerprint
+
+                # Lineage must describe the state actually loaded (skipped
+                # duplicates/invalid records make the manifest fingerprint an
+                # unreliable base anchor).
+                db.record_clone_lineage(
+                    source_mount_id=pkg_mount_id,
+                    source_replica_id=str(
+                        verified.manifest.get("replica_id") or pkg_source.get("replica_id") or ""
+                    ),
+                    source_history_id=str(
+                        verified.manifest.get("history_id") or pkg_source.get("history_id") or ""
+                    ),
+                    base_snapshot_id=str(verified.manifest.get("logical_id") or ""),
+                    base_state_fingerprint=state_fingerprint(db.all_rows()),
+                    base_cursor=str(verified.manifest.get("replay_cursor") or ""),
+                    adopt_mount_id=(target_namespace is None),
+                    _commit=False,
+                )
             db.commit()
         except Exception:
             db.rollback()

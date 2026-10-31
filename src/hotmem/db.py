@@ -468,6 +468,106 @@ class MemoryDB:
             self._conn.commit()
             _trace.info("migrate", "namespace identity + operation ledger; user_version=6")
 
+        self._ensure_mount_identity()
+
+    def _mount_manifest_file(self) -> Path | None:
+        """Return the sibling mount manifest path when this DB lives in a mount."""
+        if not self.db_path or self.db_path == ":memory:":
+            return None
+        try:
+            manifest_path = Path(self.db_path).resolve().parent / "manifest.json"
+            if not manifest_path.is_file():
+                return None
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or data.get("format"):
+                return None
+            return manifest_path
+        except Exception:
+            return None
+
+    def _discover_mount_manifest_id(self) -> str:
+        """Read ``mount_id`` from a sibling mount ``manifest.json`` if present."""
+        manifest_path = self._mount_manifest_file()
+        if manifest_path is None:
+            return ""
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+            return str(data.get("mount_id") or "").strip()
+        except Exception:
+            return ""
+
+    def _backfill_mount_manifest_id(self, mount_id: str) -> None:
+        """Persist the store's logical mount_id into a legacy mount manifest."""
+        manifest_path = self._mount_manifest_file()
+        if manifest_path is None:
+            return
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(data, dict) or data.get("mount_id") == mount_id:
+            return
+        data["mount_id"] = mount_id
+        manifest_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+    def _ensure_mount_identity(self) -> None:
+        """Ensure logical mount_id, runtime replica_id, and history_id exist in store_meta (#94)."""
+        from hotmem.mount import new_history_id, new_mount_id, new_replica_id
+
+        existing_mount_id = self.get_meta("mount_id")
+        existing_replica_id = self.get_meta("replica_id")
+        existing_history_id = self.get_meta("history_id")
+        manifest_mount_id = self._discover_mount_manifest_id()
+        manifest_file = self._mount_manifest_file()
+        dirty = False
+
+        if not existing_mount_id:
+            mem_count = int(self._conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0])
+            evt_count = int(self._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+            if (mem_count > 0 or evt_count > 0) and self.get_meta("legacy_history") is None:
+                self.set_meta("legacy_history", "1", _commit=False)
+                dirty = True
+            if manifest_mount_id:
+                self.set_meta("mount_id", manifest_mount_id, _commit=False)
+                self.set_meta("mount_bound", "1", _commit=False)
+            else:
+                minted_mount_id = new_mount_id()
+                self.set_meta("mount_id", minted_mount_id, _commit=False)
+                if manifest_file is not None:
+                    # Legacy mount manifest: persist the DB's identity so the
+                    # directory remains portable (#94).
+                    self._backfill_mount_manifest_id(minted_mount_id)
+                    self.set_meta("mount_bound", "1", _commit=False)
+            dirty = True
+        elif manifest_mount_id and existing_mount_id != manifest_mount_id:
+            raise ValueError(
+                f"Store at {self.db_path} is bound to mount_id={existing_mount_id!r}, "
+                f"but its mount manifest declares mount_id={manifest_mount_id!r}; "
+                "refusing to mix logical identities."
+            )
+        elif manifest_mount_id:
+            if self.get_meta("mount_bound") != "1":
+                self.set_meta("mount_bound", "1", _commit=False)
+                dirty = True
+        elif manifest_file is not None:
+            # A mount directory with a legacy manifest: backfill the manifest
+            # from the store's authoritative identity.
+            self._backfill_mount_manifest_id(existing_mount_id)
+            if self.get_meta("mount_bound") != "1":
+                self.set_meta("mount_bound", "1", _commit=False)
+                dirty = True
+
+        if not existing_replica_id:
+            self.set_meta("replica_id", new_replica_id(), _commit=False)
+            dirty = True
+
+        if not existing_history_id:
+            self.set_meta("history_id", new_history_id(), _commit=False)
+            dirty = True
+
+        if dirty:
+            self._conn.commit()
+
     def insert(
         self,
         id: str,
@@ -802,17 +902,239 @@ class MemoryDB:
         self._conn.rollback()
 
     def get_meta(self, key: str) -> str | None:
-        """Return a store-level metadata value (e.g. persistent store_id)."""
-        row = self._conn.execute("SELECT value FROM store_meta WHERE key = ?", (key,)).fetchone()
+        """Return a store-level metadata value (e.g. persistent store_id or mount_id)."""
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM store_meta WHERE key = ?", (key,)
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
         return str(row["value"]) if row is not None else None
 
-    def set_meta(self, key: str, value: str) -> None:
+    def set_meta(self, key: str, value: str, *, _commit: bool = True) -> None:
         """Persist a store-level metadata value."""
         self._conn.execute(
             "INSERT OR REPLACE INTO store_meta (key, value) VALUES (?, ?)",
             (key, value),
         )
-        self._conn.commit()
+        if _commit:
+            self._conn.commit()
+
+    def mount_identity(self, *, runtime_generation: str = "") -> Any:
+        """Return the store's current MountIdentity (#94)."""
+        from hotmem.mount import MountIdentity
+
+        return MountIdentity(
+            mount_id=self.get_meta("mount_id") or "",
+            replica_id=self.get_meta("replica_id") or "",
+            history_id=self.get_meta("history_id") or "",
+            runtime_generation=runtime_generation,
+            base_snapshot_id=self.get_meta("base_snapshot_id") or "",
+            base_state_fingerprint=self.get_meta("base_state_fingerprint") or "",
+            base_lineage_fingerprint=self.get_meta("base_lineage_fingerprint") or "",
+            base_source_mount_id=self.get_meta("base_source_mount_id") or "",
+            base_source_replica_id=self.get_meta("base_source_replica_id") or "",
+            base_history_id=self.get_meta("base_history_id") or "",
+            base_cursor=self.get_meta("base_cursor") or "",
+            parent_replica_id=self.get_meta("parent_replica_id") or "",
+            forked_at_seq=int(self.get_meta("forked_at_seq") or 0),
+            forked_at_event_id=self.get_meta("forked_at_event_id") or "",
+            cloned_at_seq=int(self.get_meta("cloned_at_seq") or 0),
+            trimmed_through_seq=int(self.get_meta("trimmed_through_seq") or 0),
+            legacy_history=(self.get_meta("legacy_history") == "1"),
+            mount_bound=(self.get_meta("mount_bound") == "1"),
+        )
+
+    def set_mount_identity(
+        self,
+        mount_id: str,
+        *,
+        replica_id: str | None = None,
+        history_id: str | None = None,
+        _commit: bool = True,
+    ) -> Any:
+        """Bind or update the store's logical mount_id (and optional replica/history IDs)."""
+        cleaned = mount_id.strip()
+        if not cleaned:
+            raise ValueError("mount_id must be non-empty")
+        self.set_meta("mount_id", cleaned, _commit=False)
+        self.set_meta("mount_bound", "1", _commit=False)
+        if replica_id is not None:
+            if not replica_id.strip():
+                raise ValueError("replica_id must be non-empty when provided")
+            self.set_meta("replica_id", replica_id.strip(), _commit=False)
+        if history_id is not None:
+            if not history_id.strip():
+                raise ValueError("history_id must be non-empty when provided")
+            self.set_meta("history_id", history_id.strip(), _commit=False)
+        if _commit:
+            self._conn.commit()
+        return self.mount_identity()
+
+    def record_clone_lineage(
+        self,
+        *,
+        source_mount_id: str,
+        source_replica_id: str = "",
+        source_history_id: str = "",
+        base_snapshot_id: str = "",
+        base_state_fingerprint: str = "",
+        base_cursor: str = "",
+        adopt_mount_id: bool = True,
+        _commit: bool = True,
+    ) -> Any:
+        """Record clone/restore base metadata while keeping replica/history IDs distinct (#94)."""
+        from hotmem.mount import new_history_id, new_replica_id
+
+        src_mount = (source_mount_id or "").strip()
+        src_replica = (source_replica_id or "").strip()
+        src_history = (source_history_id or "").strip()
+
+        if adopt_mount_id and src_mount:
+            self.set_meta("mount_id", src_mount, _commit=False)
+            self.set_meta("mount_bound", "1", _commit=False)
+
+        cur_replica = self.get_meta("replica_id") or ""
+        if not cur_replica or (src_replica and cur_replica == src_replica):
+            self.set_meta("replica_id", new_replica_id(), _commit=False)
+
+        cur_history = self.get_meta("history_id") or ""
+        if not cur_history or (src_history and cur_history == src_history):
+            self.set_meta("history_id", new_history_id(), _commit=False)
+
+        if src_mount:
+            self.set_meta("base_source_mount_id", src_mount, _commit=False)
+        if src_replica:
+            self.set_meta("base_source_replica_id", src_replica, _commit=False)
+        if src_history:
+            self.set_meta("base_history_id", src_history, _commit=False)
+        if base_snapshot_id:
+            self.set_meta("base_snapshot_id", base_snapshot_id, _commit=False)
+        if base_state_fingerprint:
+            self.set_meta("base_state_fingerprint", base_state_fingerprint, _commit=False)
+        # Clone-base lineage includes portable relationship fields so a hydrated
+        # clone diverging only in parent_memory/related_memories is a fork (#94).
+        from hotmem.interchange.fingerprint import lineage_fingerprint
+
+        self.set_meta(
+            "base_lineage_fingerprint",
+            lineage_fingerprint(self.iter_rows(include_embedding=False)),
+            _commit=False,
+        )
+        if base_cursor:
+            self.set_meta("base_cursor", base_cursor, _commit=False)
+
+        bounds = self.event_log_bounds()
+        self.set_meta("cloned_at_seq", str(bounds["max_seq"]), _commit=False)
+        if _commit:
+            self._conn.commit()
+        return self.mount_identity()
+
+    def restore_lineage(
+        self,
+        *,
+        source_mount_id: str,
+        source_replica_id: str = "",
+        source_history_id: str = "",
+        base_snapshot_id: str = "",
+        base_state_fingerprint: str = "",
+        base_cursor: str = "",
+        _commit: bool = True,
+    ) -> Any:
+        """Restore a mount from a snapshot/package: keep mount_id, rotate replica/history (#94)."""
+        from hotmem.mount import new_history_id, new_replica_id
+
+        self.set_meta("replica_id", new_replica_id(), _commit=False)
+        self.set_meta("history_id", new_history_id(), _commit=False)
+        return self.record_clone_lineage(
+            source_mount_id=source_mount_id,
+            source_replica_id=source_replica_id,
+            source_history_id=source_history_id,
+            base_snapshot_id=base_snapshot_id,
+            base_state_fingerprint=base_state_fingerprint,
+            base_cursor=base_cursor,
+            adopt_mount_id=True,
+            _commit=_commit,
+        )
+
+    def fork_replica(
+        self,
+        *,
+        parent_db: MemoryDB | None = None,
+        _commit: bool = True,
+    ) -> Any:
+        """Explicitly fork a runtime replica on the same logical mount (#94).
+
+        Preserves ``mount_id``, records ``parent_replica_id`` and the fork event
+        anchor, and generates fresh ``replica_id`` and ``history_id`` values.
+        """
+        from hotmem.mount import new_history_id, new_replica_id
+
+        source_db = parent_db if parent_db is not None else self
+        parent_ident = source_db.mount_identity()
+        bounds = source_db.event_log_bounds()
+
+        if parent_ident.mount_id:
+            self.set_meta("mount_id", parent_ident.mount_id, _commit=False)
+            self.set_meta("mount_bound", "1", _commit=False)
+        self.set_meta("parent_replica_id", parent_ident.replica_id, _commit=False)
+        self.set_meta("forked_at_seq", str(bounds["max_seq"]), _commit=False)
+        self.set_meta("forked_at_event_id", str(bounds["head_event_id"]), _commit=False)
+        self.set_meta("replica_id", new_replica_id(), _commit=False)
+        self.set_meta("history_id", new_history_id(), _commit=False)
+        if _commit:
+            self._conn.commit()
+        return self.mount_identity()
+
+    def replace_history(
+        self,
+        *,
+        keep_mount_id: bool = True,
+        _commit: bool = True,
+    ) -> Any:
+        """Record a history replacement for the mount (#94).
+
+        Rotates ``replica_id`` and ``history_id``, clears clone/fork base links
+        and retention watermarks, and starts a new history epoch. Existing
+        event rows remain as immutable audit history; cursors bound to the
+        previous replica/history ids fail closed before mutation.
+        """
+        from hotmem.mount import new_history_id, new_mount_id, new_replica_id
+
+        prev_replica = self.get_meta("replica_id") or ""
+        prev_history = self.get_meta("history_id") or ""
+        if prev_replica:
+            self.set_meta("replaced_previous_replica_id", prev_replica, _commit=False)
+        if prev_history:
+            self.set_meta("replaced_previous_history_id", prev_history, _commit=False)
+        if not keep_mount_id:
+            self.set_meta("mount_id", new_mount_id(), _commit=False)
+        self.set_meta("mount_bound", "1", _commit=False)
+        self.set_meta("replica_id", new_replica_id(), _commit=False)
+        self.set_meta("history_id", new_history_id(), _commit=False)
+        for cleared_key in (
+            "base_snapshot_id",
+            "base_state_fingerprint",
+            "base_lineage_fingerprint",
+            "base_source_mount_id",
+            "base_source_replica_id",
+            "base_history_id",
+            "base_cursor",
+            "parent_replica_id",
+            "last_replay_cursor",
+        ):
+            self.set_meta(cleared_key, "", _commit=False)
+        self.set_meta("forked_at_seq", "0", _commit=False)
+        self.set_meta("forked_at_event_id", "", _commit=False)
+        self.set_meta("cloned_at_seq", "0", _commit=False)
+        # A replacement starts a new history epoch; retention watermarks from
+        # the previous epoch must not make new cursors unusable (#94).
+        self.set_meta("trimmed_through_seq", "0", _commit=False)
+        self.set_meta("last_known_head_seq", "0", _commit=False)
+        self.set_meta("last_known_head_event_id", "", _commit=False)
+        if _commit:
+            self._conn.commit()
+        return self.mount_identity()
 
     def find_by_namespace_and_hash(
         self, namespace: str, content_hash: str
@@ -1168,31 +1490,126 @@ class MemoryDB:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def event_at_seq(self, seq: int) -> dict[str, Any] | None:
+        """Return the event row at exact ``seq``, or None if absent (#94)."""
+        row = self._conn.execute(
+            """SELECT seq, event_id, memory_id, namespace, event_type,
+                      occurred_at, payload_json
+               FROM events WHERE seq = ?""",
+            (seq,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def event_id_page(
+        self,
+        *,
+        after_seq: int = 0,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """Return lightweight ``(seq, event_id, event_type)`` rows after ``seq``.
+
+        Lineage comparisons use this instead of loading full event payloads, so
+        identity checks stay bounded for long histories (#94).
+        """
+        rows = self._conn.execute(
+            """SELECT seq, event_id, event_type
+               FROM events WHERE seq > ?
+               ORDER BY seq ASC LIMIT ?""",
+            (after_seq, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def event_log_bounds(self) -> dict[str, Any]:
+        """Return current event-log sequence bounds and trim watermarks (#94)."""
+        agg = self._conn.execute(
+            "SELECT COUNT(*) AS cnt, MIN(seq) AS min_seq, MAX(seq) AS max_seq FROM events"
+        ).fetchone()
+        cnt = int(agg["cnt"] or 0) if agg is not None else 0
+        min_seq = int(agg["min_seq"] or 0) if agg is not None else 0
+        max_seq = int(agg["max_seq"] or 0) if agg is not None else 0
+        trimmed_through = int(self.get_meta("trimmed_through_seq") or 0)
+        last_known_head_seq = int(self.get_meta("last_known_head_seq") or 0)
+        last_known_head_event_id = self.get_meta("last_known_head_event_id") or ""
+
+        head_event_id = ""
+        if max_seq > 0:
+            head_row = self._conn.execute(
+                "SELECT event_id FROM events WHERE seq = ?", (max_seq,)
+            ).fetchone()
+            if head_row is not None:
+                head_event_id = str(head_row["event_id"])
+        elif last_known_head_seq > 0:
+            head_event_id = last_known_head_event_id
+
+        head_seq = max(max_seq, trimmed_through, last_known_head_seq)
+        return {
+            "event_count": cnt,
+            "min_seq": min_seq,
+            "max_seq": max_seq,
+            "head_seq": head_seq,
+            "head_event_id": head_event_id,
+            "trimmed_through_seq": trimmed_through,
+            "legacy_history": (self.get_meta("legacy_history") == "1"),
+        }
+
     def trim_events_before_seq(self, seq: int) -> int:
         """Local retention helper: delete events with ``seq < seq``.
 
         Temporarily disables the append-only DELETE trigger (retention is the
-        one sanctioned exception). Returns the number of deleted rows.
+        one sanctioned exception). Records ``trimmed_through_seq`` in
+        ``store_meta`` so stale cursors are rejected before mutation (#94).
+        Returns the number of deleted rows.
         """
+        max_row = self._conn.execute(
+            "SELECT MAX(seq) AS max_seq FROM events WHERE seq < ?", (seq,)
+        ).fetchone()
+        head_row = self._conn.execute(
+            "SELECT seq, event_id FROM events ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
         self._conn.execute("PRAGMA recursive_triggers = OFF")
         self._conn.execute("DROP TRIGGER IF EXISTS events_no_delete")
         cursor = self._conn.execute("DELETE FROM events WHERE seq < ?", (seq,))
+        deleted = cursor.rowcount if cursor.rowcount != -1 else 0
+        if deleted > 0 and max_row is not None and max_row["max_seq"] is not None:
+            deleted_max = int(max_row["max_seq"])
+            prev_trimmed = int(self.get_meta("trimmed_through_seq") or 0)
+            if deleted_max > prev_trimmed:
+                self.set_meta("trimmed_through_seq", str(deleted_max), _commit=False)
+            if head_row is not None:
+                prev_head = int(self.get_meta("last_known_head_seq") or 0)
+                if int(head_row["seq"]) >= prev_head:
+                    self.set_meta("last_known_head_seq", str(int(head_row["seq"])), _commit=False)
+                    self.set_meta(
+                        "last_known_head_event_id", str(head_row["event_id"]), _commit=False
+                    )
         self._conn.commit()
+        self._conn.execute("PRAGMA recursive_triggers = ON")
         self._conn.execute(
             "CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events "
             "BEGIN SELECT RAISE(ABORT, 'events table is append-only: DELETE is forbidden'); END"
         )
         self._conn.commit()
-        return cursor.rowcount if cursor.rowcount != -1 else 0
+        return deleted
 
     def trim_events_by_count(self, keep: int) -> int:
         """Local retention helper: keep only the most recent ``keep`` events.
 
-        Temporarily disables the append-only DELETE trigger. Returns the number
+        Temporarily disables the append-only DELETE trigger and updates
+        ``trimmed_through_seq`` in ``store_meta`` (#94). Returns the number
         of deleted rows.
         """
         if keep < 0:
             raise ValueError("keep must be non-negative")
+        max_row = self._conn.execute(
+            """SELECT MAX(seq) AS max_seq FROM events
+               WHERE seq NOT IN (
+                   SELECT seq FROM events ORDER BY seq DESC LIMIT ?
+               )""",
+            (keep,),
+        ).fetchone()
+        head_row = self._conn.execute(
+            "SELECT seq, event_id FROM events ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
         self._conn.execute("DROP TRIGGER IF EXISTS events_no_delete")
         cursor = self._conn.execute(
             """DELETE FROM events
@@ -1201,13 +1618,26 @@ class MemoryDB:
                )""",
             (keep,),
         )
+        deleted = cursor.rowcount if cursor.rowcount != -1 else 0
+        if deleted > 0 and max_row is not None and max_row["max_seq"] is not None:
+            deleted_max = int(max_row["max_seq"])
+            prev_trimmed = int(self.get_meta("trimmed_through_seq") or 0)
+            if deleted_max > prev_trimmed:
+                self.set_meta("trimmed_through_seq", str(deleted_max), _commit=False)
+            if head_row is not None:
+                prev_head = int(self.get_meta("last_known_head_seq") or 0)
+                if int(head_row["seq"]) >= prev_head:
+                    self.set_meta("last_known_head_seq", str(int(head_row["seq"])), _commit=False)
+                    self.set_meta(
+                        "last_known_head_event_id", str(head_row["event_id"]), _commit=False
+                    )
         self._conn.commit()
         self._conn.execute(
             "CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events "
             "BEGIN SELECT RAISE(ABORT, 'events table is append-only: DELETE is forbidden'); END"
         )
         self._conn.commit()
-        return cursor.rowcount if cursor.rowcount != -1 else 0
+        return deleted
 
     def insert_many_ignore(self, records: Iterable[MemoryRecord], *, _commit: bool = True) -> int:
         """Insert many memory rows in one transaction, ignoring duplicate hashes/ids.

@@ -690,9 +690,10 @@ def test_package_byte_integrity_and_semantic_record_fidelity_are_separate_proper
     snapshot(src, snap_dir)
     src.close()
 
-    # Property A: Re-seal manifest over a semantically mutated record (promotion_state
-    # changed from READY -> HOT). Byte integrity (verify_manifest) PASSES, while
-    # semantic fingerprint comparison catches the state drift!
+    # Property A: Re-seal manifest over a semantically mutated record
+    # (promotion_state READY -> HOT). Byte integrity alone would pass, but #94
+    # requires derivation-consistent state_fingerprint metadata, so verify
+    # rejects the drifted manifest before hydrate.
     mem_path = snap_dir / MEMORIES_NAME
     rec_dict = json.loads(mem_path.read_text(encoding="utf-8").strip())
     rec_dict["promotion_state"] = "HOT"
@@ -704,16 +705,9 @@ def test_package_byte_integrity_and_semantic_record_fidelity_are_separate_proper
     mdata["overall_sha256"] = compute_overall({MEMORIES_NAME: new_sha})
     manifest_path.write_text(json.dumps(mdata, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
-    # Byte integrity passes because manifest was re-sealed:
-    assert verify_manifest(snap_dir).overall_sha256 == mdata["overall_sha256"]
-    # Semantic fidelity check detects that promotion_state drifted from orig_row:
-    dst_drifted = MemoryDB(tmp_path / "dst_drifted.sqlite")
-    hydrate(dst_drifted, snap_dir)
-    drifted_row = dst_drifted.get_memory("sep-1")
-    assert drifted_row is not None
-    assert record_fingerprint(drifted_row) != orig_fp
-    assert drifted_row["promotion_state"] != orig_row["promotion_state"]
-    dst_drifted.close()
+    with pytest.raises(SnapshotChecksumError) as exc_fp:
+        verify_manifest(snap_dir)
+    assert exc_fp.value.file == "state_fingerprint"
 
     # Property B: Restore exact semantic record (validate_record == [] and
     # record_fingerprint == orig_fp), but append a harmless newline so file bytes

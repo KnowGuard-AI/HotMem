@@ -21,6 +21,7 @@ Extension: add encryption, remote sync, or attachment policies here.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -159,7 +160,15 @@ def write_snapshot_v2(
         # Streaming export (interchange #67): rows stream in id order
         # (fetchmany batches) and the payload digest is computed while
         # writing — one pass, O(batch) memory.
+        from hotmem.annotations import AnnotationValidationError
+        from hotmem.events import ReplayCursorError, issue_replay_cursor
+        from hotmem.interchange.fingerprint import (
+            record_fingerprint,
+            state_fingerprint_from_list,
+        )
+
         content_hashes: list[str] = []
+        record_fingerprints: list[str] = []
         file_references: list[FileReference] = []
         copied: dict[str, str] = {}  # attachment filename -> memory_id (for trace)
         inline_count = 0
@@ -181,6 +190,11 @@ def write_snapshot_v2(
                     row = transformed
                 rec = _row_to_record(row)
                 memory_count += 1
+                # Only annotation-invalid rows are excluded from the state
+                # fingerprint (they are still exported and counted); other
+                # failures must surface instead of silently weakening identity.
+                with contextlib.suppress(AnnotationValidationError):
+                    record_fingerprints.append(record_fingerprint(rec))
 
                 if rec["memory_type"] == "file":
                     file_backed_count += 1
@@ -269,6 +283,24 @@ def write_snapshot_v2(
 
         overall = compute_overall({name: e.sha256 for name, e in per_file.items()})
         snapshot_id = compute_snapshot_id(content_hashes)
+        ident = db.mount_identity()
+        state_fp = state_fingerprint_from_list(record_fingerprints)
+        scope_candidate = export_scope.get("namespace") if isinstance(export_scope, dict) else None
+        scope_ns = (
+            scope_candidate.strip()
+            if isinstance(scope_candidate, str) and scope_candidate.strip()
+            else None
+        )
+        try:
+            cursor_token = issue_replay_cursor(
+                db,
+                position="head",
+                namespace=scope_ns,
+            ).encode()
+        except ReplayCursorError:
+            # Fully trimmed history has no replayable anchor; export records
+            # without a cursor rather than an unusable one (#94).
+            cursor_token = ""
 
         manifest = Manifest(
             snapshot_id=snapshot_id,
@@ -282,6 +314,11 @@ def write_snapshot_v2(
             file_backed_references=file_references,
             attachments=attachment_entries,
             scope=export_scope,
+            mount_id=ident.mount_id,
+            replica_id=ident.replica_id,
+            history_id=ident.history_id,
+            state_fingerprint=state_fp,
+            replay_cursor=cursor_token,
         )
 
         # Write manifest.json with stable key ordering.

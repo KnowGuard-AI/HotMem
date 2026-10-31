@@ -152,6 +152,11 @@ class Manifest:
     file_backed_references: list[FileReference] = field(default_factory=list)
     attachments: list[AttachmentEntry] = field(default_factory=list)
     scope: dict | None = None
+    mount_id: str = ""
+    replica_id: str = ""
+    history_id: str = ""
+    state_fingerprint: str = ""
+    replay_cursor: str = ""
 
     def to_dict(self) -> dict:
         data = {
@@ -170,6 +175,16 @@ class Manifest:
         }
         if self.scope is not None:
             data["scope"] = self.scope
+        if self.mount_id:
+            data["mount_id"] = self.mount_id
+        if self.replica_id:
+            data["replica_id"] = self.replica_id
+        if self.history_id:
+            data["history_id"] = self.history_id
+        if self.state_fingerprint:
+            data["state_fingerprint"] = self.state_fingerprint
+        if self.replay_cursor:
+            data["replay_cursor"] = self.replay_cursor
         return data
 
     @classmethod
@@ -277,10 +292,43 @@ class Manifest:
         except (TypeError, ValueError) as err:
             raise SnapshotChecksumError("malformed", file=MANIFEST_NAME) from err
 
+        for key in ("mount_id", "replica_id", "history_id", "state_fingerprint", "replay_cursor"):
+            val = data.get(key)
+            if val is not None and not isinstance(val, str):
+                raise SnapshotChecksumError("malformed", file=key)
+
+        mount_id_str = str(data.get("mount_id") or "")
+        replica_id_str = str(data.get("replica_id") or "")
+        history_id_str = str(data.get("history_id") or "")
+        state_fp_str = str(data.get("state_fingerprint") or "")
+        cursor_str = str(data.get("replay_cursor") or "")
+        snapshot_id_str = str(data.get("snapshot_id") or "")
+
+        if cursor_str:
+            from hotmem.events import ReplayCursorError, decode_cursor
+
+            if not (mount_id_str and replica_id_str and history_id_str):
+                raise SnapshotChecksumError(
+                    "missing_metadata",
+                    file="replay_cursor",
+                    expected="mount_id, replica_id, and history_id alongside replay_cursor",
+                    actual="missing identity field(s)",
+                )
+            try:
+                decoded = decode_cursor(cursor_str)
+            except ReplayCursorError as err:
+                raise SnapshotChecksumError("malformed", file="replay_cursor") from err
+            if (
+                (mount_id_str and decoded.mount_id != mount_id_str)
+                or (replica_id_str and decoded.replica_id != replica_id_str)
+                or (history_id_str and decoded.history_id != history_id_str)
+            ):
+                raise SnapshotChecksumError("mismatch", file="replay_cursor")
+
         return cls(
             format=str(raw_format or FORMAT),
             schema_version=schema_version,
-            snapshot_id=str(data.get("snapshot_id") or ""),
+            snapshot_id=snapshot_id_str,
             created_at=str(data.get("created_at") or ""),
             hotmem_version=str(data.get("hotmem_version") or ""),
             memory_count=mem_count,
@@ -291,6 +339,11 @@ class Manifest:
             file_backed_references=refs,
             attachments=atts,
             scope=data.get("scope") if isinstance(data.get("scope"), dict) else None,
+            mount_id=mount_id_str,
+            replica_id=replica_id_str,
+            history_id=history_id_str,
+            state_fingerprint=state_fp_str,
+            replay_cursor=cursor_str,
         )
 
 

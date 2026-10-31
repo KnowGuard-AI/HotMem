@@ -190,7 +190,16 @@ of the upserted record and survives transfer byte-for-byte.
 ## 9. Relationship to existing formats and surfaces
 
 - Base packages and delta payloads reuse interchange serialization,
-  confinement, digest, and compression rules — one format stack.
+  confinement, digest, and compression rules -- one format stack.
+- The `source` block carries additive `mount_id`, `replica_id`, `history_id`,
+  and `replay_cursor` (`hmc1.<payload>.<checksum>`) metadata when available
+  (issue #94). The `base` block carries the delta base package's `mount_id` and
+  its `replay_cursor` when known. The source cursor is anchored to the
+  producing store's own base (never to an unrelated delta base package), so it
+  remains valid against that store. `verify_delta` validates any present cursor
+  against the identity fields on the same block before mutation while keeping
+  pre-#94 manifests valid. Multi-writer ordering and automatic fork conflict
+  resolution remain undefined.
 - Receivers keep every existing behavior: legacy JSONL hydrate, Snapshot v2,
   and bundle flows are unchanged; deltas apply on top of hydrated clones.
 - Sync surface: `hotmem delta produce|apply` CLI plus the

@@ -698,3 +698,758 @@ def test_import_ingestion_emits_no_per_record_events(tmp_db, tmp_path: Path):
     target = MemoryDB(tmp_path / "dst.sqlite")
     assert replay_into(source, target) == 0
     assert target.count() == 0
+    source.close()
+    target.close()
+
+
+# -- Portable mount identity & replay cursor contract (#94) ------------------
+
+
+def _emit_created_fact(
+    db: MemoryDB,
+    idx: int,
+    *,
+    namespace: str = "",
+) -> dict:
+    from hotmem.embed import embed_text, pack_embedding
+    from hotmem.events import EventType, _build_memory_created_payload, append_event
+    from hotmem.interchange.canonical import compute_content_hash
+
+    mid = f"mem-{namespace or 'root'}-{idx:04d}"
+    ident = f"topic/{idx}"
+    fact = f"Canonical replayable fact number {idx} in namespace {namespace or 'root'}"
+    chash = compute_content_hash(ident, fact)
+    emb = pack_embedding(embed_text(fact))
+    db.insert(
+        id=mid,
+        identifier=ident,
+        fact_text=fact,
+        embedding=emb,
+        content_hash=chash,
+        namespace=namespace,
+    )
+    row = db.get_memory(mid)
+    assert row is not None
+    return append_event(
+        db,
+        event_type=EventType.MEMORY_CREATED,
+        memory_id=mid,
+        namespace=namespace,
+        payload=_build_memory_created_payload(row),
+    )
+
+
+def test_local_sqlite_sequence_rejected_as_portable_cursor(tmp_path: Path):
+    """#94 acceptance: a local SQLite sequence is never accepted as a portable
+    cursor without its source/history identity."""
+    from hotmem.events import (
+        ReplayCursorError,
+        decode_cursor,
+        replay,
+        replay_into,
+        replay_with_cursor,
+        validate_replay_cursor,
+    )
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    dst = MemoryDB(tmp_path / "dst.sqlite")
+    try:
+        _emit_created_fact(src, 1)
+        for bad_cursor in (
+            0,
+            1,
+            42,
+            "0",
+            "1",
+            "42",
+            "",
+            {"seq": 1},
+            {"mount_id": src.mount_identity().mount_id, "seq": 1},
+        ):
+            with pytest.raises(ReplayCursorError) as exc_info:
+                decode_cursor(bad_cursor)
+            assert exc_info.value.reason == "unanchored_sequence"
+
+            with pytest.raises(ReplayCursorError) as exc_info2:
+                validate_replay_cursor(src, bad_cursor, target_db=dst)
+            assert exc_info2.value.reason == "unanchored_sequence"
+
+            with pytest.raises(ReplayCursorError) as exc_info3:
+                list(replay(src, cursor=bad_cursor))
+            assert exc_info3.value.reason == "unanchored_sequence"
+
+            with pytest.raises(ReplayCursorError) as exc_info4:
+                replay_into(src, dst, cursor=bad_cursor)
+            assert exc_info4.value.reason == "unanchored_sequence"
+
+            with pytest.raises(ReplayCursorError) as exc_info5:
+                replay_with_cursor(src, dst, cursor=bad_cursor)
+            assert exc_info5.value.reason == "unanchored_sequence"
+
+        assert dst.count() == 0
+    finally:
+        src.close()
+        dst.close()
+
+
+def test_cursor_versioning_and_corruption_rejection(tmp_path: Path):
+    """#94: cursor tokens are versioned (hmc1) and checksum-verified."""
+    import base64
+    import hashlib
+    import json
+
+    from hotmem.events import (
+        ReplayCursor,
+        ReplayCursorError,
+        decode_cursor,
+        encode_cursor,
+        issue_replay_cursor,
+    )
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    try:
+        _emit_created_fact(src, 1)
+        cur = issue_replay_cursor(src, position="head")
+        token = encode_cursor(cur)
+        assert token.startswith("hmc1.")
+        assert decode_cursor(token) == cur
+        assert ReplayCursor.decode(token) == cur
+
+        # Unknown outer version prefix fails with unsupported_cursor_version.
+        parts = token.split(".")
+        with pytest.raises(ReplayCursorError) as exc_ver:
+            decode_cursor(f"hmc2.{parts[1]}.{parts[2]}")
+        assert exc_ver.value.reason == "unsupported_cursor_version"
+
+        # Unsupported inner payload version 'v': 2 with valid checksum fails.
+        bad_payload = cur.to_payload_dict()
+        bad_payload["v"] = 2
+        b64 = (
+            base64.urlsafe_b64encode(
+                json.dumps(bad_payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+            )
+            .decode("ascii")
+            .rstrip("=")
+        )
+        sig = hashlib.sha256(f"hmc1.{b64}".encode("ascii")).hexdigest()
+        with pytest.raises(ReplayCursorError) as exc_inner:
+            decode_cursor(f"hmc1.{b64}.{sig}")
+        assert exc_inner.value.reason == "unsupported_cursor_version"
+
+        # Tampered checksum fails with malformed_cursor.
+        with pytest.raises(ReplayCursorError) as exc_chk:
+            decode_cursor(f"hmc1.{parts[1]}.{'0' * 64}")
+        assert exc_chk.value.reason == "malformed_cursor"
+
+        # Oversized tokens are rejected before parsing.
+        with pytest.raises(ReplayCursorError) as exc_big:
+            decode_cursor("hmc1." + ("a" * (64 * 1024 + 1)) + ".00000000")
+        assert exc_big.value.reason == "malformed_cursor"
+
+        # A scope without event_types is malformed (scope is part of the token).
+        bad_scope_payload = cur.to_payload_dict()
+        bad_scope_payload["scope"] = {"namespace": None}
+        b64_scope = (
+            base64.urlsafe_b64encode(
+                json.dumps(bad_scope_payload, sort_keys=True, separators=(",", ":")).encode("ascii")
+            )
+            .decode("ascii")
+            .rstrip("=")
+        )
+        sig_scope = hashlib.sha256(f"hmc1.{b64_scope}".encode("ascii")).hexdigest()
+        with pytest.raises(ReplayCursorError) as exc_scope_payload:
+            decode_cursor(f"hmc1.{b64_scope}.{sig_scope}")
+        assert exc_scope_payload.value.reason == "malformed_cursor"
+    finally:
+        src.close()
+
+
+def test_wrong_source_mount_rejected_before_mutation(tmp_path: Path):
+    """#94 acceptance: replay against the wrong source fails before mutation
+    with an actionable diagnostic."""
+    from hotmem.events import ReplayCursorError, issue_replay_cursor, replay_with_cursor
+
+    src_a = MemoryDB(tmp_path / "src_a.sqlite")
+    src_b = MemoryDB(tmp_path / "src_b.sqlite")
+    target = MemoryDB(tmp_path / "target.sqlite")
+    try:
+        _emit_created_fact(src_a, 1)
+        _emit_created_fact(src_b, 2)
+        cursor_b = issue_replay_cursor(src_b, position="start").encode()
+
+        # 1. Passing src_b's cursor when replaying from src_a fails before mutation.
+        with pytest.raises(ReplayCursorError) as exc1:
+            replay_with_cursor(src_a, target, cursor=cursor_b)
+        assert exc1.value.reason == "wrong_source"
+        assert exc1.value.recovery
+        assert target.count() == 0
+
+        # 2. Once target is bound to src_a, replaying src_b into target fails before mutation.
+        res_a = replay_with_cursor(src_a, target)
+        assert res_a.applied == 1
+        assert target.count() == 1
+
+        with pytest.raises(ReplayCursorError) as exc2:
+            replay_with_cursor(src_b, target)
+        assert exc2.value.reason == "wrong_source"
+        assert target.count() == 1
+    finally:
+        src_a.close()
+        src_b.close()
+        target.close()
+
+
+def test_stale_base_rejected_when_events_trimmed_or_cursor_ahead(tmp_path: Path):
+    """#94 acceptance: replay from a trimmed/stale cursor or a cursor ahead of
+    source history fails before mutation."""
+    from hotmem.events import (
+        ReplayCursor,
+        ReplayCursorError,
+        issue_replay_cursor,
+        replay_with_cursor,
+    )
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    target = MemoryDB(tmp_path / "target.sqlite")
+    target_pre = MemoryDB(tmp_path / "target_pre.sqlite")
+    try:
+        for i in range(1, 6):
+            _emit_created_fact(src, i)
+
+        c_start = issue_replay_cursor(src, position="start").encode()
+        c_seq2 = issue_replay_cursor(src, seq=2).encode()
+        c_seq3 = issue_replay_cursor(src, seq=3).encode()
+
+        # Capture a target already at head before source retention runs.
+        assert replay_with_cursor(src, target_pre, cursor=c_start).applied == 5
+
+        # Trim events seq 1 and 2 (trimmed_through_seq becomes 2; min_seq is 3).
+        assert src.trim_events_before_seq(3) == 2
+
+        # c_start (seq=0 < trimmed_through_seq=2) fails before mutation.
+        with pytest.raises(ReplayCursorError) as exc_start:
+            replay_with_cursor(src, target, cursor=c_start)
+        assert exc_start.value.reason == "stale_base"
+        assert target.count() == 0
+
+        # c_seq2 (seq=2 is missing from events after trim) fails before mutation.
+        with pytest.raises(ReplayCursorError) as exc_seq2:
+            replay_with_cursor(src, target, cursor=c_seq2)
+        assert exc_seq2.value.reason == "stale_base"
+        assert target.count() == 0
+
+        # c_seq3 (seq=3 is still present and >= trimmed_through_seq) succeeds
+        # against a target that already holds the base state; records 4-5 are
+        # already present, so this is an idempotent catch-up.
+        res = replay_with_cursor(src, target_pre, cursor=c_seq3)
+        assert res.applied == 0
+        assert res.completed is True
+        assert target_pre.count() == 5
+
+        # The same advanced cursor cannot be applied to a target with no base.
+        with pytest.raises(ReplayCursorError) as exc_no_base:
+            replay_with_cursor(src, target, cursor=c_seq3)
+        assert exc_no_base.value.reason == "incompatible_base"
+        assert target.count() == 0
+
+        # A cursor ahead of source max_seq fails with stale_base.
+        ident = src.mount_identity()
+        ahead_cursor = ReplayCursor(
+            mount_id=ident.mount_id,
+            replica_id=ident.replica_id,
+            history_id=ident.history_id,
+            seq=99,
+            anchor_event_id="evt-future-99",
+        ).encode()
+        with pytest.raises(ReplayCursorError) as exc_ahead:
+            replay_with_cursor(src, target, cursor=ahead_cursor)
+        assert exc_ahead.value.reason == "stale_base"
+        assert target.count() == 0
+    finally:
+        src.close()
+        target.close()
+        target_pre.close()
+
+
+def test_replaced_history_and_incompatible_base_rejected_before_mutation(tmp_path: Path):
+    """#94: replaced history, anchor_event_id mismatch, base_snapshot_id mismatch,
+    and scope mismatch all fail before mutation."""
+    from hotmem.events import (
+        ReplayCursor,
+        ReplayCursorError,
+        issue_replay_cursor,
+        replay_with_cursor,
+    )
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    target = MemoryDB(tmp_path / "target.sqlite")
+    try:
+        _emit_created_fact(src, 1, namespace="ops")
+        _emit_created_fact(src, 2, namespace="ops")
+        ident_before = src.mount_identity()
+
+        # 1. Anchor event mismatch at seq=1 fails with incompatible_base.
+        forged_anchor = ReplayCursor(
+            mount_id=ident_before.mount_id,
+            replica_id=ident_before.replica_id,
+            history_id=ident_before.history_id,
+            seq=1,
+            anchor_event_id="forged-event-id-at-seq-1",
+            namespace="ops",
+        ).encode()
+        with pytest.raises(ReplayCursorError) as exc_anchor:
+            replay_with_cursor(src, target, cursor=forged_anchor)
+        assert exc_anchor.value.reason == "incompatible_base"
+        assert target.count() == 0
+
+        # 2. Incompatible base_snapshot_id fails with incompatible_base.
+        bad_base = ReplayCursor(
+            mount_id=ident_before.mount_id,
+            replica_id=ident_before.replica_id,
+            history_id=ident_before.history_id,
+            base_snapshot_id="snap-nonexistent-base",
+            seq=0,
+            anchor_event_id="",
+            namespace="ops",
+        ).encode()
+        with pytest.raises(ReplayCursorError) as exc_base:
+            replay_with_cursor(src, target, cursor=bad_base)
+        assert exc_base.value.reason == "incompatible_base"
+        assert target.count() == 0
+
+        # 3. Scope mismatch (cursor scoped to "ops", caller asks for "finance").
+        c_ops = issue_replay_cursor(src, position="start", namespace="ops").encode()
+        with pytest.raises(ReplayCursorError) as exc_scope:
+            replay_with_cursor(src, target, cursor=c_ops, namespace="finance")
+        assert exc_scope.value.reason == "scope_mismatch"
+        assert target.count() == 0
+
+        # 4. Replacing source history invalidates cursors issued before replacement.
+        src.replace_history(keep_mount_id=True)
+        with pytest.raises(ReplayCursorError) as exc_rep:
+            replay_with_cursor(src, target, cursor=c_ops)
+        assert exc_rep.value.reason == "replaced_history"
+        assert target.count() == 0
+    finally:
+        src.close()
+        target.close()
+
+
+def test_clone_replay_and_divergent_fork_rejection(tmp_path: Path):
+    """#94 acceptance: a clean clone of a mount can replay new source events
+    using the manifest's replay_cursor, whereas a clone that mutates locally
+    becomes a divergent runtime fork and rejects replay before mutation."""
+    from hotmem.events import ReplayCursorError, replay_with_cursor
+    from hotmem.interchange.hydrate import hydrate_package
+    from hotmem.interchange.package import write_package
+    from hotmem.mount import compare_mount_lineage
+    from hotmem.swap import add_memory
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    clone = MemoryDB(tmp_path / "clone.sqlite")
+    try:
+        _emit_created_fact(src, 1)
+        _emit_created_fact(src, 2)
+
+        pkg_dir = tmp_path / "base_pkg"
+        write_package(src, pkg_dir)
+        hydrate_package(clone, pkg_dir)
+        assert clone.count() == 2
+        assert compare_mount_lineage(src, clone)["relationship"] == "clone"
+
+        # Source records 2 new events after the package export.
+        _emit_created_fact(src, 3)
+        _emit_created_fact(src, 4)
+
+        # Clone replays from its saved base_cursor and receives only events 3 & 4.
+        res = replay_with_cursor(src, clone)
+        assert res.applied == 2
+        assert res.completed is True
+        assert clone.count() == 4
+        assert compare_mount_lineage(src, clone)["relationship"] == "clone"
+
+        # Now the clone performs an independent local mutation -> becomes a fork!
+        add_memory(clone, "local/fork-item", "Independent write on clone replica")
+        assert clone.count() == 5
+        assert compare_mount_lineage(src, clone)["relationship"] == "fork"
+
+        # Source records event 5; replaying into the diverged fork fails before mutation.
+        _emit_created_fact(src, 5)
+        with pytest.raises(ReplayCursorError) as exc_fork:
+            replay_with_cursor(src, clone, cursor=res.cursor)
+        assert exc_fork.value.reason == "fork_diverged"
+        assert clone.count() == 5
+    finally:
+        src.close()
+        clone.close()
+
+
+def test_interrupted_resume_and_mid_transaction_rollback(tmp_path: Path, monkeypatch):
+    """#94 acceptance: interrupted replay resumes from the last committed cursor,
+    and mid-transaction failures roll back cleanly without partial state."""
+    from hotmem.events import issue_replay_cursor, replay_with_cursor
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    target_stepped = MemoryDB(tmp_path / "target_stepped.sqlite")
+    target_full = MemoryDB(tmp_path / "target_full.sqlite")
+    try:
+        for i in range(1, 6):
+            _emit_created_fact(src, i)
+
+        c0 = issue_replay_cursor(src, position="start").encode()
+
+        # Step 1: replay first 2 events.
+        r1 = replay_with_cursor(src, target_stepped, cursor=c0, max_events=2)
+        assert r1.applied == 2
+        assert r1.events_scanned == 2
+        assert r1.completed is False
+        assert target_stepped.count() == 2
+
+        # Simulate a mid-transaction crash during step 2 before commit.
+        orig_insert = target_stepped.insert_many_ignore
+
+        def boom_insert(records, *, _commit=True):
+            orig_insert(records, _commit=False)
+            raise RuntimeError("simulated disk interruption mid-replay")
+
+        monkeypatch.setattr(target_stepped, "insert_many_ignore", boom_insert)
+        with pytest.raises(RuntimeError, match="simulated disk interruption"):
+            replay_with_cursor(src, target_stepped, cursor=r1.cursor, max_events=2)
+
+        # Rollback kept target_stepped at exactly 2 rows and preserved r1.cursor.
+        monkeypatch.setattr(target_stepped, "insert_many_ignore", orig_insert)
+        assert target_stepped.count() == 2
+        assert target_stepped.get_meta("last_replay_cursor") == r1.cursor
+
+        # Resume step 2 with r1.cursor, then step 3 to completion.
+        r2 = replay_with_cursor(src, target_stepped, cursor=r1.cursor, max_events=2)
+        assert r2.applied == 2
+        assert r2.completed is False
+        assert target_stepped.count() == 4
+
+        r3 = replay_with_cursor(src, target_stepped, cursor=r2.cursor, max_events=2)
+        assert r3.applied == 1
+        assert r3.completed is True
+        assert target_stepped.count() == 5
+
+        # Compare against a single uninterrupted replay.
+        r_full = replay_with_cursor(src, target_full, cursor=c0)
+        assert r_full.applied == 5
+        assert r_full.completed is True
+        assert r_full.cursor == r3.cursor
+        assert [r["id"] for r in target_stepped.all_rows()] == [
+            r["id"] for r in target_full.all_rows()
+        ]
+    finally:
+        src.close()
+        target_stepped.close()
+        target_full.close()
+
+
+def test_reusing_completed_cursor_is_idempotent(tmp_path: Path):
+    """#94 acceptance: reusing a completed cursor is idempotent (applied == 0)."""
+    from hotmem.events import issue_replay_cursor, replay_into, replay_with_cursor
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    target = MemoryDB(tmp_path / "target.sqlite")
+    try:
+        for i in range(1, 4):
+            _emit_created_fact(src, i)
+
+        start_cursor = issue_replay_cursor(src, position="start").encode()
+        first = replay_with_cursor(src, target, cursor=start_cursor)
+        assert first.applied == 3
+        assert first.completed is True
+        assert target.count() == 3
+
+        # Re-applying the completed cursor is a no-op with applied == 0.
+        repeat1 = replay_with_cursor(src, target, cursor=first.cursor)
+        assert repeat1.applied == 0
+        assert repeat1.skipped == 0
+        assert repeat1.events_scanned == 0
+        assert repeat1.completed is True
+        assert repeat1.cursor == first.cursor
+        assert replay_into(src, target, cursor=first.cursor) == 0
+
+        # Re-applying the initial start_cursor also applies 0 new records.
+        repeat_from_start = replay_with_cursor(src, target, cursor=start_cursor)
+        assert repeat_from_start.applied == 0
+        assert repeat_from_start.skipped == 3
+        assert repeat_from_start.completed is True
+        assert repeat_from_start.cursor == first.cursor
+        assert target.count() == 3
+    finally:
+        src.close()
+        target.close()
+
+
+def test_replay_rejects_unbound_target_with_local_rows(tmp_path: Path):
+    """#94: replay must not adopt the source mount identity for a target that
+    already holds local records; that would launder foreign state as clone base."""
+    from hotmem.events import ReplayCursorError, replay_with_cursor
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    target = MemoryDB(tmp_path / "target.sqlite")
+    try:
+        _emit_created_fact(src, 1)
+        target.insert(
+            id="local-1",
+            identifier="local",
+            fact_text="foreign local row",
+            embedding=b"",
+            content_hash="local-hash",
+        )
+        target_mount = target.mount_identity().mount_id
+
+        with pytest.raises(ReplayCursorError) as exc_info:
+            replay_with_cursor(src, target)
+        assert exc_info.value.reason == "incompatible_base"
+        assert target.count() == 1
+        assert target.mount_identity().mount_id == target_mount
+        assert target.get_memory("local-1") is not None
+    finally:
+        src.close()
+        target.close()
+
+
+def test_replay_streams_event_pages_instead_of_materializing_history(tmp_path: Path, monkeypatch):
+    """#94: replay applies bounded pages rather than accumulating every record."""
+    from hotmem.events import replay_with_cursor
+
+    src = MemoryDB(tmp_path / "stream_src.sqlite")
+    target = MemoryDB(tmp_path / "stream_target.sqlite")
+    try:
+        for i in range(1, 1201):
+            _emit_created_fact(src, i)
+
+        batches: list[int] = []
+        original = target.insert_many_ignore
+
+        def record_batch(records, *, _commit=True):
+            batches.append(len(records))
+            return original(records, _commit=_commit)
+
+        monkeypatch.setattr(target, "insert_many_ignore", record_batch)
+        res = replay_with_cursor(src, target)
+        assert res.applied == 1200
+        assert res.completed is True
+        assert target.count() == 1200
+        assert len(batches) >= 3
+        assert max(batches) <= 500
+    finally:
+        src.close()
+        target.close()
+
+
+def test_trimmed_history_cursor_issuance_fails_closed_and_replacement_resets(tmp_path: Path):
+    """#94: issuing a cursor that validation would immediately reject must fail
+    at issuance, and history replacement must clear retention watermarks."""
+    from hotmem.events import (
+        ReplayCursorError,
+        issue_replay_cursor,
+        validate_replay_cursor,
+    )
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    try:
+        for i in range(1, 4):
+            _emit_created_fact(src, i)
+
+        assert src.trim_events_before_seq(2) == 1
+        with pytest.raises(ReplayCursorError) as exc_start:
+            issue_replay_cursor(src, position="start")
+        assert exc_start.value.reason == "stale_base"
+        with pytest.raises(ReplayCursorError):
+            issue_replay_cursor(src, seq=0)
+
+        head = issue_replay_cursor(src, position="head")
+        assert head.seq == 3
+        assert validate_replay_cursor(src, head).seq == 3
+
+        assert src.trim_events_by_count(0) == 2
+        with pytest.raises(ReplayCursorError) as exc_head:
+            issue_replay_cursor(src, position="head")
+        assert exc_head.value.reason == "stale_base"
+
+        src.replace_history(keep_mount_id=True)
+        assert src.event_log_bounds()["trimmed_through_seq"] == 0
+        assert src.event_log_bounds()["head_seq"] == 0
+        restarted = issue_replay_cursor(src, position="start")
+        assert restarted.seq == 0
+        assert validate_replay_cursor(src, restarted).seq == 0
+    finally:
+        src.close()
+
+
+def test_advanced_cursor_into_target_without_base_state_is_rejected(tmp_path: Path):
+    """#94: an advanced (mid/head) cursor must not replay a suffix into a target
+    that has no event history or matching base checkpoint."""
+    from hotmem.events import (
+        ReplayCursorError,
+        issue_replay_cursor,
+        replay_with_cursor,
+    )
+
+    src = MemoryDB(tmp_path / "src.sqlite")
+    try:
+        for i in range(1, 4):
+            _emit_created_fact(src, i)
+
+        head = issue_replay_cursor(src, position="head").encode()
+        mid = issue_replay_cursor(src, seq=1).encode()
+        start = issue_replay_cursor(src, position="start").encode()
+
+        for label, cursor in (("head", head), ("mid", mid)):
+            target = MemoryDB(tmp_path / f"empty_{label}.sqlite")
+            try:
+                with pytest.raises(ReplayCursorError) as exc_info:
+                    replay_with_cursor(src, target, cursor=cursor)
+                assert exc_info.value.reason == "incompatible_base"
+                assert target.count() == 0
+            finally:
+                target.close()
+
+        # A start cursor performs full replay and is accepted into an empty target.
+        target = MemoryDB(tmp_path / "empty_start.sqlite")
+        try:
+            res = replay_with_cursor(src, target, cursor=start)
+            assert res.applied == 3
+            assert res.completed is True
+            assert target.count() == 3
+        finally:
+            target.close()
+    finally:
+        src.close()
+
+
+def test_empty_and_legacy_histories_contract(tmp_path: Path):
+    """#94: empty histories replay 0 events cleanly at seq=0; legacy pre-#94
+    histories are flagged and governed by allow_legacy_history."""
+    from hotmem.events import ReplayCursorError, issue_replay_cursor, replay_with_cursor
+
+    empty_src = MemoryDB(tmp_path / "empty_src.sqlite")
+    empty_dst = MemoryDB(tmp_path / "empty_dst.sqlite")
+    try:
+        c_empty = issue_replay_cursor(empty_src, position="head")
+        assert c_empty.seq == 0
+        assert c_empty.anchor_event_id == ""
+        res = replay_with_cursor(empty_src, empty_dst, cursor=c_empty.encode())
+        assert res.applied == 0
+        assert res.completed is True
+    finally:
+        empty_src.close()
+        empty_dst.close()
+
+    # Simulate a pre-#94 store that already had events before mount_id existed.
+    legacy_path = tmp_path / "legacy_events.sqlite"
+    leg_db = MemoryDB(legacy_path)
+    _emit_created_fact(leg_db, 1)
+    leg_db._conn.execute(
+        "DELETE FROM store_meta "
+        "WHERE key IN ('mount_id', 'replica_id', 'history_id', 'legacy_history')"
+    )
+    leg_db.commit()
+    leg_db.close()
+
+    reopened = MemoryDB(legacy_path)
+    leg_target = MemoryDB(tmp_path / "leg_target.sqlite")
+    try:
+        assert reopened.mount_identity().legacy_history is True
+        c_leg = issue_replay_cursor(reopened, position="start").encode()
+
+        with pytest.raises(ReplayCursorError) as exc_strict:
+            replay_with_cursor(reopened, leg_target, cursor=c_leg, allow_legacy_history=False)
+        assert exc_strict.value.reason == "legacy_history_unanchored"
+        assert leg_target.count() == 0
+
+        res_compat = replay_with_cursor(
+            reopened, leg_target, cursor=c_leg, allow_legacy_history=True
+        )
+        assert res_compat.applied == 1
+        assert leg_target.count() == 1
+    finally:
+        reopened.close()
+        leg_target.close()
+
+
+def test_read_only_store_without_identity_fails_with_actionable_diagnostic(tmp_path: Path):
+    """#94: identity cannot be backfilled on a read-only connection; report it."""
+    from hotmem.events import ReplayCursorError, issue_replay_cursor
+
+    db_path = tmp_path / "readonly_legacy.sqlite"
+    db = MemoryDB(db_path)
+    _emit_created_fact(db, 1)
+    db._conn.execute(
+        "DELETE FROM store_meta "
+        "WHERE key IN ('mount_id', 'replica_id', 'history_id', 'legacy_history')"
+    )
+    db.commit()
+    db.close()
+
+    read_only = MemoryDB(db_path, read_only=True)
+    try:
+        with pytest.raises(ReplayCursorError) as exc_info:
+            issue_replay_cursor(read_only)
+        assert exc_info.value.reason == "no_persistent_identity"
+        assert "writable" in exc_info.value.recovery
+    finally:
+        read_only.close()
+
+    writable = MemoryDB(db_path)
+    try:
+        assert issue_replay_cursor(writable).mount_id.startswith("mnt-")
+    finally:
+        writable.close()
+
+
+def test_repeating_hydrated_base_cursor_does_not_mutate_metadata(tmp_path: Path, monkeypatch):
+    """#94: idempotent reuse includes the hydrated base checkpoint (no writes)."""
+    from hotmem.events import replay_with_cursor
+    from hotmem.interchange.hydrate import hydrate_package
+    from hotmem.interchange.package import write_package
+
+    src = MemoryDB(tmp_path / "idem_src.sqlite")
+    target = MemoryDB(tmp_path / "idem_target.sqlite")
+    pkg = tmp_path / "idem_pkg"
+    try:
+        for i in range(1, 3):
+            _emit_created_fact(src, i)
+        write_package(src, pkg)
+        hydrate_package(target, pkg)
+        base_cursor = target.get_meta("base_cursor")
+        base_fp = target.mount_identity().base_state_fingerprint
+        assert base_cursor
+        assert target.get_meta("last_replay_cursor") is None
+
+        writes: list[str] = []
+        original_set = target.set_meta
+
+        def record_set(key, value, *, _commit=True):
+            writes.append(key)
+            return original_set(key, value, _commit=_commit)
+
+        monkeypatch.setattr(target, "set_meta", record_set)
+        res = replay_with_cursor(src, target)
+        assert res.applied == 0
+        assert res.completed is True
+        assert writes == []
+        assert target.get_meta("base_cursor") == base_cursor
+        assert target.mount_identity().base_state_fingerprint == base_fp
+    finally:
+        src.close()
+        target.close()
+
+
+def test_max_events_requires_positive_integer(tmp_path: Path):
+    from hotmem.events import replay_with_cursor
+
+    src = MemoryDB(tmp_path / "max_src.sqlite")
+    target = MemoryDB(tmp_path / "max_target.sqlite")
+    try:
+        _emit_created_fact(src, 1)
+        for bad in (0, -1, 1.5, True, "2"):
+            with pytest.raises(ValueError):
+                replay_with_cursor(src, target, max_events=bad)
+    finally:
+        src.close()
+        target.close()
