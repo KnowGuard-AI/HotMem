@@ -146,6 +146,7 @@ def test_compare_mount_lineage_distinguishes_same_clone_fork_replacement_and_dif
     assert branch_cmp["relationship"] == "fork"
 
     # 6. Raw filesystem copy (shutil.copy) where both copies diverge via state and events.
+    src._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     src.close()
     raw_copy_path = tmp_path / "raw_copy.sqlite"
     shutil.copy2(tmp_path / "src.sqlite", raw_copy_path)
@@ -219,6 +220,7 @@ def test_copied_replica_with_different_head_and_imported_state_is_a_fork(tmp_pat
         event_type="memory.created",
         occurred_at="2026-10-30T00:00:00Z",
     )
+    src._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     src.close()
     copy_path = tmp_path / "head_copy.sqlite"
     shutil.copy2(tmp_path / "head_src.sqlite", copy_path)
