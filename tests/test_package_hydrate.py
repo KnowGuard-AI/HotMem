@@ -406,8 +406,9 @@ def test_midstream_corruption_rolls_back_everything(tmp_path: Path, src_db: Memo
 
     target = MemoryDB(tmp_path / "clean.sqlite")
     before = _fingerprint(target)
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(PackageError) as exc_info:
         hydrate_package(target, out)
+    assert exc_info.value.reason == "malformed_payload"
     assert _fingerprint(target) == before  # zero rows from the good prefix
     target.close()
 

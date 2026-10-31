@@ -1554,6 +1554,73 @@ def test_snapshot_v2_manifest_carries_mount_identity_and_replay_cursor(
         verify_manifest(bad_dir)
     assert exc_info2.value.file == "replay_cursor"
 
+    # Derived identity fields are recomputed from the payload for #94 exports.
+    for field, value in (("state_fingerprint", "f" * 64), ("snapshot_id", "0" * 64)):
+        tampered = dict(raw_manifest)
+        tampered[field] = value
+        (bad_dir / MANIFEST_NAME).write_text(json.dumps(tampered), encoding="utf-8")
+        with pytest.raises(SnapshotChecksumError) as exc_derived:
+            verify_manifest(bad_dir)
+        assert exc_derived.value.file == field
+
+
+def test_hydrate_duplicate_records_remains_a_clone_not_a_fork(tmp_path: Path):
+    """#94: skipped duplicate records must not make a clean clone look divergent."""
+    from hotmem.interchange.fingerprint import (
+        record_fingerprint,
+        state_fingerprint,
+        state_fingerprint_from_list,
+    )
+    from hotmem.mount import compare_mount_lineage
+    from hotmem.snapshot.format import compute_overall, compute_snapshot_id
+    from hotmem.swap import add_memory
+
+    src = MemoryDB(tmp_path / "dup_src.sqlite")
+    snap_dir = tmp_path / "dup_snap"
+    try:
+        add_memory(src, "dup/x", "One duplicated fact")
+        snapshot(src, snap_dir)
+        manifest = json.loads((snap_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+        payload_path = snap_dir / MEMORIES_NAME
+        lines = payload_path.read_text(encoding="utf-8").splitlines()
+        duplicate = json.loads(lines[0])
+        duplicate["id"] = "dup-alternate-id"
+        records = [json.loads(lines[0]), duplicate]
+        payload = ("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n").encode()
+        payload_path.write_bytes(payload)
+
+        manifest["files"][MEMORIES_NAME] = {
+            "size": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        manifest["overall_sha256"] = compute_overall(
+            {name: entry["sha256"] for name, entry in manifest["files"].items()}
+        )
+        manifest["memory_count"] = len(records)
+        manifest["inline_count"] = int(manifest.get("inline_count") or 0) + 1
+        manifest["snapshot_id"] = compute_snapshot_id([r["content_hash"] for r in records])
+        manifest["state_fingerprint"] = state_fingerprint_from_list(
+            [record_fingerprint(r) for r in records]
+        )
+        (snap_dir / MANIFEST_NAME).write_text(
+            json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8"
+        )
+
+        target = MemoryDB(tmp_path / "dup_target.sqlite")
+        try:
+            result = hydrate(target, snap_dir)
+            assert result.loaded == 1
+            assert result.skipped_dupes == 1
+            assert target.count() == 1
+            assert compare_mount_lineage(src, target)["relationship"] == "clone"
+            assert target.mount_identity().base_state_fingerprint == state_fingerprint(
+                target.all_rows()
+            )
+        finally:
+            target.close()
+    finally:
+        src.close()
+
 
 def test_snapshot_same_mount_bootstrap_clone_records_clone_lineage_and_replays(
     populated_db: MemoryDB, tmp_path: Path

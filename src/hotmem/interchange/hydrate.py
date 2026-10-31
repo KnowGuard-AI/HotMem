@@ -212,6 +212,30 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
 
     spool: Path | None = None
     record_count = 0
+    content_hashes: list[str] = []
+    fingerprints: list[str] = []
+
+    def _scan_identity_line(line: bytes) -> None:
+        from hotmem.interchange.fingerprint import record_fingerprint
+
+        text = line.strip()
+        if not text:
+            return
+        try:
+            record = json.loads(text)
+        except json.JSONDecodeError as err:
+            raise PackageError("malformed_payload", file=payload_name) from err
+        if not isinstance(record, dict):
+            raise PackageError("malformed_payload", file=payload_name)
+        content_hashes.append(str(record.get("content_hash") or ""))
+        try:
+            normalized = normalize_record(record, default_source="interchange")
+            if validate_record(normalized):
+                return
+            fingerprints.append(record_fingerprint(normalized))
+        except AnnotationValidationError:
+            return
+
     try:
         if payload_name == PAYLOAD_GZ:
             expected_decompressed = entry.get("decompressed_sha256")
@@ -244,6 +268,9 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
                     expected=expected_decompressed,
                     actual=decompressed_sha.hexdigest(),
                 )
+            with open(spool, "rb") as f:
+                for line in f:
+                    _scan_identity_line(line)
         else:
             payload_sha = hashlib.sha256()
             with open(payload_path, "rb") as f:
@@ -258,6 +285,9 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
                     expected=str(entry.get("sha256")),
                     actual=payload_sha.hexdigest(),
                 )
+            with open(payload_path, "rb") as f:
+                for line in f:
+                    _scan_identity_line(line)
 
         expected_count = int(manifest.get("record_count") or 0)
         if record_count != expected_count:
@@ -267,6 +297,33 @@ def verify_package(pkg_dir: str | Path) -> VerifiedPackage:
                 expected=str(expected_count),
                 actual=str(record_count),
             )
+
+        # #94: packages carrying a portable replay cursor must have
+        # derivation-consistent identity fields. Legacy packages without a
+        # cursor keep byte-only verification.
+        if str(manifest.get("replay_cursor") or ""):
+            from hotmem.interchange.canonical import logical_id
+            from hotmem.interchange.fingerprint import state_fingerprint_from_list
+
+            expected_logical = str(manifest.get("logical_id") or "")
+            computed_logical = logical_id(content_hashes)
+            if expected_logical and computed_logical != expected_logical:
+                raise PackageError(
+                    "logical_id_mismatch",
+                    file=payload_name,
+                    expected=expected_logical,
+                    actual=computed_logical,
+                )
+            expected_fp = str(manifest.get("state_fingerprint") or "")
+            if expected_fp:
+                computed_fp = state_fingerprint_from_list(fingerprints)
+                if computed_fp != expected_fp:
+                    raise PackageError(
+                        "state_fingerprint_mismatch",
+                        file=payload_name,
+                        expected=expected_fp,
+                        actual=computed_fp,
+                    )
     except PackageError:
         if spool is not None:
             spool.unlink(missing_ok=True)
@@ -497,12 +554,9 @@ def hydrate_package(
             if record_clone:
                 from hotmem.interchange.fingerprint import state_fingerprint
 
-                manifest_fp = str(verified.manifest.get("state_fingerprint") or "")
-                base_fp = (
-                    manifest_fp
-                    if target_namespace is None and manifest_fp
-                    else state_fingerprint(db.all_rows())
-                )
+                # Lineage must describe the state actually loaded (skipped
+                # duplicates/invalid records make the manifest fingerprint an
+                # unreliable base anchor).
                 db.record_clone_lineage(
                     source_mount_id=pkg_mount_id,
                     source_replica_id=str(
@@ -512,7 +566,7 @@ def hydrate_package(
                         verified.manifest.get("history_id") or pkg_source.get("history_id") or ""
                     ),
                     base_snapshot_id=str(verified.manifest.get("logical_id") or ""),
-                    base_state_fingerprint=base_fp,
+                    base_state_fingerprint=state_fingerprint(db.all_rows()),
                     base_cursor=str(verified.manifest.get("replay_cursor") or ""),
                     adopt_mount_id=(target_namespace is None),
                     _commit=False,

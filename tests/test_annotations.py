@@ -582,6 +582,9 @@ def test_consecutive_invalid_annotation_records_are_both_counted(tmp_path: Path)
         "size": payload.stat().st_size,
         "sha256": hashlib.sha256(payload.read_bytes()).hexdigest(),
     }
+    # This fixture intentionally mutates records after export; drop the derived
+    # state fingerprint so #94 verification does not reject the crafted payload.
+    manifest.pop("state_fingerprint", None)
     (pkg / "manifest.json").write_text(json.dumps(manifest))
 
     target = MemoryDB(tmp_path / "adj-target.sqlite")

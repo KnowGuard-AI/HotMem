@@ -47,6 +47,7 @@ from hotmem.snapshot.format import (
     Manifest,
     SnapshotChecksumError,
     compute_overall,
+    compute_snapshot_id,
     sha256_file,
 )
 from hotmem.swap import HYDRATE_BATCH, HydrateResult, record_to_memory_record
@@ -183,6 +184,67 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
                     file=rel_att,
                     expected=ref.source_checksum,
                     actual=fentry.sha256,
+                )
+
+    # #94: manifests carrying a portable replay cursor must also have
+    # derivation-consistent identity fields. Recompute snapshot_id and
+    # state_fingerprint from the payload so tampered metadata is rejected
+    # before hydrate. Legacy manifests without a cursor keep byte-only
+    # verification for backward compatibility.
+    if manifest.replay_cursor:
+        from hotmem.interchange.fingerprint import (
+            record_fingerprint,
+            state_fingerprint_from_list,
+        )
+
+        content_hashes: list[str] = []
+        fingerprints: list[str] = []
+        memory_count = 0
+        with open(d / MEMORIES_NAME, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                memory_count += 1
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as err:
+                    raise SnapshotChecksumError("malformed", file=MEMORIES_NAME) from err
+                if not isinstance(record, dict):
+                    raise SnapshotChecksumError("malformed", file=MEMORIES_NAME)
+                content_hashes.append(str(record.get("content_hash") or ""))
+                try:
+                    normalized = normalize_record(record, default_source="snapshot")
+                    if validate_record(normalized):
+                        continue
+                    fingerprints.append(record_fingerprint(normalized))
+                except AnnotationValidationError:
+                    continue
+
+        if manifest.memory_count and memory_count != manifest.memory_count:
+            raise SnapshotChecksumError(
+                "mismatch",
+                file="memory_count",
+                expected=f"count={manifest.memory_count}",
+                actual=f"count={memory_count}",
+            )
+        if manifest.snapshot_id:
+            computed_snapshot_id = compute_snapshot_id(content_hashes)
+            if computed_snapshot_id != manifest.snapshot_id:
+                raise SnapshotChecksumError(
+                    "mismatch",
+                    file="snapshot_id",
+                    expected=manifest.snapshot_id,
+                    actual=computed_snapshot_id,
+                )
+        if manifest.state_fingerprint:
+            computed_fp = state_fingerprint_from_list(fingerprints)
+            if computed_fp != manifest.state_fingerprint:
+                raise SnapshotChecksumError(
+                    "mismatch",
+                    file="state_fingerprint",
+                    expected=manifest.state_fingerprint,
+                    actual=computed_fp,
                 )
 
     return manifest
@@ -351,17 +413,15 @@ def hydrate_v2(
             if record_clone:
                 from hotmem.interchange.fingerprint import state_fingerprint
 
-                base_fp = (
-                    manifest.state_fingerprint
-                    if target_namespace is None and manifest.state_fingerprint
-                    else state_fingerprint(db.all_rows())
-                )
+                # Lineage must describe the state actually loaded (skipped
+                # duplicates/invalid records make the manifest fingerprint an
+                # unreliable base anchor).
                 db.record_clone_lineage(
                     source_mount_id=manifest.mount_id,
                     source_replica_id=manifest.replica_id,
                     source_history_id=manifest.history_id,
                     base_snapshot_id=manifest.snapshot_id,
-                    base_state_fingerprint=base_fp,
+                    base_state_fingerprint=state_fingerprint(db.all_rows()),
                     base_cursor=manifest.replay_cursor,
                     adopt_mount_id=(target_namespace is None),
                     _commit=False,

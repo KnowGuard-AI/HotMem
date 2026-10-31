@@ -323,3 +323,28 @@ def test_same_mount_bootstrap_clone_records_clone_lineage_and_replays(
         assert compare_mount_lineage(src_db, clone)["relationship"] == "clone"
     finally:
         clone.close()
+
+
+def test_package_verification_recomputes_derived_identity_fields(src_db: MemoryDB, tmp_path: Path):
+    """#94: packages carrying a replay cursor must have derivation-consistent
+    logical_id and state_fingerprint metadata."""
+    from hotmem.interchange.hydrate import PackageError, verify_package
+
+    out = tmp_path / "pkg_derived"
+    write_package(src_db, out)
+    manifest_path = out / MANIFEST_NAME
+    original = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    for field, value, reason in (
+        ("logical_id", "f" * 64, "logical_id_mismatch"),
+        ("state_fingerprint", "f" * 64, "state_fingerprint_mismatch"),
+    ):
+        tampered = dict(original)
+        tampered[field] = value
+        manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
+        with pytest.raises(PackageError) as exc_info:
+            verify_package(out)
+        assert exc_info.value.reason == reason
+
+    manifest_path.write_text(json.dumps(original), encoding="utf-8")
+    assert verify_package(out).manifest["logical_id"] == original["logical_id"]
