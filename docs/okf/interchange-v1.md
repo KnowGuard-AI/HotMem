@@ -121,12 +121,16 @@ Three digest layers, computed in this order:
 
 1. **Record**: `(namespace, content_hash)` (above) -- per-record logical
    identity and the deduplication key.
-2. **Logical** (`logical_id` in the manifest): `SHA-256` of the concatenation
-   of all record `content_hash` values in sorted order. This is the same
-   algorithm as Snapshot v2 `snapshot_id`
-   (`hotmem.snapshot.format.compute_snapshot_id`); equivalent content sets
-   always produce an equal `logical_id`. This content-set digest does not
-   encode namespaces (#100); it is not a per-record identity check.
+2. **Logical** (`logical_id` in the interchange package manifest): `SHA-256` of
+   the concatenation of all record `content_hash` values in sorted order
+   (`hotmem.interchange.canonical.logical_id` /
+   `hotmem.snapshot.format.compute_legacy_snapshot_id`); equivalent content
+   sets always produce an equal `logical_id`. This content-set digest does not
+   encode namespaces (#100); it is not a per-record identity check. Snapshot v2
+   manifests (`hotmem-snapshot-v2`) additionally version their `snapshot_id`
+   with `snapshot_id_version: 2` (`hotmem-snapshot-id-v2`, issue #96) over all
+   27 `preserve` columns, attachment references, and semantic namespace scope
+   (see `docs/snapshot-v2.md`).
 3. **File**: per-file `{size, sha256}` of the bytes actually stored, plus
    `decompressed_sha256` for compressed payloads.
 

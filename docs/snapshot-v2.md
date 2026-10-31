@@ -22,7 +22,9 @@ export time (`created_at`) and `hotmem_version`, which are informational.
 {
   "format": "hotmem-snapshot-v2",
   "schema_version": 2,
-  "snapshot_id": "<sha256 of sorted content_hash list>",
+  "snapshot_id": "<sha256 of canonical semantic snapshot projection>",
+  "snapshot_id_version": 2,
+  "snapshot_id_algorithm": "hotmem-snapshot-id-v2",
   "memory_count": 42,
   "file_backed_count": 3,
   "inline_count": 39,
@@ -55,11 +57,25 @@ export time (`created_at`) and `hotmem_version`, which are informational.
   records `caller_id`, `session_id`, `source`, `namespace`,
   `permitted_namespaces`, `share_approvals`, `exported_count`,
   `omitted_count`, and `store_id`. It is never part of `overall_sha256`.
-- `snapshot_id`: `SHA-256` of the sorted `content_hash` list. Deterministic
-  for identical content sets regardless of insert order. It is a content-set
-  digest, not the per-record identity tuple: namespaces are not encoded
-  (#100), so two stores with the same hashes in different namespaces share a
-  `snapshot_id` even though their records are distinct.
+  Semantic namespace partition keys (`namespace`, `permitted_namespaces`)
+  participate in v2 semantic `snapshot_id`; caller/session/counter provenance
+  inside `scope` is excluded as packaging noise.
+- `snapshot_id`, `snapshot_id_version`, `snapshot_id_algorithm` (#96):
+  - New Snapshot v2 writers emit `snapshot_id_version: 2` and
+    `snapshot_id_algorithm: "hotmem-snapshot-id-v2"`.
+  - Under v2 (`hotmem-snapshot-id-v2`), `snapshot_id` is the domain-separated
+    `SHA-256` digest of the canonical semantic snapshot projection over all
+    27 `preserve` record columns from `MEMORY_FIELD_INVENTORY` (#99),
+    canonical `file_backed_references` (including `attachment` bindings), and
+    normalized namespace `scope` (`compute_semantic_snapshot_id`).
+  - Two snapshots with the same `content_hash` values in different namespaces,
+    or with different portable metadata, provenance, lifecycle, relationship,
+    or attachment reference state, produce distinct v2 `snapshot_id` values.
+  - Legacy v1 manifests (`snapshot_id_version: 1`,
+    `snapshot_id_algorithm: "hotmem-snapshot-id-v1"`, or unversioned pre-#96
+    manifests) use `compute_legacy_snapshot_id` (`SHA-256` of sorted
+    `content_hash` strings) and remain verifiable under an explicit
+    backward-compatibility rule.
 - `created_at` / `hotmem_version`: informational provenance of the export.
   They are not covered by any digest, so re-exporting the same DB changes
   `manifest.json` bytes but never changes `snapshot_id`.
@@ -245,6 +261,62 @@ identity are unaffected.
 Bump `SCHEMA_VERSION` in `src/hotmem/snapshot/format.py` and add a migration
 path in `reader.py` for future incompatible format changes. Older snapshots
 remain readable; the reader dispatches by `schema_version`.
+
+## Canonical semantic snapshot identity (issue #96)
+
+Snapshot v2 separates **semantic snapshot identity** (`snapshot_id`) from
+**package-byte integrity** (`files` and `overall_sha256`), **per-memory logical
+identity** (`(namespace, content_hash)`, #100), **delta CAS fingerprinting**
+(`record_fingerprint`, #73), and **replica clone/fork divergence**
+(`lineage_fingerprint`, #94):
+
+1. **Per-record semantic projection (`semantic_record_projection` /
+   `semantic_record_digest`)**:
+   - Includes all 27 `preserve` columns from `MEMORY_FIELD_INVENTORY` (#99):
+     `id`, `identifier`, `fact_text`, `fact_summary`, `memory_type`,
+     `content_hash`, `namespace`, `source`, `importance`, `metadata`,
+     `provenance`, `tags`, `ttl_seconds`, `created_at`, `updated_at`, `tier`,
+     `promotion_state`, `promotion_candidate`, `parent_memory`,
+     `related_memories`, `source_uri`, `source_format`, `source_checksum`,
+     `byte_offset`, `byte_length`, `snapshot_id` (row origin-snapshot column),
+     and resolved row `schema_version` (`record_schema_version` when present).
+   - Excludes the 3 `regenerate` columns (`embedding`, `embedding_dim`,
+     `embedding_model`) and store-local tables.
+   - Normalizes all string scalars and JSON object keys to Unicode NFC,
+     recursively sorts JSON object keys (`metadata`, `provenance`), normalizes
+     `-0.0` to `0.0`, normalizes `source_uri` via `normalize_source_uri`, and
+     resolves omitted/null values to their documented defaults while preserving
+     explicit `source: ""` and `byte_offset: 0` / `byte_length: 0`.
+   - Domain prefix: `hotmem-snapshot-record-v2:<canonical_json>`.
+2. **Snapshot envelope (`semantic_snapshot_projection` /
+   `compute_semantic_snapshot_id`)**:
+   - `records`: ascending-sorted list of per-record `semantic_record_digest`
+     hex strings (order-independent over `memories.jsonl` lines; duplicate
+     logical records are preserved as a deterministic sorted multiset).
+   - `file_backed_references`: canonically sorted list of projected
+     `FileReference` dicts (`memory_id`, normalized `source_uri`,
+     `byte_offset`, `byte_length`, `source_format`, `source_checksum`,
+     `attachment`).
+   - `scope`: `{"namespace": ..., "permitted_namespaces": [...]}` when a
+     semantic namespace filter is present, or `null` when unscoped (excluding
+     transient caller/session/counter fields).
+   - `version`: `2`.
+   - Domain prefix: `hotmem-snapshot-id-v2:<canonical_json>`.
+   - Empty unscoped snapshots hash `{"file_backed_references":[],"records":[],"scope":null,"version":2}`
+     to the fixed digest
+     `f8a6cf35d0d17fab750458fdd94399434cf4e5816fa10cb166d01ac22946b3dd`.
+3. **Versioned verification & legacy compatibility (`verify_manifest`)**:
+   - `snapshot_id_version: 2` (`"hotmem-snapshot-id-v2"`): recomputes and
+     enforces the v2 semantic digest over `memories.jsonl`,
+     `file_backed_references`, and `scope`.
+   - `snapshot_id_version: 1` (`"hotmem-snapshot-id-v1"`): recomputes and
+     enforces the legacy v1 content-hash-list digest
+     (`compute_legacy_snapshot_id`).
+   - Unversioned legacy manifests: cursor-bearing (#94) manifests verify
+     against the v1 (or v2) digest; pre-#94 cursorless manifests preserve
+     byte-integrity compatibility. Unknown or mismatched
+     `(snapshot_id_version, snapshot_id_algorithm)` metadata fails closed with
+     `SnapshotChecksumError("malformed")`.
 
 ## Portable mount identity and replay cursors (issue #94)
 
