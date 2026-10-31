@@ -9,7 +9,7 @@ Interface:
     MountConfig(mount_path, db_path, swap_path, manifest_path, mount_id)
     MountIdentity(mount_id, replica_id, history_id, ...)
     bootstrap_mount(mount_path, *, mount_id=None) -> MountConfig
-    compare_mount_lineage(source, target) -> dict
+    compare_mount_lineage(source_db, target_db) -> dict
 
 Deps: hotmem.trace, hotmem.interchange.fingerprint
 Extension: add manifest versioning, remote mount sync, or encryption here.
@@ -448,40 +448,12 @@ class _LineageProbe:
 
 
 def _extract_lineage_probe(target: Any) -> _LineageProbe:
-    """Normalize a MemoryDB, MountIdentity, manifest Path, or mapping for comparison."""
-    if isinstance(target, MountIdentity):
-        return _LineageProbe(
-            identity=target,
-            snapshot_id=target.base_snapshot_id,
-            state_fingerprint=target.base_state_fingerprint,
-            head_seq=max(target.cloned_at_seq, target.forked_at_seq, target.trimmed_through_seq),
-            head_event_id=target.forked_at_event_id,
-            event_map={},
-            post_base_mutations=0,
-        )
+    """Normalize a MemoryDB store for lineage comparison.
 
-    if isinstance(target, (str, Path)):
-        path = Path(target)
-        manifest_file = path / "manifest.json" if path.is_dir() else path
-        data = json.loads(manifest_file.read_text(encoding="utf-8"))
-        return _extract_lineage_probe(data)
-
-    if isinstance(target, Mapping):
-        ident = MountIdentity.from_dict(target)
-        snap_id = str(
-            target.get("snapshot_id") or target.get("logical_id") or ident.base_snapshot_id or ""
-        )
-        state_fp = str(target.get("state_fingerprint") or ident.base_state_fingerprint or "")
-        return _LineageProbe(
-            identity=ident,
-            snapshot_id=snap_id,
-            state_fingerprint=state_fp,
-            head_seq=int(target.get("head_seq") or 0),
-            head_event_id=str(target.get("head_event_id") or ""),
-            event_map={},
-            post_base_mutations=int(target.get("post_base_mutations") or 0),
-        )
-
+    Lineage classification requires event history and state; manifests and
+    ``MountIdentity`` values are rejected to avoid base-link-only guesses (#94).
+    Hydrate a snapshot/package into a store and compare stores instead.
+    """
     if hasattr(target, "mount_identity") and hasattr(target, "all_rows"):
         from hotmem.annotations import AnnotationValidationError
         from hotmem.interchange.canonical import logical_id
@@ -539,16 +511,20 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
             post_base_mutations=post_mutations,
         )
 
-    raise TypeError(f"Unsupported lineage target for comparison: {type(target)!r}")
+    raise TypeError(
+        "compare_mount_lineage requires MemoryDB stores with event history; "
+        f"got {type(target).__name__}. Hydrate the manifest/package into a store "
+        "and compare the stores, or compare persisted identity fields directly."
+    )
 
 
 def compare_mount_lineage(source: Any, target: Any) -> dict[str, Any]:
-    """Classify the relationship between two mounts, replicas, or manifests (#94).
+    """Classify the relationship between two store instances (#94).
 
-    ``MemoryDB`` inputs compare full event-id sequences and state fingerprints.
-    ``MountIdentity`` and mapping/manifest inputs compare base links only
-    (head/event detail is unavailable), so event-level divergence requires
-    store handles.
+    Both inputs must be ``MemoryDB``-like stores (mount identity, event log,
+    rows); classification compares full event-id sequences, state fingerprints,
+    and base links. Manifests and ``MountIdentity`` values fail closed because
+    they cannot prove event-level lineage.
 
     Returns a dictionary containing:
     - ``relationship``: one of ``same_replica``, ``clone``, ``fork``,

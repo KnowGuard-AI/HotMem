@@ -260,3 +260,9 @@ def test_mount_identity_from_dict_tolerates_malformed_numeric_fields():
         }
     )
     assert (ident.forked_at_seq, ident.cloned_at_seq, ident.trimmed_through_seq) == (0, 0, 0)
+
+
+def test_compare_mount_lineage_requires_store_handles():
+    ident = MountIdentity(mount_id="mnt-1", replica_id="rep-1", history_id="hist-1")
+    with pytest.raises(TypeError, match="requires MemoryDB stores"):
+        compare_mount_lineage(ident, ident)
