@@ -564,7 +564,10 @@ def semantic_record_projection(
     else:
         proj_source = _nfc(str(normalized.get("source") or default_source))
 
-    imp_val = float(normalized.get("importance", 0.5))
+    try:
+        imp_val = float(normalized.get("importance", 0.5))
+    except (TypeError, ValueError):
+        imp_val = 0.5
     if not math.isfinite(imp_val):
         imp_val = 0.5
     elif imp_val == 0.0:
@@ -599,7 +602,14 @@ def semantic_record_projection(
     proj_tier = _nfc(str(normalized.get("tier") or "hot").strip())
     raw_promo = str(normalized.get("promotion_state") or "HOT").strip()
     proj_promo_state = _nfc(raw_promo) if raw_promo in VALID_PROMOTION_STATES else "HOT"
-    proj_promo_candidate = 1 if int(normalized.get("promotion_candidate") or 0) == 1 else 0
+    # Projection must be total: invalid/non-scalar values are coerced to the
+    # default here, never raised. Untrusted manifests reach this code during
+    # verify_manifest, which must fail closed instead of leaking ValueError.
+    raw_candidate = normalized.get("promotion_candidate")
+    try:
+        proj_promo_candidate = 1 if int(raw_candidate or 0) == 1 else 0
+    except (TypeError, ValueError):
+        proj_promo_candidate = 0
 
     proj_parent = _nfc(str(normalized.get("parent_memory") or "").strip())
     proj_source_format = _nfc(str(normalized.get("source_format") or "").strip())
@@ -609,7 +619,10 @@ def semantic_record_projection(
     resolved_schema = (
         normalized.get("record_schema_version") or normalized.get("schema_version") or 1
     )
-    proj_schema_version = int(resolved_schema)
+    try:
+        proj_schema_version = int(resolved_schema)
+    except (TypeError, ValueError):
+        proj_schema_version = 1
 
     return {
         "byte_length": b_length,

@@ -2461,3 +2461,109 @@ def test_manifest_identity_version_validation_and_cursor_compatibility(tmp_path:
             clone_v1.close()
     finally:
         src.close()
+
+
+def test_semantic_projection_is_total_for_malformed_lifecycle_fields():
+    """#96 review: projection must never raise on adversarial lifecycle values."""
+    from hotmem.snapshot.format import semantic_record_projection
+
+    base = {"id": "tot-1", "identifier": "ops/total", "fact_text": "Projection totality."}
+    for candidate in ("abc", {"a": 1}, [1], 2.5, None, "", False):
+        proj = semantic_record_projection({**base, "promotion_candidate": candidate})
+        assert proj["promotion_candidate"] in (0, 1)
+    assert (
+        semantic_record_projection({**base, "promotion_candidate": True})["promotion_candidate"]
+        == 1
+    )
+    assert (
+        semantic_record_projection({**base, "promotion_candidate": 1})["promotion_candidate"] == 1
+    )
+
+
+def test_verify_manifest_maps_unexpected_projection_errors_to_malformed(
+    tmp_path: Path, monkeypatch
+):
+    """#96 review: verifier fails closed instead of leaking ValueError/TypeError."""
+    import hotmem.snapshot.reader as v2_reader
+
+    db = MemoryDB(tmp_path / "failclosed.sqlite")
+    try:
+        db.insert(
+            id="fc-1",
+            identifier="ops/failclosed",
+            fact_text="Fail closed.",
+            embedding=pack_embedding(embed_text("Fail closed.")),
+            embedding_dim=EMBEDDING_DIM,
+            embedding_model=EMBEDDING_MODEL,
+            source="agent://test",
+            importance=0.5,
+            metadata_json="{}",
+            content_hash=hashlib.sha256(b"ops/failclosed:Fail closed.").hexdigest(),
+            created_at="2026-10-30T10:00:00Z",
+            namespace="ops",
+            tier="hot",
+            promotion_state="HOT",
+            promotion_candidate=0,
+        )
+        snap_dir = tmp_path / "failclosed_snap"
+        snapshot(db, snap_dir)
+    finally:
+        db.close()
+
+    def boom(*args, **kwargs):
+        raise ValueError("simulated coercion failure")
+
+    monkeypatch.setattr(v2_reader, "semantic_record_digest", boom)
+    with pytest.raises(SnapshotChecksumError) as exc:
+        verify_manifest(snap_dir)
+    assert exc.value.reason == "malformed"
+    assert exc.value.file == MEMORIES_NAME
+
+
+def test_verify_manifest_handles_uncoercible_promotion_candidate(tmp_path: Path):
+    """#96 review: a re-sealed manifest with `promotion_candidate: "abc"` must
+    verify deterministically and hydrate as an invalid record, never crash."""
+    from hotmem.interchange.fingerprint import state_fingerprint_from_list
+    from hotmem.snapshot.format import compute_overall, compute_semantic_snapshot_id, sha256_file
+    from hotmem.swap import add_memory
+
+    src = MemoryDB(tmp_path / "malformed_candidate.sqlite")
+    snap_dir = tmp_path / "malformed_candidate_snap"
+    try:
+        add_memory(src, "ops/candidate", "Malformed promotion candidate.")
+        snapshot(src, snap_dir)
+    finally:
+        src.close()
+
+    mem_path = snap_dir / MEMORIES_NAME
+    record = json.loads(mem_path.read_text(encoding="utf-8").strip())
+    record["promotion_candidate"] = "abc"
+    mem_path.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+
+    manifest_path = snap_dir / MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    new_sha = sha256_file(mem_path)
+    manifest["files"][MEMORIES_NAME] = {"size": mem_path.stat().st_size, "sha256": new_sha}
+    manifest["overall_sha256"] = compute_overall({MEMORIES_NAME: new_sha})
+    manifest["snapshot_id"] = compute_semantic_snapshot_id(
+        [record],
+        file_backed_references=[],
+        scope=manifest.get("scope"),
+    )
+    # The record is invalid, so it contributes no state fingerprint; re-seal the
+    # metadata the way a producer of this (invalid) payload would.
+    manifest["state_fingerprint"] = state_fingerprint_from_list([])
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+
+    assert verify_manifest(snap_dir).snapshot_id == manifest["snapshot_id"]
+
+    dst = MemoryDB(tmp_path / "malformed_candidate_dst.sqlite")
+    try:
+        res = hydrate(dst, snap_dir)
+        assert res.loaded == 0
+        assert res.invalid == 1
+        assert dst.count() == 0
+    finally:
+        dst.close()

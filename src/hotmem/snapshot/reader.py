@@ -219,7 +219,14 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
                 if not isinstance(record, dict):
                     raise SnapshotChecksumError("malformed", file=MEMORIES_NAME)
                 content_hashes.append(str(record.get("content_hash") or ""))
-                semantic_digests.append(semantic_record_digest(record, default_source="snapshot"))
+                try:
+                    semantic_digests.append(
+                        semantic_record_digest(record, default_source="snapshot")
+                    )
+                except (TypeError, ValueError) as err:
+                    # Untrusted payloads must fail closed with the verifier's
+                    # own error, never leak a coercion exception (#96).
+                    raise SnapshotChecksumError("malformed", file=MEMORIES_NAME) from err
                 if manifest.replay_cursor and manifest.state_fingerprint:
                     try:
                         normalized = normalize_record(record, default_source="snapshot")
