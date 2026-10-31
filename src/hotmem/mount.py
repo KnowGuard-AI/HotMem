@@ -499,7 +499,13 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
             content_hash = str(row.get("content_hash") or "")
             if content_hash:
                 content_hashes.append(content_hash)
-            semantic_digests.append(semantic_record_digest(row, default_source="snapshot"))
+            try:
+                normalized = normalize_record(row)
+            except AnnotationValidationError:
+                normalized = None
+            semantic_digests.append(
+                semantic_record_digest(row, default_source="snapshot", normalized=normalized)
+            )
             if str(row.get("memory_type") or "") == "file" and row.get("source_uri"):
                 derived_file_refs.append(
                     FileReference(
@@ -512,14 +518,11 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
                         attachment=None,
                     )
                 )
-            try:
-                normalized = normalize_record(row)
-                state_fps.append(record_fingerprint(normalized))
+            if normalized is not None:
+                state_fps.append(record_fingerprint(normalized, normalized=normalized))
                 # Lineage divergence also sees portable relationship fields
                 # that the delta fingerprint contract intentionally excludes.
-                lineage_fps.append(lineage_record_fingerprint(normalized))
-            except AnnotationValidationError:
-                continue
+                lineage_fps.append(lineage_record_fingerprint(normalized, normalized=normalized))
         state_fp = state_fingerprint_from_list(state_fps)
         lineage_fp = state_fingerprint_from_list(lineage_fps)
         snap_id = logical_id(content_hashes)

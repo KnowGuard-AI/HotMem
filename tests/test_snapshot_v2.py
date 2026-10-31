@@ -2765,3 +2765,62 @@ def test_compute_snapshot_id_rejects_ambiguous_inputs():
     assert len(compute_snapshot_id(records)) == 64
     assert len(compute_snapshot_id(records, version=2)) == 64
     assert compute_snapshot_id(hashes, version=1) == compute_snapshot_id(hashes)
+
+
+def test_semantic_identity_projects_each_record_once(monkeypatch):
+    """#96 review: identity computation must not re-project records for
+    derived references or digests (write/verify/lineage hot paths)."""
+    import hotmem.snapshot.format as snapshot_format
+
+    calls = {"n": 0}
+    real = snapshot_format._normalize_record_safe
+
+    def counting(raw, **kwargs):
+        calls["n"] += 1
+        return real(raw, **kwargs)
+
+    monkeypatch.setattr(snapshot_format, "_normalize_record_safe", counting)
+
+    records = [
+        {
+            "id": "perf-1",
+            "identifier": "perf/one",
+            "memory_type": "file",
+            "fact_text": "",
+            "source_uri": "data/one.bin",
+            "byte_offset": 0,
+            "byte_length": 10,
+            "source_format": "bin",
+            "source_checksum": "aa" * 32,
+        },
+        {
+            "id": "perf-2",
+            "identifier": "perf/two",
+            "memory_type": "file",
+            "fact_text": "",
+            "source_uri": "data/two.bin",
+            "byte_offset": 5,
+            "byte_length": 20,
+            "source_format": "bin",
+            "source_checksum": "bb" * 32,
+        },
+        {"id": "perf-3", "identifier": "perf/three", "fact_text": "Inline record."},
+    ]
+    snapshot_format.compute_semantic_snapshot_id(records)
+    assert calls["n"] == len(records)
+
+
+def test_semantic_record_digest_reuses_precomputed_normalization():
+    """#96 review: the fast path must produce byte-identical digests."""
+    from hotmem.interchange.record import normalize_record
+    from hotmem.snapshot.format import semantic_record_digest
+
+    record = {
+        "id": "reuse-1",
+        "identifier": "reuse/one",
+        "fact_text": "Reuse normalization.",
+        "namespace": "ops",
+        "promotion_candidate": 0,
+    }
+    normalized = normalize_record(record, default_source="snapshot")
+    assert semantic_record_digest(record) == semantic_record_digest(record, normalized=normalized)

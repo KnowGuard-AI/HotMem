@@ -221,21 +221,29 @@ def verify_manifest(snapshot_dir: str | Path) -> Manifest:
                     raise SnapshotChecksumError("malformed", file=MEMORIES_NAME)
                 content_hashes.append(str(record.get("content_hash") or ""))
                 try:
+                    normalized_record: dict | None = normalize_record(
+                        record, default_source="snapshot"
+                    )
+                except AnnotationValidationError:
+                    normalized_record = None
+                try:
                     semantic_digests.append(
-                        semantic_record_digest(record, default_source="snapshot")
+                        semantic_record_digest(
+                            record,
+                            default_source="snapshot",
+                            normalized=normalized_record,
+                        )
                     )
                 except (TypeError, ValueError) as err:
                     # Untrusted payloads must fail closed with the verifier's
                     # own error, never leak a coercion exception (#96).
                     raise SnapshotChecksumError("malformed", file=MEMORIES_NAME) from err
-                if manifest.state_fingerprint:
-                    try:
-                        normalized = normalize_record(record, default_source="snapshot")
-                        if validate_record(normalized):
-                            continue
-                        fingerprints.append(record_fingerprint(normalized))
-                    except AnnotationValidationError:
-                        continue
+                if (
+                    manifest.state_fingerprint
+                    and normalized_record is not None
+                    and not validate_record(normalized_record)
+                ):
+                    fingerprints.append(record_fingerprint(record, normalized=normalized_record))
 
         if (manifest.memory_count or manifest.snapshot_id_version) and (
             memory_count != manifest.memory_count

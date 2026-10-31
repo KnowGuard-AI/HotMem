@@ -500,7 +500,10 @@ def _normalize_record_safe(
 
 
 def semantic_record_projection(
-    raw: Mapping[str, Any], *, default_source: str = "snapshot"
+    raw: Mapping[str, Any],
+    *,
+    default_source: str = "snapshot",
+    normalized: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Project a memory record to its 27 portable ``preserve`` columns (#96, #99).
 
@@ -510,7 +513,8 @@ def semantic_record_projection(
     normalized to Unicode NFC, omitted/null values normalize to their documented
     defaults, and an omitted ``id`` projects to ``""`` instead of a random UUID.
     """
-    normalized = _normalize_record_safe(raw, default_source=default_source)
+    if normalized is None:
+        normalized = _normalize_record_safe(raw, default_source=default_source)
 
     raw_id_val = raw.get("id")
     proj_id = "" if raw_id_val is None else _nfc(str(raw_id_val).strip())
@@ -669,11 +673,20 @@ def semantic_record_projection(
     }
 
 
-def semantic_record_digest(raw: Mapping[str, Any], *, default_source: str = "snapshot") -> str:
-    """Domain-separated SHA-256 hex digest of a record's canonical semantic projection."""
-    proj = semantic_record_projection(raw, default_source=default_source)
-    payload = f"{_RECORD_PROJECTION_DOMAIN}:{canonical_dumps(proj)}".encode()
+def _projection_digest(projection: Mapping[str, Any]) -> str:
+    payload = f"{_RECORD_PROJECTION_DOMAIN}:{canonical_dumps(projection)}".encode()
     return sha256_bytes(payload)
+
+
+def semantic_record_digest(
+    raw: Mapping[str, Any],
+    *,
+    default_source: str = "snapshot",
+    normalized: Mapping[str, Any] | None = None,
+) -> str:
+    """Domain-separated SHA-256 hex digest of a record's canonical semantic projection."""
+    proj = semantic_record_projection(raw, default_source=default_source, normalized=normalized)
+    return _projection_digest(proj)
 
 
 def semantic_file_reference_projection(
@@ -738,12 +751,11 @@ def semantic_scope_projection(scope: Mapping[str, Any] | None) -> dict[str, Any]
     }
 
 
-def _derive_file_references_from_records(
-    records: Iterable[Mapping[str, Any]],
+def _derive_file_references_from_projections(
+    projections: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
     derived: list[dict[str, Any]] = []
-    for rec in records:
-        proj = semantic_record_projection(rec)
+    for proj in projections:
         if proj["memory_type"] == "file" and proj["source_uri"]:
             derived.append(
                 {
@@ -783,12 +795,14 @@ def semantic_snapshot_projection(
     default_source: str = "snapshot",
 ) -> dict[str, Any]:
     """Canonical envelope for Snapshot v2 semantic identity (#96)."""
-    record_list = list(records)
-    sorted_digests = sorted(
-        semantic_record_digest(r, default_source=default_source) for r in record_list
-    )
+    projections = [
+        semantic_record_projection(record, default_source=default_source) for record in records
+    ]
+    sorted_digests = sorted(_projection_digest(projection) for projection in projections)
     if file_backed_references is None:
-        sorted_refs = _sort_file_ref_projections(_derive_file_references_from_records(record_list))
+        sorted_refs = _sort_file_ref_projections(
+            _derive_file_references_from_projections(projections)
+        )
     else:
         sorted_refs = _sort_file_ref_projections(file_backed_references)
     return {

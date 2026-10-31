@@ -77,20 +77,12 @@ _FINGERPRINT_FIELDS: tuple[str, ...] = (
 )
 
 
-def record_fingerprint(row: dict[str, Any]) -> str:
-    """SHA-256 over the canonical sorted JSON of sync-relevant fields.
-
-    Accepts a raw DB row dict (from all_rows/iter_rows) or a normalized
-    interchange record — both normalize to the same canonical state, so
-    fingerprints agree across the producer/applier boundary. Unknown keys
-    are ignored; the record id is never part of the fingerprint.
-    """
-    normalized = normalize_record(row)
+def _canonical_fingerprint_state(normalized: dict[str, Any]) -> str:
     state = {field: normalized.get(field) for field in _FINGERPRINT_FIELDS}
     state["schema_version"] = normalized.get("record_schema_version") or normalized.get(
         "schema_version"
     )
-    canonical = json.dumps(
+    return json.dumps(
         state,
         sort_keys=True,
         separators=(",", ":"),
@@ -98,6 +90,22 @@ def record_fingerprint(row: dict[str, Any]) -> str:
         allow_nan=False,
         default=str,
     )
+
+
+def record_fingerprint(row: dict[str, Any], *, normalized: dict[str, Any] | None = None) -> str:
+    """SHA-256 over the canonical sorted JSON of sync-relevant fields.
+
+    Accepts a raw DB row dict (from all_rows/iter_rows) or a normalized
+    interchange record — both normalize to the same canonical state, so
+    fingerprints agree across the producer/applier boundary. Unknown keys
+    are ignored; the record id is never part of the fingerprint.
+
+    Callers that already normalized the row may pass ``normalized`` to avoid
+    a redundant normalization pass.
+    """
+    if normalized is None:
+        normalized = normalize_record(row)
+    canonical = _canonical_fingerprint_state(normalized)
     return sha256_bytes(f"v{FINGERPRINT_VERSION}:{canonical}".encode())
 
 
@@ -119,7 +127,9 @@ def state_fingerprint_from_list(fingerprints: list[str]) -> str:
 _LINEAGE_RELATIONSHIP_FIELDS: tuple[str, ...] = ("parent_memory", "related_memories")
 
 
-def lineage_record_fingerprint(row: dict[str, Any]) -> str:
+def lineage_record_fingerprint(
+    row: dict[str, Any], *, normalized: dict[str, Any] | None = None
+) -> str:
     """Per-record lineage fingerprint including portable relationship fields.
 
     Kept separate from ``record_fingerprint`` / ``FINGERPRINT_VERSION``: delta
@@ -127,8 +137,9 @@ def lineage_record_fingerprint(row: dict[str, Any]) -> str:
     ``related_memories`` (ADR-003), but lost-update detection for #94 mount
     lineage must treat them as state. Not used by delta manifests.
     """
-    normalized = normalize_record(row)
-    base = record_fingerprint(normalized)
+    if normalized is None:
+        normalized = normalize_record(row)
+    base = record_fingerprint(normalized, normalized=normalized)
     relationship_state = {field: normalized.get(field) for field in _LINEAGE_RELATIONSHIP_FIELDS}
     canonical = json.dumps(
         relationship_state,
