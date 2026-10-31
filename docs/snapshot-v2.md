@@ -263,8 +263,10 @@ Snapshot v2 manifests carry additive lineage and replay cursor fields:
   excluded from this digest).
 - `replay_cursor`: opaque, versioned `hmc1.<payload>.<checksum>` replay cursor
   bound to `(mount_id, replica_id, history_id, base_snapshot_id, scope, seq,
-  anchor_event_id)`. The checksum detects accidental corruption only; it is not
-  authentication. Cursors and manifests must be treated as untrusted input.
+  anchor_event_id)`. The checksum is the full SHA-256 digest of the token and
+  detects corruption/accidental drift, but it is not authentication (an
+  explicit non-goal); use authenticated transport for untrusted channels.
+  Cursors and manifests must be treated as untrusted input.
   Scope (`namespace`, `event_types`) is fixed at issuance; replay callers cannot
   narrow it later.
 

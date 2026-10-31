@@ -36,9 +36,12 @@ Event ordering:
      intentionally undefined.
 
      Serialized cursors (``hmc1.<payload>.<checksum>``) are opaque to callers.
-     The 8-hex checksum detects accidental corruption only; it is not a
-     signature or authentication mechanism. Treat cursors and manifests as
-     untrusted input and verify source/base identity before replay.
+     The checksum is the full SHA-256 digest of the token prefix and payload; it
+     detects corruption and accidental metadata drift, but it is not a
+     signature or authentication mechanism (authentication is an explicit
+     non-goal for this contract -- use authenticated transport). Treat cursors
+     and manifests as untrusted input and verify source/base identity before
+     replay.
 
 Payload contract:
      ``payload`` is a free-form dict, stored as JSON. The ``memory.created``
@@ -282,7 +285,7 @@ class ReplayCursor:
         ).encode("ascii")
         b64 = base64.urlsafe_b64encode(raw_json).decode("ascii").rstrip("=")
         signing_input = f"{CURSOR_PREFIX}.{b64}".encode("ascii")
-        checksum = hashlib.sha256(signing_input).hexdigest()[:8]
+        checksum = hashlib.sha256(signing_input).hexdigest()
         return f"{CURSOR_PREFIX}.{b64}.{checksum}"
 
     @classmethod
@@ -383,7 +386,7 @@ def decode_cursor(raw: Any) -> ReplayCursor:
         )
 
     payload_b64, sig = parts[1], parts[2]
-    expected_sig = hashlib.sha256(f"{prefix}.{payload_b64}".encode("ascii")).hexdigest()[:8]
+    expected_sig = hashlib.sha256(f"{prefix}.{payload_b64}".encode("ascii")).hexdigest()
     if sig != expected_sig:
         raise ReplayCursorError(
             "malformed_cursor",

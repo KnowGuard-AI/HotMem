@@ -831,14 +831,14 @@ def test_cursor_versioning_and_corruption_rejection(tmp_path: Path):
             .decode("ascii")
             .rstrip("=")
         )
-        sig = hashlib.sha256(f"hmc1.{b64}".encode("ascii")).hexdigest()[:8]
+        sig = hashlib.sha256(f"hmc1.{b64}".encode("ascii")).hexdigest()
         with pytest.raises(ReplayCursorError) as exc_inner:
             decode_cursor(f"hmc1.{b64}.{sig}")
         assert exc_inner.value.reason == "unsupported_cursor_version"
 
         # Tampered checksum fails with malformed_cursor.
         with pytest.raises(ReplayCursorError) as exc_chk:
-            decode_cursor(f"hmc1.{parts[1]}.00000000")
+            decode_cursor(f"hmc1.{parts[1]}.{'0' * 64}")
         assert exc_chk.value.reason == "malformed_cursor"
 
         # Oversized tokens are rejected before parsing.
@@ -856,7 +856,7 @@ def test_cursor_versioning_and_corruption_rejection(tmp_path: Path):
             .decode("ascii")
             .rstrip("=")
         )
-        sig_scope = hashlib.sha256(f"hmc1.{b64_scope}".encode("ascii")).hexdigest()[:8]
+        sig_scope = hashlib.sha256(f"hmc1.{b64_scope}".encode("ascii")).hexdigest()
         with pytest.raises(ReplayCursorError) as exc_scope_payload:
             decode_cursor(f"hmc1.{b64_scope}.{sig_scope}")
         assert exc_scope_payload.value.reason == "malformed_cursor"
