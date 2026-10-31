@@ -2706,3 +2706,62 @@ def test_verify_manifest_enforces_state_fingerprint_without_cursor(tmp_path: Pat
         json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
     assert verify_manifest(snap_dir).snapshot_id == manifest["snapshot_id"]
+
+
+def test_semantic_projection_preserves_distinct_invalid_lifecycle_and_provenance():
+    """#96 review: invalid enum-like values and malformed provenance stay
+    distinct instead of collapsing into a real default/null."""
+    from hotmem.snapshot.format import compute_semantic_snapshot_id, semantic_record_projection
+
+    base = {"id": "inv-1", "identifier": "ops/invalid", "fact_text": "Invalid state."}
+    default_proj = semantic_record_projection(base)
+    bogus_state = semantic_record_projection({**base, "promotion_state": "BOGUS"})
+    bogus_tier = semantic_record_projection({**base, "tier": "lukewarm"})
+
+    assert default_proj["promotion_state"] == "HOT"
+    assert default_proj["tier"] == "hot"
+    assert bogus_state["promotion_state"] == "BOGUS"
+    assert bogus_tier["tier"] == "lukewarm"
+    assert bogus_state["promotion_state"] != default_proj["promotion_state"]
+    assert bogus_tier["tier"] != default_proj["tier"]
+
+    prov_list = semantic_record_projection({**base, "provenance": ["a", "b"]})
+    prov_str = semantic_record_projection({**base, "provenance": "a,b"})
+    prov_none = semantic_record_projection({**base, "provenance": None})
+    assert prov_list["provenance"] != prov_str["provenance"]
+    assert prov_list["provenance"] != prov_none["provenance"]
+    assert prov_none["provenance"] is None
+
+    assert compute_semantic_snapshot_id(
+        [{**base, "promotion_state": "BOGUS"}]
+    ) != compute_semantic_snapshot_id([base])
+
+
+def test_compute_snapshot_id_rejects_ambiguous_inputs():
+    """#96 review: the backward-compatible dispatcher must never silently drop
+    or ignore caller inputs."""
+    from hotmem.snapshot.format import compute_snapshot_id
+
+    hashes = ["a" * 64, "b" * 64]
+    records = [{"id": "r1", "identifier": "ops/r1", "fact_text": "x"}]
+
+    with pytest.raises(TypeError):
+        compute_snapshot_id([*hashes, *records])
+    with pytest.raises(TypeError):
+        compute_snapshot_id(records, version=1)
+    with pytest.raises(TypeError):
+        compute_snapshot_id(hashes, version=2)
+    with pytest.raises(ValueError):
+        compute_snapshot_id(hashes, scope={"namespace": "ops"})
+    with pytest.raises(ValueError):
+        compute_snapshot_id(hashes, file_backed_references=[])
+    with pytest.raises(ValueError):
+        compute_snapshot_id(records, version=99)
+    with pytest.raises(TypeError):
+        compute_snapshot_id([1, 2])
+
+    # Supported forms remain intact.
+    assert len(compute_snapshot_id(hashes)) == 64
+    assert len(compute_snapshot_id(records)) == 64
+    assert len(compute_snapshot_id(records, version=2)) == 64
+    assert compute_snapshot_id(hashes, version=1) == compute_snapshot_id(hashes)

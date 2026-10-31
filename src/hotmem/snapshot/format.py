@@ -51,7 +51,7 @@ from hotmem.interchange.canonical import (
     compute_file_reference_hash,
     normalize_source_uri,
 )
-from hotmem.interchange.record import VALID_PROMOTION_STATES, normalize_record
+from hotmem.interchange.record import normalize_record
 
 # ── Format constants ─────────────────────────────────────────────────────────
 
@@ -574,10 +574,16 @@ def semantic_record_projection(
         imp_val = 0.0
 
     proj_metadata = _canonicalize_json_value(normalized.get("metadata") or {})
+    # Provenance defaults only for absent/blank values. Malformed non-object
+    # payloads are preserved under "value" (mirroring metadata) so distinct
+    # invalid states keep distinct identities instead of collapsing to null.
     raw_prov = normalized.get("provenance")
-    proj_provenance = (
-        _canonicalize_json_value(raw_prov) if isinstance(raw_prov, Mapping) and raw_prov else None
-    )
+    if isinstance(raw_prov, Mapping):
+        proj_provenance = _canonicalize_json_value(raw_prov) if raw_prov else None
+    elif raw_prov is None or raw_prov == "":
+        proj_provenance = None
+    else:
+        proj_provenance = {"value": _canonicalize_json_value(raw_prov)}
 
     proj_tags = [_nfc(str(t).strip()) for t in (normalized.get("tags") or []) if str(t).strip()]
     proj_related = [
@@ -599,9 +605,17 @@ def semantic_record_projection(
         else None
     )
 
-    proj_tier = _nfc(str(normalized.get("tier") or "hot").strip())
-    raw_promo = str(normalized.get("promotion_state") or "HOT").strip()
-    proj_promo_state = _nfc(raw_promo) if raw_promo in VALID_PROMOTION_STATES else "HOT"
+    # Enum-like lifecycle fields default only when absent/blank. Invalid
+    # non-blank values are preserved verbatim (deterministically) so distinct
+    # invalid states never collide with a real default (#96 review).
+    raw_tier = normalized.get("tier")
+    proj_tier = (
+        "hot" if raw_tier is None or str(raw_tier).strip() == "" else _nfc(str(raw_tier).strip())
+    )
+    raw_promo = normalized.get("promotion_state")
+    proj_promo_state = (
+        "HOT" if raw_promo is None or str(raw_promo).strip() == "" else _nfc(str(raw_promo).strip())
+    )
     # Projection must be total: invalid/non-scalar values are coerced to the
     # default here, never raised. Untrusted manifests reach this code during
     # verify_manifest, which must fail closed instead of leaking ValueError.
@@ -832,27 +846,44 @@ def compute_snapshot_id(
     scope: Mapping[str, Any] | None = None,
     version: int | None = None,
 ) -> str:
-    """Deterministic snapshot id with backward-compatible dispatch.
+    """Deterministic snapshot id with strict, backward-compatible dispatch.
 
-    - When ``version == 1`` or ``items`` is a sequence of ``str`` content hashes
-      (and ``version`` is not explicitly ``2``), returns the v1 content-hash-list
-      digest.
-    - When ``version == 2`` or ``items`` contains record mappings, returns the
-      v2 canonical semantic snapshot digest (#96).
+    - ``version=1`` (legacy): ``items`` must be content hashes.
+    - ``version=2`` (semantic, #96): ``items`` must be record mappings.
+    - ``version=None``: inferred from the item types. Mixed or unsupported
+      item types raise instead of silently dropping inputs, and scope/reference
+      arguments are rejected for hash lists because they cannot apply to them.
     """
     item_list = list(items)
+    has_records = any(isinstance(item, Mapping) for item in item_list)
+    has_hashes = any(isinstance(item, str) for item in item_list)
+
+    if has_records and has_hashes:
+        raise TypeError("compute_snapshot_id accepts either record mappings or content hashes")
+    if version not in (None, LEGACY_SNAPSHOT_ID_VERSION, SNAPSHOT_ID_VERSION):
+        raise ValueError(f"unsupported snapshot id version: {version!r}")
     if version == LEGACY_SNAPSHOT_ID_VERSION:
-        return compute_legacy_snapshot_id(str(x) for x in item_list)
-    if version == SNAPSHOT_ID_VERSION or any(isinstance(x, Mapping) for x in item_list):
+        if has_records:
+            raise TypeError("snapshot id version 1 requires content hashes")
+        if file_backed_references is not None or scope is not None:
+            raise ValueError("legacy snapshot id does not accept scope or file references")
+        return compute_legacy_snapshot_id(str(item) for item in item_list)
+    if version == SNAPSHOT_ID_VERSION:
+        if has_hashes:
+            raise TypeError("snapshot id version 2 requires record mappings")
         return compute_semantic_snapshot_id(
-            [x for x in item_list if isinstance(x, Mapping)],
+            item_list,
+            file_backed_references=file_backed_references,
+            scope=scope,
+        )
+    if has_records:
+        return compute_semantic_snapshot_id(
+            item_list,
             file_backed_references=file_backed_references,
             scope=scope,
         )
     if file_backed_references is not None or scope is not None:
-        return compute_semantic_snapshot_id(
-            [],
-            file_backed_references=file_backed_references,
-            scope=scope,
-        )
-    return compute_legacy_snapshot_id(str(x) for x in item_list)
+        raise ValueError("scope/file_backed_references require record mappings")
+    if any(not isinstance(item, str) for item in item_list):
+        raise TypeError("snapshot id items must be record mappings or content hashes")
+    return compute_legacy_snapshot_id(item_list)
