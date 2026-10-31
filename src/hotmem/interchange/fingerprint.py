@@ -29,6 +29,8 @@ Purpose:
 Interface:
       record_fingerprint(row) -> str
       state_fingerprint(rows) -> str
+      lineage_record_fingerprint(row) -> str
+      lineage_fingerprint(rows) -> str
       FINGERPRINT_VERSION
 
 Deps: hotmem.interchange.canonical, hotmem.interchange.record. No db
@@ -112,3 +114,41 @@ def state_fingerprint(rows: list[dict[str, Any]] | tuple) -> str:
 def state_fingerprint_from_list(fingerprints: list[str]) -> str:
     """Aggregate pre-computed per-record fingerprints (streaming producers)."""
     return sha256_bytes("".join(sorted(fingerprints)).encode())
+
+
+_LINEAGE_RELATIONSHIP_FIELDS: tuple[str, ...] = ("parent_memory", "related_memories")
+
+
+def lineage_record_fingerprint(row: dict[str, Any]) -> str:
+    """Per-record lineage fingerprint including portable relationship fields.
+
+    Kept separate from ``record_fingerprint`` / ``FINGERPRINT_VERSION``: delta
+    CAS semantics intentionally exclude ``parent_memory`` and
+    ``related_memories`` (ADR-003), but lost-update detection for #94 mount
+    lineage must treat them as state. Not used by delta manifests.
+    """
+    normalized = normalize_record(row)
+    base = record_fingerprint(normalized)
+    relationship_state = {field: normalized.get(field) for field in _LINEAGE_RELATIONSHIP_FIELDS}
+    canonical = json.dumps(
+        relationship_state,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+        default=str,
+    )
+    return sha256_bytes(f"lineage-v1:{base}:{canonical}".encode())
+
+
+def lineage_fingerprint(rows) -> str:
+    """Aggregate lineage fingerprints for a collection (streaming-friendly)."""
+    from hotmem.annotations import AnnotationValidationError
+
+    fingerprints: list[str] = []
+    for row in rows:
+        try:
+            fingerprints.append(lineage_record_fingerprint(row))
+        except AnnotationValidationError:
+            continue
+    return state_fingerprint_from_list(fingerprints)

@@ -331,3 +331,62 @@ def test_copied_store_relationship_only_divergence_is_a_fork(
     finally:
         src.close()
         copy.close()
+
+
+@pytest.mark.parametrize("hydration", ("snapshot", "package"))
+@pytest.mark.parametrize(
+    ("column", "changed_value"),
+    (
+        ("related_memories", '["mem-related-other"]'),
+        ("parent_memory", "mem-parent-other"),
+    ),
+)
+def test_hydrated_clone_relationship_only_divergence_is_a_fork(
+    tmp_path: Path, hydration: str, column: str, changed_value: str
+):
+    """#94: distinct-replica clones stored with the old delta fingerprint must
+    still detect relationship-only divergence against their hydrated base."""
+    from hotmem.events import (
+        ReplayCursorError,
+        issue_replay_cursor,
+        replay_with_cursor,
+    )
+    from hotmem.interchange.hydrate import hydrate_package
+    from hotmem.interchange.package import write_package
+    from hotmem.snapshot import hydrate, snapshot
+
+    src = MemoryDB(tmp_path / "clone_rel_src.sqlite")
+    add_memory(src, "clone/rel", "hydrated relationship clone seed")
+    row_id = src.all_rows()[0]["id"]
+    export_dir = tmp_path / f"clone_rel_{hydration}"
+    if hydration == "snapshot":
+        snapshot(src, export_dir)
+    else:
+        write_package(src, export_dir)
+
+    clone = MemoryDB(tmp_path / f"clone_rel_{hydration}_target.sqlite")
+    try:
+        if hydration == "snapshot":
+            hydrate(clone, export_dir)
+        else:
+            hydrate_package(clone, export_dir)
+        assert clone.mount_identity().base_lineage_fingerprint
+        clone._conn.execute(
+            f"UPDATE memories SET {column} = ? WHERE id = ?",
+            (changed_value, row_id),
+        )
+        clone.commit()
+        before_rows = clone.count()
+
+        result = compare_mount_lineage(src, clone)
+        assert result["relationship"] == "fork", result
+        assert result["reason"] == "clone_diverged_after_base"
+
+        cursor = issue_replay_cursor(src, position="start").encode()
+        with pytest.raises(ReplayCursorError) as exc_info:
+            replay_with_cursor(src, clone, cursor=cursor)
+        assert exc_info.value.reason == "fork_diverged"
+        assert clone.count() == before_rows
+    finally:
+        src.close()
+        clone.close()

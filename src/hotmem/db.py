@@ -931,6 +931,7 @@ class MemoryDB:
             runtime_generation=runtime_generation,
             base_snapshot_id=self.get_meta("base_snapshot_id") or "",
             base_state_fingerprint=self.get_meta("base_state_fingerprint") or "",
+            base_lineage_fingerprint=self.get_meta("base_lineage_fingerprint") or "",
             base_source_mount_id=self.get_meta("base_source_mount_id") or "",
             base_source_replica_id=self.get_meta("base_source_replica_id") or "",
             base_history_id=self.get_meta("base_history_id") or "",
@@ -1011,6 +1012,15 @@ class MemoryDB:
             self.set_meta("base_snapshot_id", base_snapshot_id, _commit=False)
         if base_state_fingerprint:
             self.set_meta("base_state_fingerprint", base_state_fingerprint, _commit=False)
+        # Clone-base lineage includes portable relationship fields so a hydrated
+        # clone diverging only in parent_memory/related_memories is a fork (#94).
+        from hotmem.interchange.fingerprint import lineage_fingerprint
+
+        self.set_meta(
+            "base_lineage_fingerprint",
+            lineage_fingerprint(self.iter_rows(include_embedding=False)),
+            _commit=False,
+        )
         if base_cursor:
             self.set_meta("base_cursor", base_cursor, _commit=False)
 
@@ -1105,6 +1115,7 @@ class MemoryDB:
         for cleared_key in (
             "base_snapshot_id",
             "base_state_fingerprint",
+            "base_lineage_fingerprint",
             "base_source_mount_id",
             "base_source_replica_id",
             "base_history_id",

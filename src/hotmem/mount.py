@@ -94,6 +94,7 @@ class MountIdentity:
     runtime_generation: str = ""
     base_snapshot_id: str = ""
     base_state_fingerprint: str = ""
+    base_lineage_fingerprint: str = ""
     base_source_mount_id: str = ""
     base_source_replica_id: str = ""
     base_history_id: str = ""
@@ -114,6 +115,7 @@ class MountIdentity:
             "runtime_generation": self.runtime_generation,
             "base_snapshot_id": self.base_snapshot_id,
             "base_state_fingerprint": self.base_state_fingerprint,
+            "base_lineage_fingerprint": self.base_lineage_fingerprint,
             "base_source_mount_id": self.base_source_mount_id,
             "base_source_replica_id": self.base_source_replica_id,
             "base_history_id": self.base_history_id,
@@ -150,6 +152,7 @@ class MountIdentity:
             base_state_fingerprint=str(
                 data.get("base_state_fingerprint") or data.get("state_fingerprint") or ""
             ),
+            base_lineage_fingerprint=str(data.get("base_lineage_fingerprint") or ""),
             base_source_mount_id=str(data.get("base_source_mount_id") or ""),
             base_source_replica_id=str(data.get("base_source_replica_id") or ""),
             base_history_id=str(data.get("base_history_id") or ""),
@@ -436,9 +439,6 @@ def bootstrap_mount(
     )
 
 
-_LINEAGE_RELATIONSHIP_FIELDS = ("parent_memory", "related_memories")
-
-
 @dataclass
 class _LineageProbe:
     identity: MountIdentity
@@ -460,8 +460,9 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
     """
     if hasattr(target, "mount_identity") and hasattr(target, "all_rows"):
         from hotmem.annotations import AnnotationValidationError
-        from hotmem.interchange.canonical import logical_id, sha256_bytes
+        from hotmem.interchange.canonical import logical_id
         from hotmem.interchange.fingerprint import (
+            lineage_record_fingerprint,
             record_fingerprint,
             state_fingerprint_from_list,
         )
@@ -482,23 +483,11 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
             try:
                 normalized = normalize_record(row)
                 state_fps.append(record_fingerprint(normalized))
+                # Lineage divergence also sees portable relationship fields
+                # that the delta fingerprint contract intentionally excludes.
+                lineage_fps.append(lineage_record_fingerprint(normalized))
             except AnnotationValidationError:
                 continue
-            # Lineage divergence must see portable relationship fields that the
-            # delta fingerprint contract intentionally excludes (#94).
-            relationship_state = {
-                field: normalized.get(field) for field in _LINEAGE_RELATIONSHIP_FIELDS
-            }
-            relationship_json = json.dumps(
-                relationship_state,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                default=str,
-            )
-            lineage_fps.append(
-                sha256_bytes(f"lineage-v1:{state_fps[-1]}:{relationship_json}".encode())
-            )
         state_fp = state_fingerprint_from_list(state_fps)
         lineage_fp = state_fingerprint_from_list(lineage_fps)
         snap_id = logical_id(content_hashes)
@@ -520,9 +509,8 @@ def _extract_lineage_probe(target: Any) -> _LineageProbe:
             if len(event_rows) < 1000:
                 break
 
-        fp_diverged = bool(
-            ident.base_state_fingerprint and state_fp != ident.base_state_fingerprint
-        )
+        base_lineage_fp = ident.base_lineage_fingerprint or ident.base_state_fingerprint
+        fp_diverged = bool(base_lineage_fp and lineage_fp != base_lineage_fp)
         post_mutations = post_events + (1 if fp_diverged else 0)
         return _LineageProbe(
             identity=ident,
