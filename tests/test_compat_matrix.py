@@ -795,7 +795,18 @@ def test_snapshot_v2_and_interchange_v1_hydrate_then_replay_create_update_delete
                 payload=_build_memory_created_payload(row),
             )
 
-        file_chash = compute_content_hash("ops/file-ref", "Initial file summary")
+        from hotmem.memory import FileRef, compute_file_content_hash
+
+        file_chash = compute_file_content_hash(
+            "ops/file-ref",
+            FileRef(
+                source_uri="runbook.md",
+                byte_offset=0,
+                byte_length=24,
+                source_format="text/markdown",
+                source_checksum="a" * 64,
+            ),
+        )
         src.insert_file_backed(
             id="m-file-ops",
             identifier="ops/file-ref",

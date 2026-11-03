@@ -2318,6 +2318,123 @@ def test_v1_envelope_preconditions_category_and_unknown_event_rejection(tmp_path
         target_unknown.close()
 
 
+def test_file_backed_update_uses_canonical_reference_identity(tmp_path: Path):
+    """#98/#100 review: file-backed updates use the canonical reference hash,
+    preserve dedupe identity, and replay validates relative reference hashes."""
+    from hotmem.events import (
+        _build_memory_updated_payload,
+        append_event,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.memory import (
+        FileRef,
+        add_file_backed,
+        compute_file_content_hash,
+        find_existing_file_record,
+    )
+
+    backing = tmp_path / "doc.txt"
+    backing.write_text("0123456789abcdefghijklmnopqrstuvwxyz", encoding="utf-8")
+    src = MemoryDB(tmp_path / "file_identity_src.sqlite")
+    target = MemoryDB(tmp_path / "file_identity_target.sqlite")
+    try:
+        ref = FileRef(
+            source_uri="doc.txt",
+            byte_offset=0,
+            byte_length=10,
+            source_format="text/plain",
+            source_checksum="a" * 64,
+        )
+        mid, initial_hash = add_file_backed(
+            src,
+            "docs/doc",
+            ref,
+            base_dir=str(tmp_path),
+            summary="initial file summary",
+        )
+        assert initial_hash == compute_file_content_hash("docs/doc", ref, base_dir=str(tmp_path))
+        from hotmem.events import _build_memory_created_payload
+
+        initial_row = src.get_memory(mid)
+        assert initial_row is not None
+        append_event(
+            src,
+            event_type="memory.created",
+            memory_id=mid,
+            namespace=initial_row["namespace"],
+            payload=_build_memory_created_payload(initial_row),
+        )
+
+        update_memory_record(
+            src,
+            mid,
+            byte_offset=5,
+            byte_length=20,
+            fact_summary="updated file summary",
+            source_checksum="b" * 64,
+            base_dir=str(tmp_path),
+        )
+        row = src.get_memory(mid)
+        assert row is not None
+        new_ref = FileRef(
+            source_uri=row["source_uri"],
+            byte_offset=row["byte_offset"],
+            byte_length=row["byte_length"],
+            source_format=row["source_format"],
+            source_checksum=row["source_checksum"],
+        )
+        expected_hash = compute_file_content_hash(
+            row["identifier"], new_ref, base_dir=str(tmp_path)
+        )
+        assert row["content_hash"] == expected_hash
+        assert (
+            find_existing_file_record(
+                src, row["namespace"], row["identifier"], new_ref, base_dir=str(tmp_path)
+            )
+            is not None
+        )
+        assert (
+            add_file_backed(
+                src,
+                row["identifier"],
+                new_ref,
+                base_dir=str(tmp_path),
+                summary="updated file summary",
+            )[0]
+            == mid
+        )
+
+        res = replay_with_cursor(src, target)
+        assert res.applied == 2
+        replayed = target.get_memory(mid)
+        assert replayed is not None
+        assert replayed["content_hash"] == expected_hash
+        assert replayed["byte_offset"] == 5
+        assert replayed["byte_length"] == 20
+        assert replayed["source_checksum"] == "b" * 64
+
+        tampered_after = {
+            **row,
+            "content_hash": "f" * 64,
+        }
+        tampered = _build_memory_updated_payload(tampered_after, before_record=row)
+        append_event(
+            src,
+            event_type="memory.updated",
+            memory_id=mid,
+            namespace=row["namespace"],
+            payload=tampered,
+        )
+        with pytest.raises(Exception) as exc_hash:
+            replay_with_cursor(src, target, cursor=res.cursor)
+        assert getattr(exc_hash.value, "reason", "") == "identity_mismatch"
+        assert target.get_memory(mid)["content_hash"] == expected_hash
+    finally:
+        src.close()
+        target.close()
+
+
 def test_legacy_created_events_and_file_backed_transitions_replay_cleanly(tmp_path: Path):
     """#98 criteria 9 & 12: legacy memory.created events (no payload_schema_version)
     and file-backed record updates/deletes replay deterministically."""
@@ -2331,6 +2448,7 @@ def test_legacy_created_events_and_file_backed_transitions_replay_cleanly(tmp_pa
         update_memory_record,
     )
     from hotmem.interchange.canonical import compute_content_hash
+    from hotmem.memory import FileRef, compute_file_content_hash
 
     src = MemoryDB(tmp_path / "legacy_mix_src.sqlite")
     target = MemoryDB(tmp_path / "legacy_mix_target.sqlite")
@@ -2370,7 +2488,16 @@ def test_legacy_created_events_and_file_backed_transitions_replay_cleanly(tmp_pa
 
         # 2. Insert a file-backed record, update its byte window/summary, then delete leg.
         mid_file = "mem-file-01"
-        file_chash = compute_content_hash("docs/runbook", "Initial file summary")
+        file_chash = compute_file_content_hash(
+            "docs/runbook",
+            FileRef(
+                source_uri="docs/runbook.md",
+                byte_offset=0,
+                byte_length=256,
+                source_format="text/markdown",
+                source_checksum="c" * 64,
+            ),
+        )
         src.insert_file_backed(
             id=mid_file,
             identifier="docs/runbook",

@@ -1451,9 +1451,10 @@ def _validate_and_plan_event_step(
     - ``'apply_delete'``
     """
     from hotmem.annotations import AnnotationValidationError
-    from hotmem.interchange.canonical import compute_content_hash
+    from hotmem.interchange.canonical import compute_content_hash, normalize_source_uri
     from hotmem.interchange.fingerprint import record_fingerprint
     from hotmem.interchange.record import normalize_record, validate_record
+    from hotmem.memory import FileRef, compute_file_content_hash, legacy_file_content_hashes
 
     raw_seq = evt.get("seq")
     evt_id = str(evt.get("event_id") or "")
@@ -1737,12 +1738,59 @@ def _validate_and_plan_event_step(
                     memory_id=mid,
                 )
             source_uri = str(payload.get("source_uri") or "")
+            computed_hash: str | None = None
             if not source_uri:
                 computed_hash = compute_content_hash(
                     str(payload.get("identifier") or ""),
                     str(payload.get("fact_text") or ""),
                 )
-                if chash != computed_hash:
+            else:
+                norm_uri = normalize_source_uri(source_uri)
+                # Portable replay can recompute file-reference identity for
+                # relative URIs. Absolute host paths require the source
+                # base_dir, which is not part of the event payload; their
+                # canonical hash cannot be rederived portably.
+                is_absolute = norm_uri.startswith("/") or (
+                    len(norm_uri) >= 2 and norm_uri[1] == ":"
+                )
+                if not is_absolute:
+                    try:
+                        offset_int = int(payload.get("byte_offset") or 0)
+                        length_int = int(payload.get("byte_length") or 0)
+                    except (TypeError, ValueError) as exc:
+                        raise ReplayExecutionError(
+                            "malformed_event_payload",
+                            f"Event {etype!r} at seq={seq} has invalid file byte range.",
+                            event_seq=seq,
+                            event_id=evt_id,
+                            memory_id=mid,
+                        ) from exc
+                    computed_hash = compute_file_content_hash(
+                        str(payload.get("identifier") or ""),
+                        FileRef(
+                            source_uri=source_uri,
+                            byte_offset=offset_int,
+                            byte_length=length_int,
+                            source_format=str(payload.get("source_format") or ""),
+                            source_checksum=str(payload.get("source_checksum") or "") or None,
+                        ),
+                    )
+            if computed_hash is not None:
+                accepted_hashes = {computed_hash}
+                if source_uri:
+                    accepted_hashes.update(
+                        legacy_file_content_hashes(
+                            str(payload.get("identifier") or ""),
+                            FileRef(
+                                source_uri=source_uri,
+                                byte_offset=int(payload.get("byte_offset") or 0),
+                                byte_length=int(payload.get("byte_length") or 0),
+                                source_format=str(payload.get("source_format") or ""),
+                                source_checksum=str(payload.get("source_checksum") or "") or None,
+                            ),
+                        )
+                    )
+                if chash not in accepted_hashes:
                     raise ReplayExecutionError(
                         "identity_mismatch",
                         f"Event {etype!r} at seq={seq} has content_hash={chash!r} != "
@@ -2783,6 +2831,7 @@ def update_memory_record(
     source_checksum: str | None = None,
     byte_offset: Any = _UNSET,
     byte_length: Any = _UNSET,
+    base_dir: str | None = None,
     updated_at: str | None = None,
     occurred_at: str | None = None,
     reason: str | None = None,
@@ -2802,6 +2851,7 @@ def update_memory_record(
     from hotmem.embed import DEFAULT_EMBEDDER, pack_embedding
     from hotmem.interchange.canonical import compute_content_hash
     from hotmem.interchange.record import normalize_record, validate_record
+    from hotmem.memory import FileRef, compute_file_content_hash
 
     clean_key = (idempotency_key or "").strip()
     request_digest = ""
@@ -2830,6 +2880,7 @@ def update_memory_record(
             "source_checksum": source_checksum,
             "byte_offset": None if byte_offset is _UNSET else byte_offset,
             "byte_length": None if byte_length is _UNSET else byte_length,
+            "base_dir": base_dir,
             "reason": reason,
             "signal_event_type": signal_event_type,
             "signal_payload": signal_payload,
@@ -2870,27 +2921,61 @@ def update_memory_record(
         else (None if fact_summary is None else str(fact_summary))
     )
     new_uri = str(before_row.get("source_uri") or "") if source_uri is None else str(source_uri)
-    new_mem_type = "file" if new_uri else str(before_row.get("memory_type") or "fact")
+    new_mem_type = "file" if new_uri else "fact"
+    clearing_file = source_uri is not None and not new_uri
 
     if new_uri:
-        # File-backed record: if identifier or summary or checksum changed, recompute hash
         new_checksum = (
             str(before_row.get("source_checksum") or "")
             if source_checksum is None
             else str(source_checksum)
         )
-        if (
+        new_format = (
+            str(before_row.get("source_format") or "")
+            if source_format is None
+            else str(source_format)
+        )
+        new_offset = before_row.get("byte_offset") if byte_offset is _UNSET else byte_offset
+        new_length = before_row.get("byte_length") if byte_length is _UNSET else byte_length
+        if new_offset is None or new_length is None:
+            raise ValueError(
+                "file-backed updates require byte_offset and byte_length (or an existing reference)"
+            )
+        try:
+            offset_int = int(new_offset)
+            length_int = int(new_length)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("file-backed byte_offset/byte_length must be integers") from exc
+        if offset_int < 0 or length_int < 0:
+            raise ValueError("file-backed byte_offset/byte_length must be non-negative")
+        identity_changed = (
             identifier is not None
-            or fact_text is not None
-            or fact_summary is not _UNSET
-            or source_checksum is not None
-        ):
-            hash_basis = new_fact or new_summary or new_checksum or new_uri
-            new_chash = compute_content_hash(new_ident, hash_basis)
+            or source_uri is not None
+            or source_format is not None
+            or byte_offset is not _UNSET
+            or byte_length is not _UNSET
+        )
+        if identity_changed:
+            new_chash = compute_file_content_hash(
+                new_ident,
+                FileRef(
+                    source_uri=new_uri,
+                    byte_offset=offset_int,
+                    byte_length=length_int,
+                    source_format=new_format,
+                    source_checksum=new_checksum or None,
+                ),
+                base_dir=base_dir,
+            )
         else:
             new_chash = str(before_row.get("content_hash") or "")
     else:
-        if identifier is not None or fact_text is not None:
+        # Inline record (or an explicit conversion from file-backed to inline).
+        new_checksum = ""
+        new_format = ""
+        new_offset = None
+        new_length = None
+        if identifier is not None or fact_text is not None or clearing_file:
             new_chash = compute_content_hash(new_ident, new_fact)
         else:
             new_chash = str(before_row.get("content_hash") or "")
@@ -2952,18 +3037,10 @@ def update_memory_record(
         "tier": str(before_row.get("tier") or "hot") if tier is None else str(tier),
         "memory_type": new_mem_type,
         "source_uri": new_uri,
-        "source_format": (
-            str(before_row.get("source_format") or "")
-            if source_format is None
-            else str(source_format)
-        ),
-        "source_checksum": (
-            str(before_row.get("source_checksum") or "")
-            if source_checksum is None
-            else str(source_checksum)
-        ),
-        "byte_offset": (before_row.get("byte_offset") if byte_offset is _UNSET else byte_offset),
-        "byte_length": (before_row.get("byte_length") if byte_length is _UNSET else byte_length),
+        "source_format": new_format,
+        "source_checksum": new_checksum,
+        "byte_offset": new_offset,
+        "byte_length": new_length,
         "updated_at": ts,
         "snapshot_id": (
             str(before_row.get("snapshot_id") or "") if snapshot_id is None else str(snapshot_id)

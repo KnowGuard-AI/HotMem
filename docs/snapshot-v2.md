@@ -452,6 +452,12 @@ delete` sequences without duplicate application or deleted-record resurrection:
      including `schema_version`, explicit `importance: 0.0`, and file-backed
      reference fields) plus `previous_content_hash` and
      `previous_record_fingerprint`.
+   - File-backed updates derive `content_hash` with the canonical #100
+     reference identity (`identifier` + normalized `source_uri` +
+     `byte_offset` + `byte_length`; checksum excluded), not from the summary or
+     checksum. Replay recomputes that canonical hash for relative references
+     and accepts documented pre-#100 legacy aliases; absolute host paths cannot
+     be rederived without the source `base_dir` and are carried as declared.
    - Complete after-state was selected over partial field patches so replay
      reuses `#99` record normalization/validation and `#78` embedding resolution
      directly, while making repeat replay of an already-applied range a
