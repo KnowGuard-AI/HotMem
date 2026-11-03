@@ -144,6 +144,31 @@ class ReplayExecutionError(ReplayCursorError):
         )
 
 
+class TombstoneCompactionError(ReplayCursorError):
+    """Error raised when tombstone compaction preconditions are violated (#98)."""
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        expected: Any = None,
+        actual: Any = None,
+        recovery: str = "",
+    ) -> None:
+        super().__init__(
+            reason,
+            message,
+            expected=expected,
+            actual=actual,
+            recovery=recovery
+            or (
+                "Trim the event log through the tombstone deletion sequence and ensure "
+                "all downstream replay cursors have advanced past that horizon first."
+            ),
+        )
+
+
 def _require_persistent_identity(ident: Any, where: str) -> None:
     """Fail with an actionable diagnostic when a store has no persistent identity (#94)."""
     if not (ident.mount_id and ident.replica_id and ident.history_id):
@@ -2654,11 +2679,7 @@ def update_memory_record(
 
     if clean_key:
         probe_ns = str((before_row or tombstone or {}).get("namespace") or "")
-        existing_op = db.get_idempotent_operation(
-            caller_id=caller_id,
-            namespace=probe_ns,
-            operation_key=clean_key,
-        )
+        existing_op = db.get_operation_ledger(caller_id, probe_ns, clean_key)
         if existing_op is not None:
             if existing_op["request_hash"] != request_digest:
                 raise ValueError(
@@ -2870,7 +2891,7 @@ def update_memory_record(
             "idempotent_replay": False,
         }
         if clean_key:
-            db.record_idempotent_operation(
+            db.put_operation_ledger(
                 caller_id=caller_id,
                 namespace=ns,
                 operation_key=clean_key,
@@ -2879,7 +2900,7 @@ def update_memory_record(
                 memory_id=memory_id,
                 content_hash=new_chash,
                 response_json=json.dumps(result, sort_keys=True, default=str),
-                commit=False,
+                _commit=False,
             )
         if _commit:
             db.commit()
@@ -2925,11 +2946,7 @@ def delete_memory_record(
 
     if clean_key:
         probe_ns = str((before_row or existing_tombstone or {}).get("namespace") or "")
-        existing_op = db.get_idempotent_operation(
-            caller_id=caller_id,
-            namespace=probe_ns,
-            operation_key=clean_key,
-        )
+        existing_op = db.get_operation_ledger(caller_id, probe_ns, clean_key)
         if existing_op is not None:
             if existing_op["request_hash"] != request_digest:
                 raise ValueError(
@@ -2999,7 +3016,7 @@ def delete_memory_record(
             "idempotent_replay": False,
         }
         if clean_key:
-            db.record_idempotent_operation(
+            db.put_operation_ledger(
                 caller_id=caller_id,
                 namespace=ns,
                 operation_key=clean_key,
@@ -3008,7 +3025,7 @@ def delete_memory_record(
                 memory_id=memory_id,
                 content_hash=str(before_row.get("content_hash") or ""),
                 response_json=json.dumps(result, sort_keys=True, default=str),
-                commit=False,
+                _commit=False,
             )
         if _commit:
             db.commit()
@@ -3018,6 +3035,111 @@ def delete_memory_record(
         raise
 
     return result
+
+
+def compact_tombstones(
+    db: MemoryDB,
+    *,
+    through_seq: int,
+    acked_cursor_seq: int | None = None,
+    namespace: str | None = None,
+    strict: bool = True,
+) -> dict[str, Any]:
+    """Compact persistent tombstones through ``through_seq`` when safe (#98).
+
+    Preconditions preventing resurrection:
+    1. ``through_seq`` must not exceed ``trimmed_through_seq`` (when ``strict=True``,
+       otherwise clamped to ``trimmed_through_seq``), so no pre-delete
+       ``memory.created`` or ``memory.updated`` events remain in the active
+       replayable event window.
+    2. When ``acked_cursor_seq`` is provided, ``through_seq`` must not exceed
+       ``acked_cursor_seq`` (proving downstream replay consumers have advanced
+       past the tombstone horizon).
+    3. For every candidate tombstone with ``deleted_at_seq <= effective_seq``:
+       - no live row with ``id == tombstone.memory_id`` may exist in ``memories``;
+       - no retained event with ``seq <= tombstone.deleted_at_seq`` may exist in ``events``.
+    4. ``store_meta['compacted_tombstones_through_seq']`` is monotonically advanced,
+       and ``validate_replay_cursor`` rejects any cursor behind that watermark.
+    """
+    if type(through_seq) is not int or through_seq < 0:
+        raise ValueError("through_seq must be a non-negative integer")
+    if acked_cursor_seq is not None and (type(acked_cursor_seq) is not int or acked_cursor_seq < 0):
+        raise ValueError("acked_cursor_seq must be a non-negative integer when provided")
+
+    bounds = db.event_log_bounds()
+    trimmed_through = int(bounds["trimmed_through_seq"])
+    prev_compacted = int(db.get_meta("compacted_tombstones_through_seq") or 0)
+
+    if strict and acked_cursor_seq is not None and through_seq > acked_cursor_seq:
+        raise TombstoneCompactionError(
+            "unacknowledged_tombstone_horizon",
+            f"Cannot compact tombstones through seq={through_seq} beyond "
+            f"acked_cursor_seq={acked_cursor_seq}.",
+            expected=f"through_seq<={acked_cursor_seq}",
+            actual=through_seq,
+        )
+
+    if strict and through_seq > trimmed_through:
+        raise TombstoneCompactionError(
+            "events_not_trimmed_through_tombstone",
+            f"Cannot compact tombstones through seq={through_seq}: event log is only "
+            f"trimmed through seq={trimmed_through}; compacting tombstones while "
+            "pre-delete events remain in the replay window could resurrect deleted records.",
+            expected=f"through_seq<={trimmed_through}",
+            actual=through_seq,
+        )
+
+    effective_seq = through_seq
+    if not strict:
+        effective_seq = min(through_seq, trimmed_through)
+        if acked_cursor_seq is not None:
+            effective_seq = min(effective_seq, acked_cursor_seq)
+
+    all_tombstones = db.list_tombstones(namespace=namespace)
+    candidates = [t for t in all_tombstones if int(t.get("deleted_at_seq") or 0) <= effective_seq]
+
+    for t in candidates:
+        mid = str(t["memory_id"])
+        t_seq = int(t.get("deleted_at_seq") or 0)
+        if db.get_memory(mid) is not None:
+            raise TombstoneCompactionError(
+                "live_record_conflict",
+                f"Cannot compact tombstone for {mid!r}: an active live record with "
+                "the same id exists in memories.",
+                expected="no live record",
+                actual=mid,
+            )
+        if db.has_events_at_or_before_seq(t_seq, memory_id=mid):
+            raise TombstoneCompactionError(
+                "events_not_trimmed_through_tombstone",
+                f"Cannot compact tombstone for {mid!r} (deleted_at_seq={t_seq}): "
+                f"events at or before seq={t_seq} still exist in the event log.",
+                expected=f"no retained events with seq<={t_seq}",
+                actual=f"retained events for {mid!r}",
+            )
+
+    compacted_ids = [str(t["memory_id"]) for t in candidates]
+    new_watermark = max(prev_compacted, effective_seq) if effective_seq > 0 else prev_compacted
+
+    try:
+        removed = db.delete_tombstones(compacted_ids, _commit=False)
+        if new_watermark > prev_compacted:
+            db.set_meta(
+                "compacted_tombstones_through_seq",
+                str(new_watermark),
+                _commit=False,
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    remaining = len(db.list_tombstones(namespace=namespace))
+    return {
+        "compacted": removed,
+        "remaining": remaining,
+        "compacted_through_seq": new_watermark,
+    }
 
 
 def emit_import_event(

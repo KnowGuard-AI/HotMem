@@ -1959,6 +1959,61 @@ class MemoryDB:
         if _commit:
             self._conn.commit()
 
+    def has_events_at_or_before_seq(
+        self,
+        seq: int,
+        *,
+        memory_id: str | None = None,
+        namespace: str | None = None,
+    ) -> bool:
+        """Return True if any event with ``seq <= ?`` remains in ``events`` (#98)."""
+        if memory_id is not None and namespace is not None:
+            row = self._conn.execute(
+                """SELECT 1 FROM events
+                   WHERE seq <= ? AND memory_id = ? AND namespace = ?
+                   LIMIT 1""",
+                (int(seq), memory_id, namespace),
+            ).fetchone()
+        elif memory_id is not None:
+            row = self._conn.execute(
+                "SELECT 1 FROM events WHERE seq <= ? AND memory_id = ? LIMIT 1",
+                (int(seq), memory_id),
+            ).fetchone()
+        elif namespace is not None:
+            row = self._conn.execute(
+                "SELECT 1 FROM events WHERE seq <= ? AND namespace = ? LIMIT 1",
+                (int(seq), namespace),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT 1 FROM events WHERE seq <= ? LIMIT 1",
+                (int(seq),),
+            ).fetchone()
+        return row is not None
+
+    def delete_tombstones(
+        self,
+        memory_ids: Sequence[str],
+        *,
+        _commit: bool = True,
+    ) -> int:
+        """Delete persistent tombstones by ``memory_id`` (#98)."""
+        ids = [str(m) for m in memory_ids if m]
+        if not ids:
+            return 0
+        removed = 0
+        for start in range(0, len(ids), _SEARCH_BIND_CHUNK):
+            chunk = ids[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = self._conn.execute(
+                f"DELETE FROM memory_tombstones WHERE memory_id IN ({placeholders})",
+                chunk,
+            )
+            removed += cursor.rowcount if cursor.rowcount != -1 else 0
+        if _commit:
+            self._conn.commit()
+        return removed
+
     def search_with_cosine(
         self,
         query_embedding: bytes,

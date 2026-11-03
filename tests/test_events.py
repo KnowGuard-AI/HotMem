@@ -2179,3 +2179,106 @@ def test_legacy_created_events_and_file_backed_transitions_replay_cleanly(tmp_pa
     finally:
         src.close()
         target.close()
+
+
+# -- #98 WP3: Tombstone retention & compaction preconditions ------------------
+
+
+def test_tombstone_retention_and_compaction_preconditions(tmp_path: Path):
+    """#98 criteria 4 & 10: event trimming retains tombstones; tombstone
+    compaction enforces trimmed-event, acked-cursor, and no-live-row
+    preconditions and advances compacted_tombstones_through_seq."""
+    from hotmem.events import (
+        ReplayCursor,
+        ReplayCursorError,
+        TombstoneCompactionError,
+        compact_tombstones,
+        delete_memory_record,
+        update_memory_record,
+        validate_replay_cursor,
+    )
+
+    db = MemoryDB(tmp_path / "compact.sqlite")
+    try:
+        # Create and delete m1 (seq=1 create, seq=2 update, seq=3 delete)
+        e1 = _emit_created_fact(db, 1, namespace="ops")
+        m1 = e1["memory_id"]
+        update_memory_record(db, m1, fact_text="m1 updated before delete")
+        d1 = delete_memory_record(db, m1, reason="obsolete m1")
+        assert d1["deleted_at_seq"] == 3
+
+        # Create and delete m2 (seq=4 create, seq=5 delete)
+        e2 = _emit_created_fact(db, 2, namespace="ops")
+        m2 = e2["memory_id"]
+        d2 = delete_memory_record(db, m2, reason="obsolete m2")
+        assert d2["deleted_at_seq"] == 5
+
+        # Create m3 (seq=6 create, remains live)
+        _emit_created_fact(db, 3, namespace="ops")
+
+        # 1. Precondition: cannot compact tombstones while pre-delete events remain in events.
+        with pytest.raises(TombstoneCompactionError) as exc_untrimmed:
+            compact_tombstones(db, through_seq=3)
+        assert exc_untrimmed.value.reason == "events_not_trimmed_through_tombstone"
+        assert len(db.list_tombstones()) == 2
+
+        # Non-strict mode clamps to trimmed_through_seq (0) and compacts 0.
+        res_clamped = compact_tombstones(db, through_seq=3, strict=False)
+        assert res_clamped["compacted"] == 0
+        assert res_clamped["remaining"] == 2
+
+        # 2. Event trimming through seq=3 (trim_events_before_seq(4)) removes events 1..3
+        #    but MUST retain tombstones in memory_tombstones!
+        trimmed_count = db.trim_events_before_seq(4)
+        assert trimmed_count == 3
+        assert db.event_log_bounds()["trimmed_through_seq"] == 3
+        assert db.get_tombstone(m1) is not None
+        assert db.get_tombstone(m2) is not None
+
+        # 3. Precondition: if acked_cursor_seq < through_seq, strict compaction is rejected.
+        with pytest.raises(TombstoneCompactionError) as exc_unacked:
+            compact_tombstones(db, through_seq=3, acked_cursor_seq=2)
+        assert exc_unacked.value.reason == "unacknowledged_tombstone_horizon"
+        assert db.get_tombstone(m1) is not None
+
+        # 4. Precondition: if a rogue live row with id=m1 exists in memories, compaction fails.
+        db.insert(
+            id=m1,
+            identifier="rogue/m1",
+            fact_text="rogue live row",
+            embedding=b"",
+            content_hash="9" * 64,
+            namespace="ops",
+        )
+        with pytest.raises(TombstoneCompactionError) as exc_live:
+            compact_tombstones(db, through_seq=3, acked_cursor_seq=3)
+        assert exc_live.value.reason == "live_record_conflict"
+        db.delete_memory_row(m1)
+
+        # 5. All preconditions met for through_seq=3 (trimmed_through_seq=3, acked_cursor_seq=4):
+        #    m1 tombstone (deleted_at_seq=3) is compacted; m2 tombstone (deleted_at_seq=5) remains!
+        comp_res = compact_tombstones(db, through_seq=3, acked_cursor_seq=4)
+        assert comp_res == {
+            "compacted": 1,
+            "remaining": 1,
+            "compacted_through_seq": 3,
+        }
+        assert db.get_tombstone(m1) is None
+        assert db.get_tombstone(m2) is not None
+        assert int(db.get_meta("compacted_tombstones_through_seq") or 0) == 3
+
+        # 6. Any cursor prior to compacted_tombstones_through_seq (including seq=0 start cursor)
+        #    is rejected by validate_replay_cursor so compacted tombstones can never be bypassed.
+        ident = db.mount_identity()
+        stale_start = ReplayCursor(
+            mount_id=ident.mount_id,
+            replica_id=ident.replica_id,
+            history_id=ident.history_id,
+            seq=0,
+            anchor_event_id="",
+        ).encode()
+        with pytest.raises(ReplayCursorError) as exc_stale:
+            validate_replay_cursor(db, stale_start)
+        assert exc_stale.value.reason == "stale_base"
+    finally:
+        db.close()
