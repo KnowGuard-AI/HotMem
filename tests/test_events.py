@@ -1706,6 +1706,59 @@ def test_reconstructing_payload_preserves_all_99_portable_fields(tmp_path: Path)
 # -- #98 WP2: Atomic replay transition engine, idempotency & failure rules ---
 
 
+def test_replay_target_loading_is_page_scoped(tmp_path: Path):
+    """#98 review: replay loads target rows only for ids/identity pairs in the
+    current source page instead of materializing the entire target store."""
+    from hotmem.events import _load_target_replay_candidates
+    from hotmem.interchange.canonical import compute_content_hash
+
+    target = MemoryDB(tmp_path / "bounded_target.sqlite")
+    try:
+        for idx in range(10):
+            ident = f"bulk/{idx}"
+            target.insert(
+                id=f"bulk-{idx}",
+                identifier=ident,
+                fact_text=f"bulk fact {idx}",
+                embedding=b"",
+                content_hash=compute_content_hash(ident, f"bulk fact {idx}"),
+                namespace="ops",
+            )
+        live: dict = {}
+        by_hash: dict = {}
+        tombs: dict = {}
+        watermarks: dict = {}
+        _load_target_replay_candidates(
+            target,
+            [
+                {
+                    "seq": 1,
+                    "event_type": "memory.created",
+                    "memory_id": "bulk-3",
+                    "namespace": "ops",
+                    "payload": {
+                        "id": "bulk-3",
+                        "namespace": "ops",
+                        "content_hash": compute_content_hash("bulk/3", "bulk fact 3"),
+                    },
+                }
+            ],
+            live_by_id=live,
+            live_id_by_ns_hash=by_hash,
+            tombstones_by_id=tombs,
+            watermarks_by_id=watermarks,
+            loaded_live_ids=set(),
+            loaded_pairs=set(),
+            loaded_tombstones=set(),
+            loaded_watermarks=set(),
+            mutated_in_this_run=set(),
+        )
+        assert set(live) == {"bulk-3"}
+        assert set(by_hash) == {("ops", compute_content_hash("bulk/3", "bulk fact 3"))}
+    finally:
+        target.close()
+
+
 def test_retry_after_compaction_and_empty_compaction(tmp_path: Path):
     """#98 review: safe retries survive tombstone compaction; empty compaction is a no-op."""
     from hotmem.events import (

@@ -827,6 +827,26 @@ class MemoryDB:
                 found[str(entry["id"])] = entry
         return found
 
+    def get_memories_by_identity(self, pairs: Sequence[tuple[str, str]]) -> list[dict[str, Any]]:
+        """Return rows matching ``(namespace, content_hash)`` pairs (#98 replay)."""
+        wanted = list(dict.fromkeys((str(ns or ""), str(h or "")) for ns, h in pairs if h))
+        if not wanted:
+            return []
+        cols = ", ".join(_MEMORY_COLUMNS)
+        found: list[dict[str, Any]] = []
+        for start in range(0, len(wanted), 400):
+            chunk = wanted[start : start + 400]
+            clause = " OR ".join("(namespace = ? AND content_hash = ?)" for _ in chunk)
+            params: list[str] = []
+            for ns, h in chunk:
+                params.extend((ns, h))
+            rows = self._conn.execute(
+                f"SELECT {cols} FROM memories WHERE {clause}",
+                params,
+            ).fetchall()
+            found.extend(dict(row) for row in rows)
+        return found
+
     # ── Promotion lifecycle (#42) ───────────────────────────────────────
 
     def update_promotion_state(

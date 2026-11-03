@@ -1393,37 +1393,89 @@ def _effective_replay_event_types(
     return cursor.event_types
 
 
-def _load_target_replay_state(
+def _load_target_replay_candidates(
     target_db: MemoryDB,
-) -> tuple[
-    dict[str, dict[str, str]],
-    dict[tuple[str, str], str],
-    dict[str, dict[str, Any]],
-    dict[str, dict[str, Any]],
-]:
-    """Load target live row fingerprints, tombstones, and watermarks for Pass 1 (#98)."""
-    tombstones_by_id = target_db.get_tombstones()
-    watermarks_by_id = target_db.get_replay_watermarks()
-    live_by_id: dict[str, dict[str, str]] = {}
-    live_id_by_ns_hash: dict[tuple[str, str], str] = {}
-    if target_db.count() > 0:
-        for row in target_db.iter_rows(include_embedding=False):
-            mid = str(row.get("id") or "")
-            if not mid:
+    events: Sequence[Mapping[str, Any]],
+    *,
+    live_by_id: dict[str, dict[str, str]],
+    live_id_by_ns_hash: dict[tuple[str, str], str],
+    tombstones_by_id: dict[str, dict[str, Any]],
+    watermarks_by_id: dict[str, dict[str, Any]],
+    loaded_live_ids: set[str],
+    loaded_pairs: set[tuple[str, str]],
+    loaded_tombstones: set[str],
+    loaded_watermarks: set[str],
+    mutated_in_this_run: set[str],
+) -> None:
+    """Load only target rows relevant to this replay page (#98, bounded memory).
+
+    The source event page supplies the candidate ids and identity pairs. Target
+    rows, tombstones, and watermarks outside those candidates are never
+    materialized, so replay memory stays proportional to one source page rather
+    than the entire target store.
+    """
+    ids: set[str] = set()
+    pairs: set[tuple[str, str]] = set()
+    for evt in events:
+        payload = evt.get("payload")
+        if not isinstance(payload, Mapping):
+            continue
+        mid = payload.get("id") or evt.get("memory_id")
+        if mid:
+            ids.add(str(mid))
+        ns = str(payload.get("namespace") or evt.get("namespace") or "")
+        for key in ("content_hash", "previous_content_hash"):
+            value = payload.get(key)
+            if value:
+                pairs.add((ns, str(value)))
+
+    ids_to_fetch = sorted(mid for mid in ids if mid not in loaded_live_ids)
+    if ids_to_fetch:
+        loaded_live_ids.update(ids_to_fetch)
+        rows = target_db.get_memories(ids_to_fetch)
+        for mid, row in rows.items():
+            if mid in mutated_in_this_run or mid in live_by_id:
                 continue
             ns = str(row.get("namespace") or "")
             chash = str(row.get("content_hash") or "")
-            fp = _safe_record_fingerprint(row)
             live_by_id[mid] = {
                 "id": mid,
                 "identifier": str(row.get("identifier") or ""),
                 "namespace": ns,
                 "content_hash": chash,
-                "record_fingerprint": fp,
+                "record_fingerprint": _safe_record_fingerprint(row),
             }
             if chash:
                 live_id_by_ns_hash[(ns, chash)] = mid
-    return live_by_id, live_id_by_ns_hash, tombstones_by_id, watermarks_by_id
+
+    pairs_to_fetch = sorted(pair for pair in pairs if pair not in loaded_pairs and pair[1])
+    if pairs_to_fetch:
+        loaded_pairs.update(pairs_to_fetch)
+        for row in target_db.get_memories_by_identity(pairs_to_fetch):
+            mid = str(row.get("id") or "")
+            if not mid or mid in mutated_in_this_run:
+                continue
+            ns = str(row.get("namespace") or "")
+            chash = str(row.get("content_hash") or "")
+            live_id_by_ns_hash.setdefault((ns, chash), mid)
+            if mid not in live_by_id:
+                live_by_id[mid] = {
+                    "id": mid,
+                    "identifier": str(row.get("identifier") or ""),
+                    "namespace": ns,
+                    "content_hash": chash,
+                    "record_fingerprint": _safe_record_fingerprint(row),
+                }
+
+    tombstone_ids = sorted(mid for mid in ids if mid not in loaded_tombstones)
+    if tombstone_ids:
+        loaded_tombstones.update(tombstone_ids)
+        tombstones_by_id.update(target_db.get_tombstones(tombstone_ids))
+
+    watermark_ids = sorted(mid for mid in ids if mid not in loaded_watermarks)
+    if watermark_ids:
+        loaded_watermarks.update(watermark_ids)
+        watermarks_by_id.update(target_db.get_replay_watermarks(watermark_ids))
 
 
 def _validate_and_plan_event_step(
@@ -2277,15 +2329,34 @@ def apply_event_range(
             actual=list(active_types),
         )
 
-    live_by_id, live_id_by_ns_hash, tombstones_by_id, watermarks_by_id = _load_target_replay_state(
-        target_db
-    )
+    live_by_id: dict[str, dict[str, str]] = {}
+    live_id_by_ns_hash: dict[tuple[str, str], str] = {}
+    tombstones_by_id: dict[str, dict[str, Any]] = {}
+    watermarks_by_id: dict[str, dict[str, Any]] = {}
+    loaded_live_ids: set[str] = set()
+    loaded_pairs: set[tuple[str, str]] = set()
+    loaded_tombstones: set[str] = set()
+    loaded_watermarks: set[str] = set()
     mutated_in_this_run: set[str] = set()
     created_in_this_run: set[str] = set()
     legacy_created_ids: set[str] = set()
     legacy_deduped_ids: set[str] = set()
     plan_by_seq: dict[int, tuple[str, str]] = {}
     prev_seq = 0
+
+    _load_target_replay_candidates(
+        target_db,
+        events,
+        live_by_id=live_by_id,
+        live_id_by_ns_hash=live_id_by_ns_hash,
+        tombstones_by_id=tombstones_by_id,
+        watermarks_by_id=watermarks_by_id,
+        loaded_live_ids=loaded_live_ids,
+        loaded_pairs=loaded_pairs,
+        loaded_tombstones=loaded_tombstones,
+        loaded_watermarks=loaded_watermarks,
+        mutated_in_this_run=mutated_in_this_run,
+    )
 
     for evt in events:
         disposition, seq, _ns, _chash, after_fp = _validate_and_plan_event_step(
@@ -2451,7 +2522,10 @@ def replay_with_cursor(
       (``applied == 0``) and never resurrects tombstoned records.
     - ``max_events`` bounds the number of source events examined per step
       (including observational events that are not replayed), so ``applied``
-      can be lower than the budget. Memory is bounded by one page of source events.
+      can be lower than the budget. Replay materializes target state only for
+      ids/identity pairs present in the current source page; final lineage
+      fingerprints are streamed. Memory is therefore bounded by one source page
+      (plus target identity keys for an unbound dedupe replay).
     """
     from hotmem.annotations import AnnotationValidationError
     from hotmem.interchange.fingerprint import (
@@ -2510,9 +2584,14 @@ def replay_with_cursor(
         )
 
     src_ident = db.mount_identity()
-    live_by_id, live_id_by_ns_hash, tombstones_by_id, watermarks_by_id = _load_target_replay_state(
-        target_db
-    )
+    live_by_id: dict[str, dict[str, str]] = {}
+    live_id_by_ns_hash: dict[tuple[str, str], str] = {}
+    tombstones_by_id: dict[str, dict[str, Any]] = {}
+    watermarks_by_id: dict[str, dict[str, Any]] = {}
+    loaded_live_ids: set[str] = set()
+    loaded_pairs: set[tuple[str, str]] = set()
+    loaded_tombstones: set[str] = set()
+    loaded_watermarks: set[str] = set()
     mutated_in_this_run: set[str] = set()
     created_in_this_run: set[str] = set()
     legacy_created_ids: set[str] = set()
@@ -2540,6 +2619,19 @@ def replay_with_cursor(
         events = page["events"]
         if not events:
             break
+        _load_target_replay_candidates(
+            target_db,
+            events,
+            live_by_id=live_by_id,
+            live_id_by_ns_hash=live_id_by_ns_hash,
+            tombstones_by_id=tombstones_by_id,
+            watermarks_by_id=watermarks_by_id,
+            loaded_live_ids=loaded_live_ids,
+            loaded_pairs=loaded_pairs,
+            loaded_tombstones=loaded_tombstones,
+            loaded_watermarks=loaded_watermarks,
+            mutated_in_this_run=mutated_in_this_run,
+        )
         stop = False
         for idx, evt in enumerate(events):
             disposition, seq, evt_ns, evt_chash, after_fp = _validate_and_plan_event_step(
@@ -2592,7 +2684,8 @@ def replay_with_cursor(
     # into the new clone base and mount identity (#94).
     if needs_foreign_guard:
         foreign_keys = {
-            target_db.record_identity_key(row) for row in target_db.all_rows()
+            target_db.record_identity_key(row)
+            for row in target_db.iter_rows(include_embedding=False)
         } - source_keys
         if foreign_keys:
             sample = sorted(key[1] or key[0] for key in foreign_keys)[:5]
