@@ -1,4 +1,11 @@
-"""HotMem lifecycle — promotion state and candidate signals (signal only).
+"""HotMem lifecycle — promotion state and candidate signals.
+
+Portable promotion state (`promotion_state`, `promotion_candidate`,
+`updated_at`) is written through the #98 reconstructing `memory.updated`
+contract so replay reconstructs terminal lifecycle state. The
+`memory.promotion` / `memory.candidate` events remain observational signals and
+are skipped by replay; `emit_event=False` suppresses only those signal events,
+never the reconstructing state update.
 
 Purpose:
      Add a local, explicit lifecycle state and promotion candidate signals
@@ -28,6 +35,8 @@ Interface:
      InvalidTransitionError(memory_id, from_state, to_state)
      transition(db, memory_id, to_state, *, reason=None, actor=None, emit_event=True) -> dict
      mark_candidate(db, memory_id, candidate, *, reason=None, emit_event=True) -> dict
+     (emit_event controls only the observational signal event; both functions
+      always emit a reconstructing memory.updated for portable state.)
      list_candidates(db, *, namespace=None, state=None) -> list[dict]
      list_by_state(db, state, *, namespace=None) -> list[dict]
 
@@ -41,7 +50,7 @@ import datetime as _dt
 from typing import Any
 
 from hotmem.db import MemoryDB
-from hotmem.events import EventType, append_event
+from hotmem.events import EventType, update_memory_record
 from hotmem.trace import get_tracer
 
 _trace = get_tracer("lifecycle")
@@ -99,8 +108,9 @@ def transition(
 
     Reads current state via ``get_memory`` (pure DB, no file hydration),
     validates against ``VALID_TRANSITIONS``, raises ``InvalidTransitionError``
-    on any deviation, persists the new state + ``updated_at``, and (unless
-    ``emit_event`` is False) appends a ``memory.promotion`` event.
+    on any deviation, persists the new state + ``updated_at`` as a
+    reconstructing ``memory.updated`` event, and (unless ``emit_event`` is
+    False) appends a ``memory.promotion`` observational signal.
 
     Returns a dict with the resulting ``promotion_state`` and ``updated_at``.
 
@@ -117,32 +127,32 @@ def transition(
         raise KeyError(f"memory not found: {memory_id}")
 
     from_state = record.get("promotion_state") or "HOT"
-    namespace = record.get("namespace") or ""
 
     if (from_state, to_state) not in VALID_TRANSITIONS:
         raise InvalidTransitionError(memory_id, from_state, to_state)
 
     updated_at = _utc_now_iso()
-    db.update_promotion_state(memory_id, to_state, updated_at=updated_at, _commit=False)
 
-    payload: dict[str, Any] = {"from": from_state, "to": to_state}
+    signal_payload: dict[str, Any] = {"from": from_state, "to": to_state}
     if reason is not None:
-        payload["reason"] = reason
+        signal_payload["reason"] = reason
     if actor is not None:
-        payload["actor"] = actor
+        signal_payload["actor"] = actor
 
-    if emit_event:
-        append_event(
-            db,
-            event_type=EventType.MEMORY_PROMOTION,
-            memory_id=memory_id,
-            namespace=namespace,
-            payload=payload,
-            occurred_at=updated_at,
-            _commit=False,
-        )
-    # Single commit for state update + event emit (atomic: both or neither).
-    db.commit()
+    # Promotion changes portable state, so it must also emit a reconstructing
+    # memory.updated alongside the observational promotion signal. The update
+    # event carries the complete after-state and is written in the same
+    # transaction as the row mutation, watermark, and signal.
+    update_memory_record(
+        db,
+        memory_id,
+        promotion_state=to_state,
+        updated_at=updated_at,
+        occurred_at=updated_at,
+        reason=reason,
+        signal_event_type=EventType.MEMORY_PROMOTION if emit_event else None,
+        signal_payload=signal_payload,
+    )
 
     _trace.info(
         "transition",
@@ -167,8 +177,9 @@ def mark_candidate(
     """Set the ``promotion_candidate`` flag on a memory, independent of state.
 
     The candidate signal is decoupled from the state machine: it may be set on
-    a memory in any state, and it persists across transitions. Records a
-    ``memory.candidate`` event unless ``emit_event`` is False.
+    a memory in any state, and it persists across transitions. Persists a
+    reconstructing ``memory.updated`` event and records a ``memory.candidate``
+    observational signal unless ``emit_event`` is False.
 
     Raises:
         KeyError: memory not found.
@@ -177,24 +188,19 @@ def mark_candidate(
     if record is None:
         raise KeyError(f"memory not found: {memory_id}")
 
-    namespace = record.get("namespace") or ""
-    db.set_promotion_candidate(memory_id, 1 if candidate else 0, _commit=False)
-
-    payload: dict[str, Any] = {"candidate": bool(candidate)}
+    signal_payload: dict[str, Any] = {"candidate": bool(candidate)}
     if reason is not None:
-        payload["reason"] = reason
+        signal_payload["reason"] = reason
 
-    if emit_event:
-        append_event(
-            db,
-            event_type=EventType.MEMORY_CANDIDATE,
-            memory_id=memory_id,
-            namespace=namespace,
-            payload=payload,
-            _commit=False,
-        )
-    # Single commit for candidate flag + event emit (atomic).
-    db.commit()
+    update_memory_record(
+        db,
+        memory_id,
+        promotion_candidate=1 if candidate else 0,
+        updated_at=record.get("updated_at"),
+        reason=reason,
+        signal_event_type=EventType.MEMORY_CANDIDATE if emit_event else None,
+        signal_payload=signal_payload,
+    )
 
     _trace.info(
         "candidate",

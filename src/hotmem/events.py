@@ -2786,6 +2786,8 @@ def update_memory_record(
     updated_at: str | None = None,
     occurred_at: str | None = None,
     reason: str | None = None,
+    signal_event_type: str | None = None,
+    signal_payload: dict[str, Any] | None = None,
     embedder: Any = None,
     idempotency_key: str | None = None,
     caller_id: str = "local",
@@ -2829,6 +2831,8 @@ def update_memory_record(
             "byte_offset": None if byte_offset is _UNSET else byte_offset,
             "byte_length": None if byte_length is _UNSET else byte_length,
             "reason": reason,
+            "signal_event_type": signal_event_type,
+            "signal_payload": signal_payload,
         }
         request_digest = hashlib.sha256(
             json.dumps(req_spec, sort_keys=True, default=str).encode("utf-8")
@@ -3029,6 +3033,16 @@ def update_memory_record(
             occurred_at=evt_time,
             _commit=False,
         )
+        if signal_event_type:
+            append_event(
+                db,
+                event_type=signal_event_type,
+                memory_id=memory_id,
+                namespace=ns,
+                payload=signal_payload or {},
+                occurred_at=evt_time,
+                _commit=False,
+            )
         db.set_replay_watermark(
             memory_id=memory_id,
             namespace=ns,

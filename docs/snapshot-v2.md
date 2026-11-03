@@ -418,6 +418,12 @@ delete` sequences without duplicate application or deleted-record resurrection:
      applied as state transitions during replay, and replay cursors rejecting
      non-reconstructing `event_types` fail closed with
      `ReplayCursorError(reason="non_reconstructing_event_type")`.
+   - Lifecycle promotion/candidate functions mutate portable `promotion_state`,
+     `promotion_candidate`, and `updated_at`. They emit a reconstructing
+     `memory.updated` with the complete after-state in addition to the
+     observational `memory.promotion` / `memory.candidate` signal. The
+     `emit_event=False` lifecycle option suppresses only the signal; the
+     reconstructing update is always emitted.
 2. **Immutable envelope and payload schema (`EVENT_PAYLOAD_SCHEMA_VERSION = 1`)**:
    - Every event carries `seq` (monotonic replay position), `event_id`
      (UUID4 hex), `memory_id` (record `id`), `namespace` (scope), `event_type`,

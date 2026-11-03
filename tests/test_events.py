@@ -1842,6 +1842,67 @@ def test_replay_create_update_delete_terminal_state_and_idempotency(tmp_path: Pa
         target_stepped.close()
 
 
+def test_lifecycle_promotion_mutations_replay_as_reconstructing_updates(tmp_path: Path):
+    """#98 review: promotion/candidate portable state replay via memory.updated
+    while the promotion/candidate signal events remain observational."""
+    from hotmem.events import EventType, is_reconstructing_event, query_events, replay_with_cursor
+    from hotmem.interchange.fingerprint import record_fingerprint
+    from hotmem.lifecycle import mark_candidate, transition
+
+    src = MemoryDB(tmp_path / "lifecycle_src.sqlite")
+    target = MemoryDB(tmp_path / "lifecycle_target.sqlite")
+    target_silent = MemoryDB(tmp_path / "lifecycle_target_silent.sqlite")
+    try:
+        created = _emit_created_fact(src, 1, namespace="ops")
+        mid = created["memory_id"]
+        transition(src, mid, "READY", reason="vetted", actor="analyst")
+        mark_candidate(src, mid, True, reason="strong lead")
+        transition(src, mid, "PROMOTED", emit_event=False)
+
+        source_row = src.get_memory(mid)
+        assert source_row is not None
+
+        res = replay_with_cursor(src, target)
+        target_row = target.get_memory(mid)
+        assert target_row is not None
+        assert res.applied == 4
+        assert target_row["promotion_state"] == "PROMOTED"
+        assert target_row["promotion_candidate"] == 1
+        assert target_row["updated_at"] == source_row["updated_at"]
+        assert record_fingerprint(target_row) == record_fingerprint(source_row)
+
+        events = query_events(src, limit=20)["events"]
+        assert [e["event_type"] for e in events] == [
+            EventType.MEMORY_CREATED,
+            EventType.MEMORY_UPDATED,
+            EventType.MEMORY_PROMOTION,
+            EventType.MEMORY_UPDATED,
+            EventType.MEMORY_CANDIDATE,
+            EventType.MEMORY_UPDATED,
+        ]
+        assert [e["reconstructing"] for e in events] == [
+            True,
+            True,
+            False,
+            True,
+            False,
+            True,
+        ]
+        assert is_reconstructing_event(events[2]) is False
+
+        silent_replay = replay_with_cursor(src, target_silent)
+        silent_row = target_silent.get_memory(mid)
+        assert silent_row is not None
+        assert silent_replay.applied == 4
+        assert silent_row["promotion_state"] == "PROMOTED"
+        assert silent_row["promotion_candidate"] == 1
+        assert record_fingerprint(silent_row) == record_fingerprint(source_row)
+    finally:
+        src.close()
+        target.close()
+        target_silent.close()
+
+
 def test_observational_events_are_non_reconstructing_and_rejected_in_cursor_scope(
     tmp_path: Path,
 ):
