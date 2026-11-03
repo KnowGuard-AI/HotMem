@@ -2079,6 +2079,7 @@ def test_replay_pre_mutation_failure_and_atomicity_guarantees(tmp_path: Path):
         }
         bad_upd = _build_memory_updated_payload(mut_row1, before_record=row1)
         bad_upd["previous_content_hash"] = "f" * 64
+        bad_upd["origin"] = e1["payload"]["origin"]
         with pytest.raises(ReplayExecutionError) as exc_base:
             apply_event_range(
                 target_id,
@@ -2133,6 +2134,127 @@ def test_replay_pre_mutation_failure_and_atomicity_guarantees(tmp_path: Path):
     finally:
         src_id.close()
         target_id.close()
+
+
+def test_v1_envelope_preconditions_category_and_unknown_event_rejection(tmp_path: Path):
+    """#98 review: v1 update/delete preconditions, origin/fingerprint identity,
+    category integrity, and the documented unknown-event fail-closed policy."""
+    from hotmem.events import (
+        EventType,
+        ReplayExecutionError,
+        _build_memory_created_payload,
+        _build_memory_deleted_payload,
+        _build_memory_updated_payload,
+        append_event,
+        apply_event_range,
+        replay_with_cursor,
+    )
+
+    def _seed(db: MemoryDB, mid: str = "env-1") -> tuple[dict, dict]:
+        created = _emit_created_fact(db, 1, namespace="ops")
+        row = db.get_memory(created["memory_id"])
+        assert row is not None
+        return created, row
+
+    # Update missing previous_* / record_fingerprint / origin is rejected.
+    for strip_keys, expected in (
+        (("previous_content_hash", "previous_record_fingerprint"), "malformed_event_payload"),
+        (("record_fingerprint",), "malformed_event_payload"),
+        (("origin",), "malformed_event_payload"),
+    ):
+        src = MemoryDB(tmp_path / f"v1_missing_{strip_keys[0]}.sqlite")
+        target = MemoryDB(tmp_path / f"v1_missing_target_{strip_keys[0]}.sqlite")
+        try:
+            created, row = _seed(src)
+            after = {**row, "fact_text": "precondition update", "content_hash": "e" * 64}
+            payload = _build_memory_updated_payload(after, before_record=row)
+            for key in strip_keys:
+                payload.pop(key, None)
+            with pytest.raises(ReplayExecutionError) as exc:
+                apply_event_range(
+                    target,
+                    [
+                        created,
+                        {
+                            "seq": 2,
+                            "event_id": "evt-precondition",
+                            "memory_id": row["id"],
+                            "namespace": "ops",
+                            "event_type": EventType.MEMORY_UPDATED,
+                            "occurred_at": "2026-11-03T12:00:00Z",
+                            "payload": payload,
+                        },
+                    ],
+                )
+            assert exc.value.reason == expected
+            assert target.count() == 0
+        finally:
+            src.close()
+            target.close()
+
+    # Delete identifier, content hash, and record fingerprint are mandatory and identity-checked.
+    src_del = MemoryDB(tmp_path / "v1_del_src.sqlite")
+    target_del = MemoryDB(tmp_path / "v1_del_target.sqlite")
+    try:
+        created, row = _seed(src_del, "env-del")
+        delete_payload = _build_memory_deleted_payload(row)
+        delete_payload["identifier"] = "wrong/identifier"
+        append_event(
+            src_del,
+            event_type=EventType.MEMORY_DELETED,
+            memory_id=row["id"],
+            namespace="ops",
+            payload=delete_payload,
+        )
+        with pytest.raises(ReplayExecutionError) as exc_del:
+            replay_with_cursor(src_del, target_del)
+        assert exc_del.value.reason == "identity_mismatch"
+        assert target_del.count() == 0
+    finally:
+        src_del.close()
+        target_del.close()
+
+    # A reconstructing event cannot downgrade itself to observational.
+    src_cat = MemoryDB(tmp_path / "v1_cat_src.sqlite")
+    target_cat = MemoryDB(tmp_path / "v1_cat_target.sqlite")
+    try:
+        created, row = _seed(src_cat, "env-cat")
+        payload = _build_memory_created_payload(row)
+        payload["event_category"] = "observational"
+        append_event(
+            src_cat,
+            event_type=EventType.MEMORY_CREATED,
+            memory_id=row["id"],
+            namespace="ops",
+            payload=payload,
+        )
+        with pytest.raises(ReplayExecutionError) as exc_cat:
+            replay_with_cursor(src_cat, target_cat)
+        assert exc_cat.value.reason == "malformed_event_payload"
+        assert target_cat.count() == 0
+    finally:
+        src_cat.close()
+        target_cat.close()
+
+    # Unknown event types fail closed by contract rather than silently applying or hiding state.
+    src_unknown = MemoryDB(tmp_path / "v1_unknown_src.sqlite")
+    target_unknown = MemoryDB(tmp_path / "v1_unknown_target.sqlite")
+    try:
+        _seed(src_unknown, "env-unknown")
+        append_event(
+            src_unknown,
+            event_type="memory.archived",
+            memory_id="env-unknown",
+            namespace="ops",
+            payload={"id": "env-unknown"},
+        )
+        with pytest.raises(ReplayExecutionError) as exc_unknown:
+            replay_with_cursor(src_unknown, target_unknown)
+        assert exc_unknown.value.reason == "unsupported_event_type"
+        assert target_unknown.count() == 0
+    finally:
+        src_unknown.close()
+        target_unknown.close()
 
 
 def test_legacy_created_events_and_file_backed_transitions_replay_cleanly(tmp_path: Path):

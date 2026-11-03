@@ -423,13 +423,24 @@ delete` sequences without duplicate application or deleted-record resurrection:
      (UUID4 hex), `memory_id` (record `id`), `namespace` (scope), `event_type`,
      `occurred_at` (ISO-8601 UTC), `reconstructing`, `event_category`, and
      `payload`.
-   - Reconstructing v1 payloads carry `payload_schema_version: 1`,
+   - Reconstructing v1 payloads must carry `payload_schema_version: 1`,
      `event_category: "reconstructing"`, `transition`, `id`, `namespace`,
      `content_hash`, `record_fingerprint` (#99 canonical digest), `occurred_at`,
      and `origin: {"mount_id", "replica_id", "history_id",
-     "runtime_generation"}`.
+     "runtime_generation"}`. Envelope `memory_id` must equal `payload.id`.
+     `memory.updated` additionally requires non-empty
+     `previous_content_hash` and `previous_record_fingerprint`; `memory.deleted`
+     requires non-empty `identifier`, `content_hash`, and `record_fingerprint`.
+   - Category is derived from the event type. A reconstructing event whose
+     payload declares `event_category: "observational"` (or an observational
+     event declaring `"reconstructing"`) is rejected as
+     `malformed_event_payload`; it is never silently skipped.
+   - Unknown event types are rejected with `unsupported_event_type` under the
+     v1 contract. Adding a new event type requires a contract/version decision;
+     it is not silently treated as observational.
    - Legacy `memory.created` events lacking `payload_schema_version` remain
-     replayable under v1 defaults (`schema_version = 1`).
+     replayable under v1 defaults (`schema_version = 1`) and are exempt only
+     from the v1 envelope-precondition requirements.
 3. **Complete after-state update representation (`memory.updated`)**:
    - `memory.updated` carries the complete 27-column portable after-state (#99,
      including `schema_version`, explicit `importance: 0.0`, and file-backed

@@ -690,12 +690,9 @@ def is_reconstructing_event(event_or_type: str | Mapping[str, Any]) -> bool:
     if isinstance(event_or_type, str):
         return event_or_type in RECONSTRUCTING_EVENT_TYPES
     if isinstance(event_or_type, Mapping):
+        # Category is a property of the event type. Never let a payload claim
+        # downgrade a reconstructing event into a silently skipped observation.
         etype = str(event_or_type.get("event_type") or "")
-        payload = event_or_type.get("payload")
-        if isinstance(payload, Mapping):
-            category = payload.get("event_category")
-            if category == "observational":
-                return False
         return etype in RECONSTRUCTING_EVENT_TYPES
     return False
 
@@ -1419,6 +1416,7 @@ def _load_target_replay_state(
             fp = _safe_record_fingerprint(row)
             live_by_id[mid] = {
                 "id": mid,
+                "identifier": str(row.get("identifier") or ""),
                 "namespace": ns,
                 "content_hash": chash,
                 "record_fingerprint": fp,
@@ -1493,20 +1491,30 @@ def _validate_and_plan_event_step(
                 event_seq=seq,
                 event_id=evt_id,
             )
-        if payload.get("event_category") == "reconstructing":
+        category = payload.get("event_category")
+        if category not in (None, "observational"):
             raise ReplayExecutionError(
-                "non_reconstructing_event_type",
-                f"Observational event {etype!r} at seq={seq} cannot declare "
-                "event_category='reconstructing'.",
+                "malformed_event_payload",
+                f"Observational event {etype!r} at seq={seq} has invalid "
+                f"event_category={category!r}.",
                 expected="observational",
-                actual="reconstructing",
+                actual=category,
                 event_seq=seq,
                 event_id=evt_id,
             )
         return ("observational", seq, "", "", "")
 
-    if payload.get("event_category") == "observational":
-        return ("observational", seq, "", "", "")
+    category = payload.get("event_category")
+    if category not in (None, "reconstructing"):
+        raise ReplayExecutionError(
+            "malformed_event_payload",
+            f"Reconstructing event {etype!r} at seq={seq} cannot declare "
+            f"event_category={category!r}.",
+            expected="reconstructing",
+            actual=category,
+            event_seq=seq,
+            event_id=evt_id,
+        )
 
     if etype not in effective_event_types:
         raise ReplayExecutionError(
@@ -1557,6 +1565,16 @@ def _validate_and_plan_event_step(
         )
 
     top_mid = evt.get("memory_id")
+    if is_v1 and (top_mid is None or str(top_mid) == ""):
+        raise ReplayExecutionError(
+            "identity_mismatch",
+            f"Reconstructing v1 event at seq={seq} is missing envelope memory_id.",
+            expected=mid,
+            actual=top_mid,
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
     if top_mid is not None and str(top_mid) != "" and str(top_mid) != mid:
         raise ReplayExecutionError(
             "identity_mismatch",
@@ -1567,6 +1585,43 @@ def _validate_and_plan_event_step(
             event_id=evt_id,
             memory_id=mid,
         )
+
+    if is_v1:
+        declared_fp_raw = payload.get("record_fingerprint")
+        if not isinstance(declared_fp_raw, str) or not declared_fp_raw:
+            raise ReplayExecutionError(
+                "malformed_event_payload",
+                f"Reconstructing v1 event {etype!r} at seq={seq} is missing non-empty "
+                "record_fingerprint.",
+                expected="record_fingerprint",
+                actual=declared_fp_raw,
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+        origin_raw = payload.get("origin")
+        if not isinstance(origin_raw, Mapping):
+            raise ReplayExecutionError(
+                "malformed_event_payload",
+                f"Reconstructing v1 event {etype!r} at seq={seq} is missing object origin.",
+                expected="origin object",
+                actual=origin_raw,
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+        for origin_key in ("mount_id", "replica_id", "history_id"):
+            if not isinstance(origin_raw.get(origin_key), str) or not origin_raw.get(origin_key):
+                raise ReplayExecutionError(
+                    "malformed_event_payload",
+                    f"Reconstructing v1 event {etype!r} at seq={seq} has invalid "
+                    f"origin.{origin_key}.",
+                    expected=f"non-empty string origin.{origin_key}",
+                    actual=origin_raw.get(origin_key),
+                    event_seq=seq,
+                    event_id=evt_id,
+                    memory_id=mid,
+                )
 
     raw_ns = payload.get("namespace", "")
     if raw_ns is not None and not isinstance(raw_ns, str):
@@ -1700,7 +1755,7 @@ def _validate_and_plan_event_step(
                     )
             after_fp = record_fingerprint(clean_record, normalized=normalized)
             declared_fp = payload.get("record_fingerprint")
-            if declared_fp is not None and str(declared_fp) != after_fp:
+            if str(declared_fp) != after_fp:
                 raise ReplayExecutionError(
                     "identity_mismatch",
                     f"Event {etype!r} at seq={seq} has record_fingerprint mismatch "
@@ -1793,6 +1848,7 @@ def _validate_and_plan_event_step(
 
             live_by_id[mid] = {
                 "id": mid,
+                "identifier": str(payload.get("identifier") or ""),
                 "namespace": ns,
                 "content_hash": chash,
                 "record_fingerprint": after_fp,
@@ -1852,6 +1908,25 @@ def _validate_and_plan_event_step(
 
         prev_chash = payload.get("previous_content_hash")
         prev_fp = payload.get("previous_record_fingerprint")
+        if is_v1 and (
+            not isinstance(prev_chash, str)
+            or not prev_chash
+            or not isinstance(prev_fp, str)
+            or not prev_fp
+        ):
+            raise ReplayExecutionError(
+                "malformed_event_payload",
+                f"Reconstructing memory.updated at seq={seq} is missing required "
+                "previous_content_hash/previous_record_fingerprint.",
+                expected="non-empty previous_content_hash and previous_record_fingerprint",
+                actual={
+                    "previous_content_hash": prev_chash,
+                    "previous_record_fingerprint": prev_fp,
+                },
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
         if (
             live["record_fingerprint"] == after_fp
             and live["content_hash"] == chash
@@ -1930,6 +2005,7 @@ def _validate_and_plan_event_step(
             live_id_by_ns_hash.pop((ns, live["content_hash"]), None)
         live_by_id[mid] = {
             "id": mid,
+            "identifier": str(payload.get("identifier") or ""),
             "namespace": ns,
             "content_hash": chash,
             "record_fingerprint": after_fp,
@@ -1965,6 +2041,23 @@ def _validate_and_plan_event_step(
         )
     expected_chash = str(payload.get("content_hash") or "")
     expected_fp = str(payload.get("record_fingerprint") or "")
+    if is_v1 and (
+        not expected_chash or not expected_fp or not str(payload.get("identifier") or "")
+    ):
+        raise ReplayExecutionError(
+            "malformed_event_payload",
+            f"Reconstructing memory.deleted at seq={seq} is missing required "
+            "identifier/content_hash/record_fingerprint.",
+            expected="non-empty identifier, content_hash, and record_fingerprint",
+            actual={
+                "identifier": payload.get("identifier"),
+                "content_hash": expected_chash,
+                "record_fingerprint": expected_fp,
+            },
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
 
     if mid in tombstones_by_id:
         tomb = tombstones_by_id[mid]
@@ -2010,6 +2103,17 @@ def _validate_and_plan_event_step(
             f"!= event namespace={ns!r}.",
             expected=live["namespace"],
             actual=ns,
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+    if is_v1 and str(payload.get("identifier") or "") != live.get("identifier", ""):
+        raise ReplayExecutionError(
+            "identity_mismatch",
+            f"Cannot delete memory {mid!r} at seq={seq}: payload identifier does not "
+            "match the target record identifier.",
+            expected=live.get("identifier", ""),
+            actual=payload.get("identifier"),
             event_seq=seq,
             event_id=evt_id,
             memory_id=mid,
