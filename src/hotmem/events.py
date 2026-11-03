@@ -108,6 +108,42 @@ class ReplayCursorError(ValueError):
         super().__init__(f"{reason}: {message} (recovery: {self.recovery})")
 
 
+class ReplayExecutionError(ReplayCursorError):
+    """Error raised when a state-transition event fails pre-validation or replay (#98).
+
+    Raised strictly before any target mutation (or after full transaction rollback)
+    when a replayed event has an unknown schema version, missing base record,
+    invalid transition order, tombstone resurrection attempt, or identity mismatch.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        expected: Any = None,
+        actual: Any = None,
+        recovery: str = "",
+        event_seq: int | None = None,
+        event_id: str = "",
+        memory_id: str = "",
+    ) -> None:
+        self.event_seq = event_seq
+        self.event_id = event_id
+        self.memory_id = memory_id
+        super().__init__(
+            reason,
+            message,
+            expected=expected,
+            actual=actual,
+            recovery=recovery
+            or (
+                "Re-hydrate the target from an authoritative snapshot/package "
+                "or repair the malformed event stream before replaying."
+            ),
+        )
+
+
 def _require_persistent_identity(ident: Any, where: str) -> None:
     """Fail with an actionable diagnostic when a store has no persistent identity (#94)."""
     if not (ident.mount_id and ident.replica_id and ident.history_id):
@@ -984,7 +1020,19 @@ def validate_replay_cursor(
 
     if event_types is not None:
         norm_types = _normalize_event_types(event_types)
-        if norm_types != decoded.event_types:
+        non_recon = [t for t in norm_types if t not in RECONSTRUCTING_EVENT_TYPES]
+        if non_recon:
+            raise ReplayCursorError(
+                "non_reconstructing_event_type",
+                f"Requested event_types contains non-reconstructing event type(s): {non_recon}.",
+                expected=list(RECONSTRUCTING_EVENT_TYPES),
+                actual=list(norm_types),
+                recovery="Restrict replay cursors to reconstructing state-mutation event types.",
+            )
+        if norm_types != decoded.event_types and not (
+            decoded.event_types == DEFAULT_REPLAY_EVENT_TYPES
+            and norm_types == RECONSTRUCTING_EVENT_TYPES
+        ):
             raise ReplayCursorError(
                 "scope_mismatch",
                 f"Requested event_types={list(norm_types)!r} does not match cursor "
@@ -994,9 +1042,31 @@ def validate_replay_cursor(
                 recovery="Issue a replay cursor with the matching event_types scope.",
             )
 
+    non_recon_cursor = [t for t in decoded.event_types if t not in RECONSTRUCTING_EVENT_TYPES]
+    if non_recon_cursor:
+        raise ReplayCursorError(
+            "non_reconstructing_event_type",
+            f"Cursor scope.event_types contains non-reconstructing event type(s): "
+            f"{non_recon_cursor}.",
+            expected=list(RECONSTRUCTING_EVENT_TYPES),
+            actual=list(decoded.event_types),
+            recovery="Issue a replay cursor with only reconstructing event types.",
+        )
+
     trimmed_through = int(src_bounds["trimmed_through_seq"])
+    compacted_tombstones_through = int(db.get_meta("compacted_tombstones_through_seq") or 0)
     head_seq = int(src_bounds["head_seq"])
     max_seq = int(src_bounds["max_seq"])
+
+    if compacted_tombstones_through > 0 and decoded.seq < compacted_tombstones_through:
+        raise ReplayCursorError(
+            "stale_base",
+            f"Cursor seq={decoded.seq} precedes compacted tombstone watermark "
+            f"(compacted_tombstones_through_seq={compacted_tombstones_through}).",
+            expected=f"seq>={compacted_tombstones_through}",
+            actual=decoded.seq,
+            recovery="Export a fresh full snapshot/package and re-hydrate the target clone.",
+        )
 
     if head_seq == 0 and trimmed_through == 0:
         if decoded.seq > 0:
@@ -1170,7 +1240,11 @@ def replay(
         validated = validate_replay_cursor(db, cursor, namespace=namespace)
         seq_cursor = validated.seq
         filter_ns = validated.namespace
-        allowed_types = validated.event_types
+        allowed_types = (
+            RECONSTRUCTING_EVENT_TYPES
+            if validated.event_types == DEFAULT_REPLAY_EVENT_TYPES
+            else validated.event_types
+        )
     else:
         if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
             raise ReplayCursorError(
@@ -1251,6 +1325,838 @@ def _event_to_memory_record(event: dict[str, Any]) -> Any | None:
     )
 
 
+def _effective_replay_event_types(
+    cursor_event_types: tuple[str, ...],
+    explicit_event_types: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    """Resolve the active reconstructing event types for a replay operation (#98)."""
+    if explicit_event_types is not None:
+        return _normalize_event_types(explicit_event_types)
+    if cursor_event_types == DEFAULT_REPLAY_EVENT_TYPES:
+        return RECONSTRUCTING_EVENT_TYPES
+    return cursor_event_types
+
+
+def _load_target_replay_state(
+    target_db: MemoryDB,
+) -> tuple[
+    dict[str, dict[str, str]],
+    dict[tuple[str, str], str],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
+    """Load target live row fingerprints, tombstones, and watermarks for Pass 1 (#98)."""
+    tombstones_by_id = target_db.get_tombstones()
+    watermarks_by_id = target_db.get_replay_watermarks()
+    live_by_id: dict[str, dict[str, str]] = {}
+    live_id_by_ns_hash: dict[tuple[str, str], str] = {}
+    if target_db.count() > 0:
+        for row in target_db.iter_rows(include_embedding=False):
+            mid = str(row.get("id") or "")
+            if not mid:
+                continue
+            ns = str(row.get("namespace") or "")
+            chash = str(row.get("content_hash") or "")
+            fp = _safe_record_fingerprint(row)
+            live_by_id[mid] = {
+                "id": mid,
+                "namespace": ns,
+                "content_hash": chash,
+                "record_fingerprint": fp,
+            }
+            if chash:
+                live_id_by_ns_hash[(ns, chash)] = mid
+    return live_by_id, live_id_by_ns_hash, tombstones_by_id, watermarks_by_id
+
+
+def _validate_and_plan_event_step(
+    evt: Mapping[str, Any],
+    *,
+    prev_seq: int,
+    effective_event_types: tuple[str, ...],
+    src_ident: Any,
+    live_by_id: dict[str, dict[str, str]],
+    live_id_by_ns_hash: dict[tuple[str, str], str],
+    tombstones_by_id: dict[str, dict[str, Any]],
+    watermarks_by_id: dict[str, dict[str, Any]],
+    mutated_in_this_run: set[str],
+    created_in_this_run: set[str],
+    legacy_created_ids: set[str] | None = None,
+) -> tuple[str, int, str, str, str]:
+    """Validate one event in Pass 1 and advance the simulated state (#98).
+
+    Returns ``(disposition, seq, namespace, content_hash, after_fingerprint)``
+    where ``disposition`` is one of:
+    - ``'observational'``
+    - ``'skip_idempotent'``
+    - ``'apply_create'``
+    - ``'apply_update'``
+    - ``'apply_delete'``
+    """
+    from hotmem.annotations import AnnotationValidationError
+    from hotmem.interchange.canonical import compute_content_hash
+    from hotmem.interchange.fingerprint import record_fingerprint
+    from hotmem.interchange.record import normalize_record, validate_record
+
+    raw_seq = evt.get("seq")
+    evt_id = str(evt.get("event_id") or "")
+    if type(raw_seq) is not int or raw_seq <= 0 or raw_seq <= prev_seq:
+        raise ReplayExecutionError(
+            "invalid_event_order",
+            f"Event sequence must be strictly increasing positive integers; "
+            f"got seq={raw_seq!r} after prev_seq={prev_seq}.",
+            expected=f"seq>{prev_seq}",
+            actual=raw_seq,
+            event_seq=raw_seq if type(raw_seq) is int else None,
+            event_id=evt_id,
+        )
+    seq = int(raw_seq)
+
+    payload = evt.get("payload")
+    if not isinstance(payload, dict):
+        raise ReplayExecutionError(
+            "malformed_event_payload",
+            f"Event at seq={seq} has non-object payload ({type(payload).__name__}).",
+            expected="JSON object",
+            actual=type(payload).__name__,
+            event_seq=seq,
+            event_id=evt_id,
+        )
+
+    etype = str(evt.get("event_type") or "")
+    if etype not in RECONSTRUCTING_EVENT_TYPES:
+        if etype not in OBSERVATIONAL_EVENT_TYPES:
+            raise ReplayExecutionError(
+                "unsupported_event_type",
+                f"Unknown event_type={etype!r} at seq={seq}.",
+                expected=list(RECONSTRUCTING_EVENT_TYPES),
+                actual=etype,
+                event_seq=seq,
+                event_id=evt_id,
+            )
+        if payload.get("event_category") == "reconstructing":
+            raise ReplayExecutionError(
+                "non_reconstructing_event_type",
+                f"Observational event {etype!r} at seq={seq} cannot declare "
+                "event_category='reconstructing'.",
+                expected="observational",
+                actual="reconstructing",
+                event_seq=seq,
+                event_id=evt_id,
+            )
+        return ("observational", seq, "", "", "")
+
+    if payload.get("event_category") == "observational":
+        return ("observational", seq, "", "", "")
+
+    if etype not in effective_event_types:
+        raise ReplayExecutionError(
+            "incomplete_reconstructing_scope",
+            f"Replay scope {list(effective_event_types)!r} excludes reconstructing "
+            f"event {etype!r} at seq={seq}; skipping state transitions is forbidden.",
+            expected=list(RECONSTRUCTING_EVENT_TYPES),
+            actual=list(effective_event_types),
+            event_seq=seq,
+            event_id=evt_id,
+        )
+
+    if "payload_schema_version" in payload:
+        pver = payload["payload_schema_version"]
+        if type(pver) is not int or pver != EVENT_PAYLOAD_SCHEMA_VERSION:
+            raise ReplayExecutionError(
+                "unsupported_payload_version",
+                f"Unsupported payload_schema_version={pver!r} at seq={seq}; "
+                f"expected {EVENT_PAYLOAD_SCHEMA_VERSION}.",
+                expected=EVENT_PAYLOAD_SCHEMA_VERSION,
+                actual=pver,
+                event_seq=seq,
+                event_id=evt_id,
+            )
+        is_v1 = True
+    else:
+        if etype != EventType.MEMORY_CREATED:
+            raise ReplayExecutionError(
+                "missing_payload_version",
+                f"Reconstructing event {etype!r} at seq={seq} is missing required "
+                f"payload_schema_version={EVENT_PAYLOAD_SCHEMA_VERSION}.",
+                expected=EVENT_PAYLOAD_SCHEMA_VERSION,
+                actual=None,
+                event_seq=seq,
+                event_id=evt_id,
+            )
+        is_v1 = False
+
+    mid = payload.get("id")
+    if not isinstance(mid, str) or not mid.strip():
+        raise ReplayExecutionError(
+            "malformed_event_payload",
+            f"Reconstructing event {etype!r} at seq={seq} is missing non-empty payload 'id'.",
+            expected="non-empty string id",
+            actual=mid,
+            event_seq=seq,
+            event_id=evt_id,
+        )
+
+    top_mid = evt.get("memory_id")
+    if top_mid is not None and str(top_mid) != "" and str(top_mid) != mid:
+        raise ReplayExecutionError(
+            "identity_mismatch",
+            f"Event at seq={seq} has envelope memory_id={top_mid!r} != payload.id={mid!r}.",
+            expected=mid,
+            actual=top_mid,
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+
+    raw_ns = payload.get("namespace", "")
+    if raw_ns is not None and not isinstance(raw_ns, str):
+        raise ReplayExecutionError(
+            "malformed_event_payload",
+            f"Event at seq={seq} has non-string payload.namespace={raw_ns!r}.",
+            expected="string",
+            actual=raw_ns,
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+    ns = raw_ns or ""
+    top_ns = evt.get("namespace")
+    if is_v1 and top_ns is not None and str(top_ns) != ns:
+        raise ReplayExecutionError(
+            "identity_mismatch",
+            f"Event at seq={seq} has envelope namespace={top_ns!r} != payload.namespace={ns!r}.",
+            expected=ns,
+            actual=top_ns,
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+
+    src_hist = str(getattr(src_ident, "history_id", "") or "") if src_ident is not None else ""
+    src_mount = str(getattr(src_ident, "mount_id", "") or "") if src_ident is not None else ""
+    src_legacy = (
+        bool(getattr(src_ident, "legacy_history", False)) if src_ident is not None else False
+    )
+
+    if "origin" in payload and payload["origin"] is not None:
+        origin = payload["origin"]
+        if not isinstance(origin, dict):
+            raise ReplayExecutionError(
+                "malformed_event_payload",
+                f"Event at seq={seq} has non-object payload.origin.",
+                expected="object",
+                actual=type(origin).__name__,
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+        orig_mount = str(origin.get("mount_id") or "")
+        orig_hist = str(origin.get("history_id") or "")
+        if orig_mount and src_mount and orig_mount != src_mount and not src_legacy:
+            raise ReplayExecutionError(
+                "origin_identity_mismatch",
+                f"Event at seq={seq} origin.mount_id={orig_mount!r} does not match "
+                f"source mount_id={src_mount!r}.",
+                expected=src_mount,
+                actual=orig_mount,
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+        if orig_hist and src_hist and orig_hist != src_hist and not src_legacy:
+            raise ReplayExecutionError(
+                "origin_identity_mismatch",
+                f"Event at seq={seq} origin.history_id={orig_hist!r} does not match "
+                f"source history_id={src_hist!r}.",
+                expected=src_hist,
+                actual=orig_hist,
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+
+    if etype in (EventType.MEMORY_CREATED, EventType.MEMORY_UPDATED):
+        expected_transition = "create" if etype == EventType.MEMORY_CREATED else "update"
+        if payload.get("transition") not in (None, expected_transition):
+            raise ReplayExecutionError(
+                "malformed_event_payload",
+                f"Event {etype!r} at seq={seq} has mismatched "
+                f"transition={payload.get('transition')!r}.",
+                expected=expected_transition,
+                actual=payload.get("transition"),
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+        clean_record = _strip_envelope_keys(payload)
+        try:
+            normalized = normalize_record(clean_record)
+        except (TypeError, ValueError, AnnotationValidationError) as exc:
+            raise ReplayExecutionError(
+                "malformed_event_payload",
+                f"Event {etype!r} at seq={seq} carries invalid record payload: {exc}",
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            ) from exc
+
+        chash = str(payload.get("content_hash") or "")
+        if not chash:
+            raise ReplayExecutionError(
+                "malformed_event_payload",
+                f"Event {etype!r} at seq={seq} is missing non-empty content_hash.",
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+
+        if is_v1:
+            issues = validate_record(normalized)
+            if issues:
+                raise ReplayExecutionError(
+                    "malformed_event_payload",
+                    f"Event {etype!r} at seq={seq} failed #99 portable record validation: "
+                    f"{'; '.join(issues)}",
+                    event_seq=seq,
+                    event_id=evt_id,
+                    memory_id=mid,
+                )
+            source_uri = str(payload.get("source_uri") or "")
+            if not source_uri:
+                computed_hash = compute_content_hash(
+                    str(payload.get("identifier") or ""),
+                    str(payload.get("fact_text") or ""),
+                )
+                if chash != computed_hash:
+                    raise ReplayExecutionError(
+                        "identity_mismatch",
+                        f"Event {etype!r} at seq={seq} has content_hash={chash!r} != "
+                        f"canonical hash {computed_hash!r} for record {mid!r}.",
+                        expected=computed_hash,
+                        actual=chash,
+                        event_seq=seq,
+                        event_id=evt_id,
+                        memory_id=mid,
+                    )
+            after_fp = record_fingerprint(clean_record, normalized=normalized)
+            declared_fp = payload.get("record_fingerprint")
+            if declared_fp is not None and str(declared_fp) != after_fp:
+                raise ReplayExecutionError(
+                    "identity_mismatch",
+                    f"Event {etype!r} at seq={seq} has record_fingerprint mismatch "
+                    f"for record {mid!r}.",
+                    expected=after_fp,
+                    actual=declared_fp,
+                    event_seq=seq,
+                    event_id=evt_id,
+                    memory_id=mid,
+                )
+        else:
+            after_fp = record_fingerprint(clean_record, normalized=normalized)
+
+        if etype == EventType.MEMORY_CREATED:
+            if mid in tombstones_by_id:
+                tomb = tombstones_by_id[mid]
+                tomb_seq = int(tomb.get("deleted_at_seq") or 0)
+                tomb_hist = str(tomb.get("origin_history_id") or "")
+                if (
+                    seq <= tomb_seq
+                    and (not tomb_hist or not src_hist or tomb_hist == src_hist)
+                    and mid not in created_in_this_run
+                ):
+                    return ("skip_idempotent", seq, ns, chash, after_fp)
+                raise ReplayExecutionError(
+                    "tombstoned_record_resurrection",
+                    f"Cannot apply memory.created for tombstoned record {mid!r} at seq={seq} "
+                    f"(deleted at seq={tomb_seq}); deleted records cannot be resurrected.",
+                    expected="un-tombstoned record id",
+                    actual=f"tombstoned at seq={tomb_seq}",
+                    event_seq=seq,
+                    event_id=evt_id,
+                    memory_id=mid,
+                )
+
+            if mid in live_by_id:
+                live = live_by_id[mid]
+                if live["namespace"] != ns:
+                    raise ReplayExecutionError(
+                        "identity_mismatch",
+                        f"Record {mid!r} exists in namespace {live['namespace']!r}, "
+                        f"cannot create in namespace {ns!r} at seq={seq}.",
+                        expected=live["namespace"],
+                        actual=ns,
+                        event_seq=seq,
+                        event_id=evt_id,
+                        memory_id=mid,
+                    )
+                if live["record_fingerprint"] == after_fp and live["content_hash"] == chash:
+                    return ("skip_idempotent", seq, ns, chash, after_fp)
+                wm = watermarks_by_id.get(mid)
+                if (
+                    wm is not None
+                    and mid not in mutated_in_this_run
+                    and int(wm.get("last_seq") or 0) >= seq
+                    and (
+                        not wm.get("history_id") or not src_hist or wm.get("history_id") == src_hist
+                    )
+                    and live["record_fingerprint"] == wm.get("record_fingerprint")
+                ):
+                    return ("skip_idempotent", seq, ns, chash, after_fp)
+                raise ReplayExecutionError(
+                    "identity_mismatch",
+                    f"Cannot apply memory.created at seq={seq}: record {mid!r} already exists "
+                    "with conflicting state.",
+                    expected=after_fp,
+                    actual=live["record_fingerprint"],
+                    event_seq=seq,
+                    event_id=evt_id,
+                    memory_id=mid,
+                )
+
+            existing_id = live_id_by_ns_hash.get((ns, chash))
+            if existing_id is not None and existing_id != mid:
+                if is_v1:
+                    raise ReplayExecutionError(
+                        "identity_mismatch",
+                        f"Cannot apply memory.created at seq={seq}: (namespace={ns!r}, "
+                        f"content_hash={chash!r}) is already bound to memory_id={existing_id!r}, "
+                        f"not {mid!r}.",
+                        expected=existing_id,
+                        actual=mid,
+                        event_seq=seq,
+                        event_id=evt_id,
+                        memory_id=mid,
+                    )
+                # Legacy memory.created without payload_schema_version delegates
+                # content_hash deduplication to INSERT OR IGNORE (#73).
+                return ("apply_create", seq, ns, chash, after_fp)
+
+            live_by_id[mid] = {
+                "id": mid,
+                "namespace": ns,
+                "content_hash": chash,
+                "record_fingerprint": after_fp,
+            }
+            live_id_by_ns_hash[(ns, chash)] = mid
+            mutated_in_this_run.add(mid)
+            created_in_this_run.add(mid)
+            if not is_v1 and legacy_created_ids is not None:
+                legacy_created_ids.add(mid)
+            return ("apply_create", seq, ns, chash, after_fp)
+
+        # EventType.MEMORY_UPDATED
+        if mid in tombstones_by_id:
+            tomb = tombstones_by_id[mid]
+            tomb_seq = int(tomb.get("deleted_at_seq") or 0)
+            tomb_hist = str(tomb.get("origin_history_id") or "")
+            if (
+                seq <= tomb_seq
+                and (not tomb_hist or not src_hist or tomb_hist == src_hist)
+                and mid not in mutated_in_this_run
+            ):
+                return ("skip_idempotent", seq, ns, chash, after_fp)
+            raise ReplayExecutionError(
+                "tombstoned_record_mutation",
+                f"Cannot apply memory.updated for tombstoned record {mid!r} at seq={seq} "
+                f"(deleted at seq={tomb_seq}).",
+                expected="live record",
+                actual=f"tombstoned at seq={tomb_seq}",
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+
+        if mid not in live_by_id:
+            raise ReplayExecutionError(
+                "missing_target_record",
+                f"Cannot apply memory.updated at seq={seq}: target record {mid!r} does not exist.",
+                expected=f"existing record {mid!r}",
+                actual=None,
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+
+        live = live_by_id[mid]
+        if live["namespace"] != ns:
+            raise ReplayExecutionError(
+                "identity_mismatch",
+                f"Cannot update memory {mid!r} across namespaces from {live['namespace']!r} "
+                f"to {ns!r} at seq={seq}.",
+                expected=live["namespace"],
+                actual=ns,
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+
+        prev_chash = payload.get("previous_content_hash")
+        prev_fp = payload.get("previous_record_fingerprint")
+        if (
+            live["record_fingerprint"] == after_fp
+            and live["content_hash"] == chash
+            and (
+                prev_chash in (None, "")
+                or prev_chash != chash
+                or live["content_hash"] == str(prev_chash)
+            )
+            and (
+                prev_fp in (None, "")
+                or prev_fp != after_fp
+                or live["record_fingerprint"] == str(prev_fp)
+            )
+        ):
+            return ("skip_idempotent", seq, ns, chash, after_fp)
+
+        wm = watermarks_by_id.get(mid)
+        if (
+            wm is not None
+            and mid not in mutated_in_this_run
+            and int(wm.get("last_seq") or 0) >= seq
+            and (not wm.get("history_id") or not src_hist or wm.get("history_id") == src_hist)
+            and live["record_fingerprint"] == wm.get("record_fingerprint")
+        ):
+            return ("skip_idempotent", seq, ns, chash, after_fp)
+
+        if (
+            prev_chash is not None
+            and str(prev_chash) != ""
+            and live["content_hash"] != str(prev_chash)
+        ):
+            raise ReplayExecutionError(
+                "base_state_mismatch",
+                f"Cannot apply memory.updated for {mid!r} at seq={seq}: target "
+                f"content_hash={live['content_hash']!r} != previous_content_hash={prev_chash!r}.",
+                expected=prev_chash,
+                actual=live["content_hash"],
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+
+        is_legacy_base = legacy_created_ids is not None and mid in legacy_created_ids
+        if (
+            not is_legacy_base
+            and prev_fp is not None
+            and str(prev_fp) != ""
+            and live["record_fingerprint"] != str(prev_fp)
+        ):
+            raise ReplayExecutionError(
+                "base_state_mismatch",
+                f"Cannot apply memory.updated for {mid!r} at seq={seq}: target "
+                f"record_fingerprint={live['record_fingerprint'][:12]} != "
+                f"previous_record_fingerprint={str(prev_fp)[:12]}.",
+                expected=prev_fp,
+                actual=live["record_fingerprint"],
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+
+        existing_id = live_id_by_ns_hash.get((ns, chash))
+        if existing_id is not None and existing_id != mid:
+            raise ReplayExecutionError(
+                "content_hash_conflict",
+                f"Cannot apply memory.updated for {mid!r} at seq={seq}: "
+                f"(namespace={ns!r}, content_hash={chash!r}) collides with record {existing_id!r}.",
+                expected=mid,
+                actual=existing_id,
+                event_seq=seq,
+                event_id=evt_id,
+                memory_id=mid,
+            )
+
+        if live["content_hash"] != chash:
+            live_id_by_ns_hash.pop((ns, live["content_hash"]), None)
+        live_by_id[mid] = {
+            "id": mid,
+            "namespace": ns,
+            "content_hash": chash,
+            "record_fingerprint": after_fp,
+        }
+        live_id_by_ns_hash[(ns, chash)] = mid
+        mutated_in_this_run.add(mid)
+        if legacy_created_ids is not None:
+            legacy_created_ids.discard(mid)
+        return ("apply_update", seq, ns, chash, after_fp)
+
+    # EventType.MEMORY_DELETED
+    if payload.get("transition") not in (None, "delete"):
+        raise ReplayExecutionError(
+            "malformed_event_payload",
+            f"Event {etype!r} at seq={seq} has mismatched "
+            f"transition={payload.get('transition')!r}.",
+            expected="delete",
+            actual=payload.get("transition"),
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+    del_at = payload.get("deleted_at") or evt.get("occurred_at")
+    if not isinstance(del_at, str) or not del_at.strip():
+        raise ReplayExecutionError(
+            "malformed_event_payload",
+            f"Event memory.deleted at seq={seq} is missing non-empty deleted_at timestamp.",
+            expected="ISO-8601 timestamp",
+            actual=del_at,
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+    expected_chash = str(payload.get("content_hash") or "")
+    expected_fp = str(payload.get("record_fingerprint") or "")
+
+    if mid in tombstones_by_id:
+        tomb = tombstones_by_id[mid]
+        tomb_seq = int(tomb.get("deleted_at_seq") or 0)
+        tomb_evt_id = str(tomb.get("delete_event_id") or "")
+        tomb_hist = str(tomb.get("origin_history_id") or "")
+        if (
+            mid not in live_by_id
+            and mid not in mutated_in_this_run
+            and (
+                (evt_id and tomb_evt_id == evt_id)
+                or (seq <= tomb_seq and (not tomb_hist or not src_hist or tomb_hist == src_hist))
+            )
+        ):
+            return ("skip_idempotent", seq, ns, expected_chash, expected_fp)
+        raise ReplayExecutionError(
+            "already_tombstoned",
+            f"Cannot apply memory.deleted at seq={seq}: record {mid!r} is already "
+            f"tombstoned (deleted at seq={tomb_seq}).",
+            expected="live record",
+            actual=f"tombstoned at seq={tomb_seq}",
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+
+    if mid not in live_by_id:
+        raise ReplayExecutionError(
+            "missing_target_record",
+            f"Cannot apply memory.deleted at seq={seq}: target record {mid!r} does not exist.",
+            expected=f"existing record {mid!r}",
+            actual=None,
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+
+    live = live_by_id[mid]
+    if live["namespace"] != ns:
+        raise ReplayExecutionError(
+            "identity_mismatch",
+            f"Cannot delete memory {mid!r} at seq={seq}: target namespace={live['namespace']!r} "
+            f"!= event namespace={ns!r}.",
+            expected=live["namespace"],
+            actual=ns,
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+    if expected_chash and live["content_hash"] != expected_chash:
+        raise ReplayExecutionError(
+            "base_state_mismatch",
+            f"Cannot apply memory.deleted for {mid!r} at seq={seq}: target "
+            f"content_hash={live['content_hash']!r} != expected {expected_chash!r}.",
+            expected=expected_chash,
+            actual=live["content_hash"],
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+    if expected_fp and live["record_fingerprint"] != expected_fp:
+        raise ReplayExecutionError(
+            "base_state_mismatch",
+            f"Cannot apply memory.deleted for {mid!r} at seq={seq}: target "
+            f"record_fingerprint={live['record_fingerprint'][:12]} != "
+            f"expected {expected_fp[:12]}.",
+            expected=expected_fp,
+            actual=live["record_fingerprint"],
+            event_seq=seq,
+            event_id=evt_id,
+            memory_id=mid,
+        )
+
+    live_id_by_ns_hash.pop((ns, live["content_hash"]), None)
+    del live_by_id[mid]
+    tombstones_by_id[mid] = {
+        "memory_id": mid,
+        "namespace": ns,
+        "content_hash": expected_chash or live["content_hash"],
+        "record_fingerprint": expected_fp or live["record_fingerprint"],
+        "deleted_at": del_at,
+        "deleted_at_seq": seq,
+        "delete_event_id": evt_id,
+        "origin_history_id": src_hist,
+    }
+    mutated_in_this_run.add(mid)
+    return (
+        "apply_delete",
+        seq,
+        ns,
+        expected_chash or live["content_hash"],
+        expected_fp or live["record_fingerprint"],
+    )
+
+
+def apply_event_range(
+    target_db: MemoryDB,
+    events: Sequence[Mapping[str, Any]],
+    *,
+    source_identity: Any = None,
+    effective_event_types: Sequence[str] | None = None,
+) -> tuple[int, int]:
+    """Validate and atomically apply an in-memory sequence of events to ``target_db`` (#98).
+
+    Performs full Pass 1 pre-flight validation before any SQLite write and
+    executes Pass 2 inside one transaction with rollback on any error.
+    Returns ``(applied, skipped)``.
+    """
+    active_types = (
+        _normalize_event_types(effective_event_types)
+        if effective_event_types is not None
+        else RECONSTRUCTING_EVENT_TYPES
+    )
+    non_recon = [t for t in active_types if t not in RECONSTRUCTING_EVENT_TYPES]
+    if non_recon:
+        raise ReplayCursorError(
+            "non_reconstructing_event_type",
+            f"effective_event_types contains non-reconstructing event type(s): {non_recon}.",
+            expected=list(RECONSTRUCTING_EVENT_TYPES),
+            actual=list(active_types),
+        )
+
+    live_by_id, live_id_by_ns_hash, tombstones_by_id, watermarks_by_id = _load_target_replay_state(
+        target_db
+    )
+    mutated_in_this_run: set[str] = set()
+    created_in_this_run: set[str] = set()
+    legacy_created_ids: set[str] = set()
+    plan_by_seq: dict[int, tuple[str, str]] = {}
+    prev_seq = 0
+
+    for evt in events:
+        disposition, seq, _ns, _chash, after_fp = _validate_and_plan_event_step(
+            evt,
+            prev_seq=prev_seq,
+            effective_event_types=active_types,
+            src_ident=source_identity,
+            live_by_id=live_by_id,
+            live_id_by_ns_hash=live_id_by_ns_hash,
+            tombstones_by_id=tombstones_by_id,
+            watermarks_by_id=watermarks_by_id,
+            mutated_in_this_run=mutated_in_this_run,
+            created_in_this_run=created_in_this_run,
+            legacy_created_ids=legacy_created_ids,
+        )
+        prev_seq = seq
+        plan_by_seq[seq] = (disposition, after_fp)
+
+    applied = 0
+    skipped = 0
+    src_mount = str(getattr(source_identity, "mount_id", "") or "")
+    src_rep = str(getattr(source_identity, "replica_id", "") or "")
+    src_hist = str(getattr(source_identity, "history_id", "") or "")
+
+    try:
+        page_records: list[Any] = []
+        page_watermarks: list[dict[str, Any]] = []
+
+        def _flush_created() -> None:
+            nonlocal applied, skipped
+            if not page_records:
+                return
+            inserted = target_db.insert_many_ignore(page_records, _commit=False)
+            applied += inserted
+            skipped += len(page_records) - inserted
+            for wm in page_watermarks:
+                target_db.set_replay_watermark(**wm, _commit=False)
+            page_records.clear()
+            page_watermarks.clear()
+
+        for evt in events:
+            seq = int(evt["seq"])
+            disposition, after_fp = plan_by_seq[seq]
+            if disposition == "observational":
+                continue
+            if disposition == "skip_idempotent":
+                skipped += 1
+                continue
+            payload = evt["payload"]
+            evt_id = str(evt.get("event_id") or "")
+            if disposition == "apply_create":
+                rec = _event_to_memory_record(dict(evt))
+                if rec is not None:
+                    page_records.append(rec)
+                    page_watermarks.append(
+                        {
+                            "memory_id": rec.id,
+                            "namespace": rec.namespace,
+                            "content_hash": rec.content_hash,
+                            "record_fingerprint": after_fp,
+                            "last_seq": seq,
+                            "last_event_id": evt_id,
+                            "history_id": src_hist,
+                        }
+                    )
+                    if len(page_records) >= _REPLAY_BATCH:
+                        _flush_created()
+            elif disposition == "apply_update":
+                _flush_created()
+                rec = _event_to_memory_record(dict(evt))
+                assert rec is not None
+                if target_db.replace_memory_record(rec, _commit=False):
+                    applied += 1
+                    target_db.set_replay_watermark(
+                        memory_id=rec.id,
+                        namespace=rec.namespace,
+                        content_hash=rec.content_hash,
+                        record_fingerprint=after_fp,
+                        last_seq=seq,
+                        last_event_id=evt_id,
+                        history_id=src_hist,
+                        _commit=False,
+                    )
+                else:
+                    skipped += 1
+            elif disposition == "apply_delete":
+                _flush_created()
+                mid = str(payload["id"])
+                ns = str(payload.get("namespace") or "")
+                deleted = target_db.delete_memory_row(mid, _commit=False)
+                target_db.delete_replay_watermark(mid, _commit=False)
+                origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
+                target_db.record_tombstone(
+                    memory_id=mid,
+                    namespace=ns,
+                    identifier=str(payload.get("identifier") or ""),
+                    content_hash=str(payload.get("content_hash") or ""),
+                    record_fingerprint=after_fp,
+                    deleted_at=str(payload.get("deleted_at") or evt.get("occurred_at") or ""),
+                    deleted_at_seq=seq,
+                    delete_event_id=evt_id,
+                    origin_mount_id=str(origin.get("mount_id") or src_mount),
+                    origin_replica_id=str(origin.get("replica_id") or src_rep),
+                    origin_history_id=str(origin.get("history_id") or src_hist),
+                    reason=str(payload.get("reason") or ""),
+                    _commit=False,
+                )
+                if deleted:
+                    applied += 1
+                else:
+                    skipped += 1
+
+        _flush_created()
+        target_db.commit()
+    except Exception:
+        target_db.rollback()
+        raise
+
+    return applied, skipped
+
+
 def replay_with_cursor(
     db: MemoryDB,
     target_db: MemoryDB,
@@ -1258,20 +2164,23 @@ def replay_with_cursor(
     cursor: Any = None,
     max_events: int | None = None,
     namespace: str | None = None,
+    event_types: Sequence[str] | None = None,
     allow_legacy_history: bool = True,
 ) -> ReplayResult:
-    """Validate cursor and replay ``memory.created`` events into ``target_db`` (#94).
+    """Validate cursor and replay state-reconstructing events into ``target_db`` (#94, #98).
 
-    - Validates source identity, base/history identity, trim watermarks, and
-      target clone/fork compatibility before any target mutation.
-    - Runs all inserts and cursor checkpoint updates in one transaction on
-      ``target_db``; any failure rolls back so interrupted runs can resume
-      cleanly from the last committed cursor.
-    - Reusing a completed cursor is idempotent (``applied == 0``), including
-      when the target resumes from its hydrated ``base_cursor``.
+    - Validates source identity, base/history identity, trim/tombstone watermarks,
+      target clone/fork compatibility, and the full event transition sequence
+      (`memory.created`, `memory.updated`, `memory.deleted`) before any target
+      mutation.
+    - Runs all inserts/updates/deletes, tombstone writes, and cursor checkpoint
+      updates in one transaction on ``target_db``; any failure rolls back so
+      interrupted runs can resume cleanly from the last committed cursor.
+    - Reusing a completed cursor or replaying the same range twice is idempotent
+      (``applied == 0``) and never resurrects tombstoned records.
     - ``max_events`` bounds the number of source events examined per step
-      (including event types that are not replayed), so ``applied`` can be
-      lower than the budget. Memory is bounded by one page of source events.
+      (including observational events that are not replayed), so ``applied``
+      can be lower than the budget. Memory is bounded by one page of source events.
     """
     from hotmem.annotations import AnnotationValidationError
     from hotmem.interchange.fingerprint import (
@@ -1293,6 +2202,7 @@ def replay_with_cursor(
                 db,
                 position="start",
                 namespace=namespace,
+                event_types=event_types,
             )
 
     validated = validate_replay_cursor(
@@ -1300,8 +2210,10 @@ def replay_with_cursor(
         resolved_cursor,
         target_db=target_db,
         namespace=namespace,
+        event_types=event_types,
         allow_legacy_history=allow_legacy_history,
     )
+    effective_types = _effective_replay_event_types(validated.event_types, event_types)
 
     saved_last_cursor = target_db.get_meta("last_replay_cursor") or ""
     tgt_guard_ident = target_db.mount_identity()
@@ -1324,15 +2236,24 @@ def replay_with_cursor(
             recovery="Use max_events=None for the initial replay, or hydrate a clean clone first.",
         )
 
-    # Pass 1 (no mutation): determine the replay window, checkpoint, and -- for a
-    # dedupe-only target -- the source identity keys. Records themselves are not
-    # retained, so memory stays bounded by one page (#94).
+    src_ident = db.mount_identity()
+    live_by_id, live_id_by_ns_hash, tombstones_by_id, watermarks_by_id = _load_target_replay_state(
+        target_db
+    )
+    mutated_in_this_run: set[str] = set()
+    created_in_this_run: set[str] = set()
+    legacy_created_ids: set[str] = set()
+    plan_by_seq: dict[int, tuple[str, str]] = {}
+
+    # Pass 1 (no mutation): validate the replay window, transition sequence,
+    # checkpoint, and -- for a dedupe-only target -- the source identity keys.
     seq_cursor = validated.seq
     last_seq = validated.seq
     last_event_id = validated.anchor_event_id
     events_scanned = 0
     reached_end = True
     source_keys: set[tuple[str, str]] = set()
+    prev_seq = validated.seq
 
     while True:
         page = query_events(
@@ -1347,17 +2268,26 @@ def replay_with_cursor(
             break
         stop = False
         for idx, evt in enumerate(events):
-            last_seq = int(evt["seq"])
+            disposition, seq, evt_ns, evt_chash, after_fp = _validate_and_plan_event_step(
+                evt,
+                prev_seq=prev_seq,
+                effective_event_types=effective_types,
+                src_ident=src_ident,
+                live_by_id=live_by_id,
+                live_id_by_ns_hash=live_id_by_ns_hash,
+                tombstones_by_id=tombstones_by_id,
+                watermarks_by_id=watermarks_by_id,
+                mutated_in_this_run=mutated_in_this_run,
+                created_in_this_run=created_in_this_run,
+                legacy_created_ids=legacy_created_ids,
+            )
+            prev_seq = seq
+            last_seq = seq
             last_event_id = str(evt["event_id"])
             events_scanned += 1
-            if (
-                evt["event_type"] in validated.event_types
-                and evt["event_type"] == EventType.MEMORY_CREATED
-                and needs_foreign_guard
-            ):
-                rec = _event_to_memory_record(evt)
-                if rec is not None:
-                    source_keys.add(target_db.record_identity_key(rec))
+            plan_by_seq[seq] = (disposition, after_fp)
+            if needs_foreign_guard and evt_chash:
+                source_keys.add((evt_ns, evt_chash))
             if max_events is not None and events_scanned >= max_events:
                 has_more_in_page = idx + 1 < len(events)
                 has_more_pages = (
@@ -1436,15 +2366,29 @@ def replay_with_cursor(
             completed=True,
         )
 
-    # Pass 2: stream the same window and insert one page at a time inside a
-    # single transaction. Any failure rolls back to the last committed cursor.
+    # Pass 2: stream the same window and apply transitions one page at a time
+    # inside a single transaction. Any failure rolls back to the last committed cursor.
     applied = 0
     skipped = 0
-    src_ident = db.mount_identity()
 
     try:
         seq_cursor = validated.seq
         stop = False
+        page_records: list[Any] = []
+        page_watermarks: list[dict[str, Any]] = []
+
+        def _flush_page_created() -> None:
+            nonlocal applied, skipped
+            if not page_records:
+                return
+            inserted = target_db.insert_many_ignore(page_records, _commit=False)
+            applied += inserted
+            skipped += len(page_records) - inserted
+            for wm in page_watermarks:
+                target_db.set_replay_watermark(**wm, _commit=False)
+            page_records.clear()
+            page_watermarks.clear()
+
         while not stop:
             page = query_events(
                 db,
@@ -1456,22 +2400,83 @@ def replay_with_cursor(
             events = page["events"]
             if not events:
                 break
-            page_records: list[Any] = []
+
             for evt in events:
-                if max_events is not None and int(evt["seq"]) > last_seq:
+                seq = int(evt["seq"])
+                if max_events is not None and seq > last_seq:
                     stop = True
                     break
-                if (
-                    evt["event_type"] in validated.event_types
-                    and evt["event_type"] == EventType.MEMORY_CREATED
-                ):
+                disposition, after_fp = plan_by_seq.get(seq, ("observational", ""))
+                if disposition == "observational":
+                    continue
+                if disposition == "skip_idempotent":
+                    skipped += 1
+                    continue
+                payload = evt["payload"]
+                evt_id = str(evt["event_id"])
+                if disposition == "apply_create":
                     rec = _event_to_memory_record(evt)
                     if rec is not None:
                         page_records.append(rec)
-            if page_records:
-                inserted = target_db.insert_many_ignore(page_records, _commit=False)
-                applied += inserted
-                skipped += len(page_records) - inserted
+                        page_watermarks.append(
+                            {
+                                "memory_id": rec.id,
+                                "namespace": rec.namespace,
+                                "content_hash": rec.content_hash,
+                                "record_fingerprint": after_fp,
+                                "last_seq": seq,
+                                "last_event_id": evt_id,
+                                "history_id": src_ident.history_id,
+                            }
+                        )
+                elif disposition == "apply_update":
+                    _flush_page_created()
+                    rec = _event_to_memory_record(evt)
+                    assert rec is not None
+                    if target_db.replace_memory_record(rec, _commit=False):
+                        applied += 1
+                        target_db.set_replay_watermark(
+                            memory_id=rec.id,
+                            namespace=rec.namespace,
+                            content_hash=rec.content_hash,
+                            record_fingerprint=after_fp,
+                            last_seq=seq,
+                            last_event_id=evt_id,
+                            history_id=src_ident.history_id,
+                            _commit=False,
+                        )
+                    else:
+                        skipped += 1
+                elif disposition == "apply_delete":
+                    _flush_page_created()
+                    mid = str(payload["id"])
+                    ns = str(payload.get("namespace") or "")
+                    deleted = target_db.delete_memory_row(mid, _commit=False)
+                    target_db.delete_replay_watermark(mid, _commit=False)
+                    origin = (
+                        payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
+                    )
+                    target_db.record_tombstone(
+                        memory_id=mid,
+                        namespace=ns,
+                        identifier=str(payload.get("identifier") or ""),
+                        content_hash=str(payload.get("content_hash") or ""),
+                        record_fingerprint=after_fp,
+                        deleted_at=str(payload.get("deleted_at") or evt["occurred_at"]),
+                        deleted_at_seq=seq,
+                        delete_event_id=evt_id,
+                        origin_mount_id=str(origin.get("mount_id") or src_ident.mount_id),
+                        origin_replica_id=str(origin.get("replica_id") or src_ident.replica_id),
+                        origin_history_id=str(origin.get("history_id") or src_ident.history_id),
+                        reason=str(payload.get("reason") or ""),
+                        _commit=False,
+                    )
+                    if deleted:
+                        applied += 1
+                    else:
+                        skipped += 1
+
+            _flush_page_created()
             if stop:
                 break
             seq_cursor = events[-1]["seq"]
