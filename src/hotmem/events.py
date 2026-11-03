@@ -2482,6 +2482,8 @@ def replay_with_cursor(
         allow_legacy_history=allow_legacy_history,
     )
     effective_types = _effective_replay_event_types(validated, event_types)
+    epoch_start = int(db.get_meta("history_epoch_start_seq") or 0)
+    replay_start_seq = max(validated.seq, epoch_start)
 
     saved_last_cursor = target_db.get_meta("last_replay_cursor") or ""
     tgt_guard_ident = target_db.mount_identity()
@@ -2516,13 +2518,13 @@ def replay_with_cursor(
 
     # Pass 1 (no mutation): validate the replay window, transition sequence,
     # checkpoint, and -- for a dedupe-only target -- the source identity keys.
-    seq_cursor = validated.seq
-    last_seq = validated.seq
+    seq_cursor = replay_start_seq
+    last_seq = replay_start_seq
     last_event_id = validated.anchor_event_id
     events_scanned = 0
     reached_end = True
     source_keys: set[tuple[str, str]] = set()
-    prev_seq = validated.seq
+    prev_seq = replay_start_seq
 
     while True:
         page = query_events(
@@ -2664,7 +2666,7 @@ def replay_with_cursor(
     skipped = 0
 
     try:
-        seq_cursor = validated.seq
+        seq_cursor = replay_start_seq
         stop = False
         page_records: list[Any] = []
         page_watermarks: list[dict[str, Any]] = []

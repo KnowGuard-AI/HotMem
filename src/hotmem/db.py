@@ -973,6 +973,12 @@ class MemoryDB:
             return None
         return str(row["value"]) if row is not None else None
 
+    def delete_meta(self, key: str, *, _commit: bool = True) -> None:
+        """Delete a store metadata key if present."""
+        self._conn.execute("DELETE FROM store_meta WHERE key = ?", (key,))
+        if _commit:
+            self._conn.commit()
+
     def set_meta(self, key: str, value: str, *, _commit: bool = True) -> None:
         """Persist a store-level metadata value."""
         self._conn.execute(
@@ -1200,12 +1206,19 @@ class MemoryDB:
         self.set_meta("forked_at_seq", "0", _commit=False)
         self.set_meta("forked_at_event_id", "", _commit=False)
         self.set_meta("cloned_at_seq", "0", _commit=False)
-        # A replacement starts a new history epoch; retention watermarks from
-        # the previous epoch must not make new cursors unusable (#94).
+        # A replacement starts a new history epoch; retention/replay state from
+        # the previous epoch must not block or contaminate the new epoch (#94/#98).
         self.set_meta("trimmed_through_seq", "0", _commit=False)
         self.set_meta("compacted_tombstones_through_seq", "0", _commit=False)
         self.set_meta("last_known_head_seq", "0", _commit=False)
         self.set_meta("last_known_head_event_id", "", _commit=False)
+        max_row = self._conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM events"
+        ).fetchone()
+        epoch_start = int(max_row["max_seq"] or 0)
+        self.set_meta("history_epoch_start_seq", str(epoch_start), _commit=False)
+        self._conn.execute("DELETE FROM memory_tombstones")
+        self._conn.execute("DELETE FROM memory_replay_watermarks")
         if _commit:
             self._conn.commit()
         return self.mount_identity()
@@ -1958,6 +1971,29 @@ class MemoryDB:
         )
         if _commit:
             self._conn.commit()
+
+    def delete_replay_watermarks(
+        self,
+        memory_ids: Sequence[str],
+        *,
+        _commit: bool = True,
+    ) -> int:
+        """Delete replay watermarks by ``memory_id`` (#98)."""
+        ids = [str(m) for m in memory_ids if m]
+        if not ids:
+            return 0
+        removed = 0
+        for start in range(0, len(ids), _SEARCH_BIND_CHUNK):
+            chunk = ids[start : start + _SEARCH_BIND_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = self._conn.execute(
+                f"DELETE FROM memory_replay_watermarks WHERE memory_id IN ({placeholders})",
+                chunk,
+            )
+            removed += cursor.rowcount if cursor.rowcount != -1 else 0
+        if _commit:
+            self._conn.commit()
+        return removed
 
     def has_events_at_or_before_seq(
         self,

@@ -498,3 +498,12 @@ delete` sequences without duplicate application or deleted-record resurrection:
    - Compaction advances `store_meta["compacted_tombstones_through_seq"]`, and
      `validate_replay_cursor` rejects any cursor with
      `seq < compacted_tombstones_through_seq` (`reason="stale_base"`).
+   - Authoritative hydration clears tombstones, replay watermarks, the saved
+     replay checkpoint, and the history-epoch boundary for the restored record
+     ids. A restored row therefore cannot remain both live and tombstoned, and
+     compaction is not blocked by a pre-restore delete.
+   - `replace_history` clears tombstones and replay watermarks, resets the
+     compaction/retention watermarks, and records
+     `store_meta["history_epoch_start_seq"]`. Replay of the new history starts
+     after the retained audit boundary, so old `hmc1` events remain immutable
+     audit history and are not replayed as the new epoch.

@@ -2667,6 +2667,65 @@ def test_legacy_created_events_and_file_backed_transitions_replay_cleanly(tmp_pa
 # -- #98 WP3: Tombstone retention & compaction preconditions ------------------
 
 
+def test_hydration_and_history_replacement_reconcile_replay_state(tmp_path: Path):
+    """#98 review: authoritative hydration clears stale tombstones/watermarks,
+    and history replacement clears replay state while skipping old audit events."""
+    from hotmem.events import (
+        compact_tombstones,
+        delete_memory_record,
+        issue_replay_cursor,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.snapshot import hydrate, snapshot
+
+    src = MemoryDB(tmp_path / "restore_src.sqlite")
+    snap_dir = tmp_path / "restore_snap"
+    try:
+        created = _emit_created_fact(src, 1, namespace="ops")
+        mid = created["memory_id"]
+        snapshot(src, snap_dir)
+        deleted = delete_memory_record(src, mid, reason="restore probe")
+        src.trim_events_before_seq(deleted["deleted_at_seq"] + 1)
+        assert src.get_tombstone(mid) is not None
+
+        hydrate(src, snap_dir)
+        assert src.get_memory(mid) is not None
+        assert src.get_tombstone(mid) is None
+        compaction = compact_tombstones(
+            src,
+            through_seq=deleted["deleted_at_seq"],
+            acked_cursor_seq=deleted["deleted_at_seq"],
+        )
+        assert compaction["compacted"] == 0
+    finally:
+        src.close()
+
+    history_src = MemoryDB(tmp_path / "history_src.sqlite")
+    history_target = MemoryDB(tmp_path / "history_target.sqlite")
+    try:
+        old = _emit_created_fact(history_src, 1, namespace="ops")
+        old_mid = old["memory_id"]
+        update_memory_record(history_src, old_mid, fact_text="old history fact")
+        delete_memory_record(history_src, old_mid, reason="old history delete")
+        assert history_src.list_tombstones()
+        history_src.replace_history(keep_mount_id=True)
+        assert history_src.list_tombstones() == []
+        assert history_src.get_replay_watermarks() == {}
+
+        new = _emit_created_fact(history_src, 2, namespace="ops")
+        new_mid = new["memory_id"]
+        cur = issue_replay_cursor(history_src, position="start", namespace="ops").encode()
+        res = replay_with_cursor(history_src, history_target, cursor=cur)
+        assert res.applied == 1
+        assert history_target.count() == 1
+        assert history_target.get_memory(new_mid) is not None
+        assert history_target.get_memory(old_mid) is None
+    finally:
+        history_src.close()
+        history_target.close()
+
+
 def test_tombstone_retention_and_compaction_preconditions(tmp_path: Path):
     """#98 criteria 4 & 10: event trimming retains tombstones; tombstone
     compaction enforces trimmed-event, acked-cursor, and no-live-row
