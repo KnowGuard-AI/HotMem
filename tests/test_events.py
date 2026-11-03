@@ -1706,6 +1706,142 @@ def test_reconstructing_payload_preserves_all_99_portable_fields(tmp_path: Path)
 # -- #98 WP2: Atomic replay transition engine, idempotency & failure rules ---
 
 
+def test_retry_after_compaction_and_empty_compaction(tmp_path: Path):
+    """#98 review: safe retries survive tombstone compaction; empty compaction is a no-op."""
+    from hotmem.events import (
+        compact_tombstones,
+        delete_memory_record,
+        update_memory_record,
+    )
+
+    db = MemoryDB(tmp_path / "retry_compaction.sqlite")
+    try:
+        created = _emit_created_fact(db, 1, namespace="ops")
+        mid = created["memory_id"]
+        update_memory_record(
+            db,
+            mid,
+            fact_text="retry update fact",
+            idempotency_key="idem-update-retry",
+            caller_id="caller-retry",
+        )
+        deleted = delete_memory_record(
+            db,
+            mid,
+            reason="retry delete",
+            idempotency_key="idem-delete-retry",
+            caller_id="caller-retry",
+        )
+        seq = deleted["deleted_at_seq"]
+        db.trim_events_before_seq(seq + 1)
+        compact_tombstones(db, through_seq=seq, acked_cursor_seq=seq)
+        assert db.get_tombstone(mid) is None
+
+        retried_delete = delete_memory_record(
+            db,
+            mid,
+            reason="retry delete",
+            idempotency_key="idem-delete-retry",
+            caller_id="caller-retry",
+        )
+        assert retried_delete["idempotent_replay"] is True
+        assert retried_delete["delete_event_id"] == deleted["delete_event_id"]
+
+        retried_update = update_memory_record(
+            db,
+            mid,
+            fact_text="retry update fact",
+            idempotency_key="idem-update-retry",
+            caller_id="caller-retry",
+        )
+        assert retried_update["idempotent_replay"] is True
+    finally:
+        db.close()
+
+    empty = MemoryDB(tmp_path / "empty_compaction.sqlite")
+    try:
+        _emit_created_fact(empty, 1)
+        result = compact_tombstones(empty, through_seq=5)
+        assert result == {
+            "compacted": 0,
+            "remaining": 0,
+            "compacted_through_seq": 0,
+        }
+    finally:
+        empty.close()
+
+
+def test_deleted_private_event_uses_tombstone_policy_classification(tmp_path: Path):
+    """#98/#110 review: delete-event disclosure evaluates the deleted row's
+    classification metadata instead of defaulting to public."""
+    from hotmem.events import _build_memory_created_payload, append_event, delete_memory_record
+    from hotmem.interchange.canonical import compute_content_hash
+    from hotmem.policy import CallerCredential, PolicyConfig
+    from hotmem.runtime import HotMemRuntime
+
+    db_path = tmp_path / "deleted_private.sqlite"
+    db = MemoryDB(db_path)
+    try:
+        mid = "deleted-private-1"
+        ident = "ops/private-deleted"
+        fact = "private deleted fact"
+        db.insert(
+            id=mid,
+            identifier=ident,
+            fact_text=fact,
+            embedding=b"",
+            content_hash=compute_content_hash(ident, fact),
+            namespace="ops/shared",
+            metadata_json='{"classification":"private"}',
+            tags='["classification:private"]',
+        )
+        row = db.get_memory(mid)
+        assert row is not None
+        append_event(
+            db,
+            event_type="memory.created",
+            memory_id=mid,
+            namespace="ops/shared",
+            payload=_build_memory_created_payload(row),
+        )
+        delete_memory_record(db, mid, reason="private delete")
+        assert db.get_tombstone(mid)["metadata_json"] == '{"classification":"private"}'
+    finally:
+        db.close()
+
+    policy = PolicyConfig(
+        store_id="store-98",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-private-reader",
+                caller_id="private-reader",
+                store_id="store-98",
+                namespaces=("ops/shared",),
+                operations=("read",),
+                private_classification_action="omit",
+                secret_action="redact",
+            )
+        ],
+    )
+    rt = HotMemRuntime(
+        db_path=str(db_path),
+        store_id="store-98",
+        policy=policy,
+        base_dir=tmp_path,
+    ).open()
+    try:
+        ctx = rt.resolve_caller(
+            token="tok-private-reader",
+            session_id="sess-private",
+            namespace="ops/shared",
+        )
+        events = rt.list_events(ctx, limit=20)["events"]
+        assert events == []
+    finally:
+        rt.close()
+
+
 def test_legacy_create_replay_idempotency_and_dedupe_targets(tmp_path: Path):
     """#98 review: legacy create replay is idempotent without a delete, and
     legacy dedupe targets skip later updates/deletes instead of failing."""

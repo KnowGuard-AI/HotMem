@@ -498,6 +498,13 @@ delete` sequences without duplicate application or deleted-record resurrection:
    - Compaction advances `store_meta["compacted_tombstones_through_seq"]`, and
      `validate_replay_cursor` rejects any cursor with
      `seq < compacted_tombstones_through_seq` (`reason="stale_base"`).
+   - Compaction with no tombstones at or below the requested horizon is a no-op.
+     Safe retries after compaction resolve the operation ledger by
+     caller/key/memory-id, so a delete/update retried after its tombstone was
+     compacted still returns the recorded outcome.
+   - Tombstones retain non-secret `metadata_json`/`tags` classification inputs so
+     `/v1/events` can apply the same private/secret disclosure policy to a
+     `memory.deleted` event even after the live row is gone.
    - Authoritative hydration clears tombstones, replay watermarks, the saved
      replay checkpoint, and the history-epoch boundary for the restored record
      ids. A restored row therefore cannot remain both live and tombstoned, and

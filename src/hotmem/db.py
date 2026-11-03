@@ -245,6 +245,8 @@ CREATE TABLE IF NOT EXISTS memory_tombstones (
     origin_mount_id    TEXT NOT NULL DEFAULT '',
     origin_replica_id  TEXT NOT NULL DEFAULT '',
     origin_history_id  TEXT NOT NULL DEFAULT '',
+    metadata_json      TEXT NOT NULL DEFAULT '{{}}',
+    tags               TEXT NOT NULL DEFAULT '[]',
     reason             TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_tombstones_namespace_seq
@@ -510,6 +512,8 @@ class MemoryDB:
                 origin_mount_id    TEXT NOT NULL DEFAULT '',
                 origin_replica_id  TEXT NOT NULL DEFAULT '',
                 origin_history_id  TEXT NOT NULL DEFAULT '',
+                metadata_json      TEXT NOT NULL DEFAULT '{}',
+                tags               TEXT NOT NULL DEFAULT '[]',
                 reason             TEXT NOT NULL DEFAULT ''
             )"""
         )
@@ -517,6 +521,14 @@ class MemoryDB:
             """CREATE INDEX IF NOT EXISTS idx_tombstones_namespace_seq
                ON memory_tombstones(namespace, deleted_at_seq)"""
         )
+        if not _has_column(self._conn, "memory_tombstones", "metadata_json"):
+            self._conn.execute(
+                "ALTER TABLE memory_tombstones ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if not _has_column(self._conn, "memory_tombstones", "tags"):
+            self._conn.execute(
+                "ALTER TABLE memory_tombstones ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"
+            )
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS memory_replay_watermarks (
                 memory_id          TEXT PRIMARY KEY,
@@ -1455,6 +1467,25 @@ class MemoryDB:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_operation_ledger_for_memory(
+        self, caller_id: str, operation_key: str, memory_id: str
+    ) -> dict[str, Any] | None:
+        """Look up an operation outcome by caller/key/memory id (#98 safe retry).
+
+        Used when a tombstone has been compacted and its namespace is no longer
+        available to disambiguate the caller/key ledger entry.
+        """
+        rows = self._conn.execute(
+            """SELECT caller_id, namespace, operation_key, operation_name,
+                      request_hash, memory_id, content_hash, response_json, created_at
+               FROM operation_ledger
+               WHERE caller_id = ? AND operation_key = ? AND memory_id = ?
+               ORDER BY created_at DESC, namespace ASC
+               LIMIT 1""",
+            (caller_id, operation_key, memory_id),
+        ).fetchall()
+        return dict(rows[0]) if rows else None
+
     def put_operation_ledger(
         self,
         *,
@@ -1856,6 +1887,8 @@ class MemoryDB:
         origin_mount_id: str = "",
         origin_replica_id: str = "",
         origin_history_id: str = "",
+        metadata_json: str = "{}",
+        tags: str = "[]",
         reason: str = "",
         _commit: bool = True,
     ) -> None:
@@ -1865,8 +1898,8 @@ class MemoryDB:
                    memory_id, namespace, identifier, content_hash,
                    record_fingerprint, deleted_at, deleted_at_seq,
                    delete_event_id, origin_mount_id, origin_replica_id,
-                   origin_history_id, reason
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   origin_history_id, metadata_json, tags, reason
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(memory_id) DO UPDATE SET
                    namespace = excluded.namespace,
                    identifier = excluded.identifier,
@@ -1878,6 +1911,8 @@ class MemoryDB:
                    origin_mount_id = excluded.origin_mount_id,
                    origin_replica_id = excluded.origin_replica_id,
                    origin_history_id = excluded.origin_history_id,
+                   metadata_json = excluded.metadata_json,
+                   tags = excluded.tags,
                    reason = excluded.reason""",
             (
                 memory_id,
@@ -1891,6 +1926,8 @@ class MemoryDB:
                 origin_mount_id or "",
                 origin_replica_id or "",
                 origin_history_id or "",
+                metadata_json or "{}",
+                tags or "[]",
                 reason or "",
             ),
         )

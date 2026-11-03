@@ -2393,6 +2393,7 @@ def apply_event_range(
                 _flush_created()
                 mid = str(payload["id"])
                 ns = str(payload.get("namespace") or "")
+                tomb_row = target_db.get_memory(mid) or {}
                 deleted = target_db.delete_memory_row(mid, _commit=False)
                 target_db.delete_replay_watermark(mid, _commit=False)
                 origin = payload.get("origin") if isinstance(payload.get("origin"), dict) else {}
@@ -2408,6 +2409,8 @@ def apply_event_range(
                     origin_mount_id=str(origin.get("mount_id") or src_mount),
                     origin_replica_id=str(origin.get("replica_id") or src_rep),
                     origin_history_id=str(origin.get("history_id") or src_hist),
+                    metadata_json=str(tomb_row.get("metadata_json") or "{}"),
+                    tags=str(tomb_row.get("tags") or "[]"),
                     reason=str(payload.get("reason") or ""),
                     _commit=False,
                 )
@@ -2761,6 +2764,7 @@ def replay_with_cursor(
                     _flush_page_created()
                     mid = str(payload["id"])
                     ns = str(payload.get("namespace") or "")
+                    tomb_row = target_db.get_memory(mid) or {}
                     deleted = target_db.delete_memory_row(mid, _commit=False)
                     target_db.delete_replay_watermark(mid, _commit=False)
                     origin = (
@@ -2778,6 +2782,8 @@ def replay_with_cursor(
                         origin_mount_id=str(origin.get("mount_id") or src_ident.mount_id),
                         origin_replica_id=str(origin.get("replica_id") or src_ident.replica_id),
                         origin_history_id=str(origin.get("history_id") or src_ident.history_id),
+                        metadata_json=str(tomb_row.get("metadata_json") or "{}"),
+                        tags=str(tomb_row.get("tags") or "[]"),
                         reason=str(payload.get("reason") or ""),
                         _commit=False,
                     )
@@ -2972,6 +2978,8 @@ def update_memory_record(
     if clean_key:
         probe_ns = str((before_row or tombstone or {}).get("namespace") or "")
         existing_op = db.get_operation_ledger(caller_id, probe_ns, clean_key)
+        if existing_op is None:
+            existing_op = db.get_operation_ledger_for_memory(caller_id, clean_key, memory_id)
         if existing_op is not None:
             if existing_op["request_hash"] != request_digest:
                 raise ValueError(
@@ -3275,6 +3283,8 @@ def delete_memory_record(
     if clean_key:
         probe_ns = str((before_row or existing_tombstone or {}).get("namespace") or "")
         existing_op = db.get_operation_ledger(caller_id, probe_ns, clean_key)
+        if existing_op is None:
+            existing_op = db.get_operation_ledger_for_memory(caller_id, clean_key, memory_id)
         if existing_op is not None:
             if existing_op["request_hash"] != request_digest:
                 raise ValueError(
@@ -3328,6 +3338,8 @@ def delete_memory_record(
             origin_mount_id=origin["mount_id"],
             origin_replica_id=origin["replica_id"],
             origin_history_id=origin["history_id"],
+            metadata_json=str(before_row.get("metadata_json") or "{}"),
+            tags=str(before_row.get("tags") or "[]"),
             reason=reason,
             _commit=False,
         )
@@ -3398,6 +3410,14 @@ def compact_tombstones(
     trimmed_through = int(bounds["trimmed_through_seq"])
     prev_compacted = int(db.get_meta("compacted_tombstones_through_seq") or 0)
 
+    all_tombstones = db.list_tombstones(namespace=namespace)
+    if not any(int(t.get("deleted_at_seq") or 0) <= through_seq for t in all_tombstones):
+        return {
+            "compacted": 0,
+            "remaining": len(all_tombstones),
+            "compacted_through_seq": prev_compacted,
+        }
+
     if strict and acked_cursor_seq is not None and through_seq > acked_cursor_seq:
         raise TombstoneCompactionError(
             "unacknowledged_tombstone_horizon",
@@ -3423,7 +3443,6 @@ def compact_tombstones(
         if acked_cursor_seq is not None:
             effective_seq = min(effective_seq, acked_cursor_seq)
 
-    all_tombstones = db.list_tombstones(namespace=namespace)
     candidates = [t for t in all_tombstones if int(t.get("deleted_at_seq") or 0) <= effective_seq]
 
     for t in candidates:

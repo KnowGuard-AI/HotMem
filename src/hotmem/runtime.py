@@ -1804,10 +1804,12 @@ class HotMemRuntime:
                         if isinstance(payload_tags_raw, list)
                         else (payload_tags_raw or "[]")
                     )
+                    tomb_metadata = tomb_row.get("metadata_json") if tomb_row else None
+                    tomb_tags = tomb_row.get("tags") if tomb_row else None
                     payload_probe = {
                         **row_probe,
-                        "metadata_json": payload.get("metadata_json") or "{}",
-                        "tags": payload_tags_str,
+                        "metadata_json": payload.get("metadata_json") or tomb_metadata or "{}",
+                        "tags": (payload_tags_str if "tags" in payload else (tomb_tags or "[]")),
                         "provenance_json": payload.get("provenance_json"),
                     }
                     probe = mem_row if mem_row is not None else payload_probe
