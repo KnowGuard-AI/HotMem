@@ -364,7 +364,15 @@ Snapshot v2 manifests carry additive lineage and replay cursor fields:
   explicit non-goal); use authenticated transport for untrusted channels.
   Cursors and manifests must be treated as untrusted input.
   Scope (`namespace`, `event_types`) is fixed at issuance; replay callers cannot
-  narrow it later.
+  narrow it later. Cursors issued by the current runtime default to the full
+  reconstructing scope (`memory.created`, `memory.updated`, `memory.deleted`)
+  and carry `scope_mode: "reconstructing"`. Pre-#98 cursors lack that marker
+  and are treated as legacy create-only cursors: replay validates them as-is,
+  upgrades them to the full reconstructing scope on first use, and writes the
+  upgraded checkpoint. An explicitly issued narrow cursor carries
+  `scope_mode: "explicit"` and is never silently widened; replay fails with
+  `incomplete_reconstructing_scope` if its range contains an excluded
+  update/delete transition.
 
 Versioned (v1/v2) manifests and manifests carrying `replay_cursor` have their
 derived identity fields verified against the payload during `verify_manifest`

@@ -74,6 +74,9 @@ from hotmem.db import MemoryDB
 CURSOR_VERSION = 1
 CURSOR_PREFIX = "hmc1"
 DEFAULT_REPLAY_EVENT_TYPES: tuple[str, ...] = ("memory.created",)
+SCOPE_MODE_LEGACY = "legacy"
+SCOPE_MODE_EXPLICIT = "explicit"
+SCOPE_MODE_RECONSTRUCTING = "reconstructing"
 RECONSTRUCTING_EVENT_TYPES: tuple[str, ...] = (
     "memory.created",
     "memory.deleted",
@@ -240,6 +243,7 @@ class ReplayCursor:
     base_snapshot_id: str = ""
     namespace: str | None = None
     event_types: tuple[str, ...] = DEFAULT_REPLAY_EVENT_TYPES
+    scope_mode: str = SCOPE_MODE_LEGACY
     version: int = CURSOR_VERSION
 
     def __post_init__(self) -> None:
@@ -320,25 +324,42 @@ class ReplayCursor:
             )
         object.__setattr__(self, "namespace", norm_ns)
         object.__setattr__(self, "event_types", norm_types)
+        if self.scope_mode not in (
+            SCOPE_MODE_LEGACY,
+            SCOPE_MODE_EXPLICIT,
+            SCOPE_MODE_RECONSTRUCTING,
+        ):
+            raise ReplayCursorError(
+                "malformed_cursor",
+                f"Cursor scope_mode must be one of {SCOPE_MODE_LEGACY!r}, "
+                f"{SCOPE_MODE_EXPLICIT!r}, or {SCOPE_MODE_RECONSTRUCTING!r}; "
+                f"got {self.scope_mode!r}.",
+            )
 
     @property
     def scope(self) -> dict[str, Any]:
-        return {
+        scope: dict[str, Any] = {
             "event_types": list(self.event_types),
             "namespace": self.namespace,
         }
+        if self.scope_mode != SCOPE_MODE_LEGACY:
+            scope["scope_mode"] = self.scope_mode
+        return scope
 
     def to_payload_dict(self) -> dict[str, Any]:
+        scope: dict[str, Any] = {
+            "event_types": list(self.event_types),
+            "namespace": self.namespace,
+        }
+        if self.scope_mode != SCOPE_MODE_LEGACY:
+            scope["scope_mode"] = self.scope_mode
         return {
             "anchor_event_id": self.anchor_event_id,
             "base_snapshot_id": self.base_snapshot_id,
             "history_id": self.history_id,
             "mount_id": self.mount_id,
             "replica_id": self.replica_id,
-            "scope": {
-                "event_types": list(self.event_types),
-                "namespace": self.namespace,
-            },
+            "scope": scope,
             "seq": self.seq,
             "v": self.version,
         }
@@ -516,6 +537,7 @@ def decode_cursor(raw: Any) -> ReplayCursor:
         base_snapshot_id=data.get("base_snapshot_id", ""),
         namespace=scope_raw.get("namespace"),
         event_types=scope_raw.get("event_types"),
+        scope_mode=scope_raw.get("scope_mode", SCOPE_MODE_LEGACY),
         seq=data.get("seq", -1),
         anchor_event_id=data.get("anchor_event_id", ""),
     )
@@ -599,13 +621,24 @@ def issue_replay_cursor(
     else:
         raise ValueError(f"Unsupported cursor position {position!r}; expected 'start' or 'head'.")
 
+    if event_types is None:
+        resolved_types = RECONSTRUCTING_EVENT_TYPES
+        scope_mode = SCOPE_MODE_RECONSTRUCTING
+    else:
+        resolved_types = _normalize_event_types(event_types)
+        scope_mode = (
+            SCOPE_MODE_RECONSTRUCTING
+            if resolved_types == RECONSTRUCTING_EVENT_TYPES
+            else SCOPE_MODE_EXPLICIT
+        )
     return ReplayCursor(
         mount_id=ident.mount_id,
         replica_id=ident.replica_id,
         history_id=ident.history_id,
         base_snapshot_id=resolved_base,
         namespace=namespace,
-        event_types=_normalize_event_types(event_types),
+        event_types=resolved_types,
+        scope_mode=scope_mode,
         seq=target_seq,
         anchor_event_id=anchor_id,
     )
@@ -1054,9 +1087,12 @@ def validate_replay_cursor(
                 actual=list(norm_types),
                 recovery="Restrict replay cursors to reconstructing state-mutation event types.",
             )
+        legacy_default_scope = (
+            decoded.scope_mode == SCOPE_MODE_LEGACY
+            and decoded.event_types == DEFAULT_REPLAY_EVENT_TYPES
+        )
         if norm_types != decoded.event_types and not (
-            decoded.event_types == DEFAULT_REPLAY_EVENT_TYPES
-            and norm_types == RECONSTRUCTING_EVENT_TYPES
+            legacy_default_scope and norm_types == RECONSTRUCTING_EVENT_TYPES
         ):
             raise ReplayCursorError(
                 "scope_mismatch",
@@ -1265,11 +1301,7 @@ def replay(
         validated = validate_replay_cursor(db, cursor, namespace=namespace)
         seq_cursor = validated.seq
         filter_ns = validated.namespace
-        allowed_types = (
-            RECONSTRUCTING_EVENT_TYPES
-            if validated.event_types == DEFAULT_REPLAY_EVENT_TYPES
-            else validated.event_types
-        )
+        allowed_types = _effective_replay_event_types(validated)
     else:
         if isinstance(after_seq, bool) or not isinstance(after_seq, int) or after_seq < 0:
             raise ReplayCursorError(
@@ -1351,15 +1383,17 @@ def _event_to_memory_record(event: dict[str, Any]) -> Any | None:
 
 
 def _effective_replay_event_types(
-    cursor_event_types: tuple[str, ...],
+    cursor: ReplayCursor,
     explicit_event_types: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
     """Resolve the active reconstructing event types for a replay operation (#98)."""
     if explicit_event_types is not None:
         return _normalize_event_types(explicit_event_types)
-    if cursor_event_types == DEFAULT_REPLAY_EVENT_TYPES:
+    if cursor.scope_mode == SCOPE_MODE_LEGACY and cursor.event_types == DEFAULT_REPLAY_EVENT_TYPES:
+        # Cursors issued before #98 were implicitly create-only. Upgrade them
+        # on first use so they cannot silently omit update/delete transitions.
         return RECONSTRUCTING_EVENT_TYPES
-    return cursor_event_types
+    return cursor.event_types
 
 
 def _load_target_replay_state(
@@ -2238,7 +2272,7 @@ def replay_with_cursor(
         event_types=event_types,
         allow_legacy_history=allow_legacy_history,
     )
-    effective_types = _effective_replay_event_types(validated.event_types, event_types)
+    effective_types = _effective_replay_event_types(validated, event_types)
 
     saved_last_cursor = target_db.get_meta("last_replay_cursor") or ""
     tgt_guard_ident = target_db.mount_identity()
@@ -2365,7 +2399,12 @@ def replay_with_cursor(
         history_id=validated.history_id,
         base_snapshot_id=validated.base_snapshot_id,
         namespace=validated.namespace,
-        event_types=validated.event_types,
+        event_types=effective_types,
+        scope_mode=(
+            SCOPE_MODE_RECONSTRUCTING
+            if effective_types == RECONSTRUCTING_EVENT_TYPES
+            else SCOPE_MODE_EXPLICIT
+        ),
         seq=last_seq,
         anchor_event_id=last_event_id if last_seq > 0 else "",
     )
@@ -2382,14 +2421,31 @@ def replay_with_cursor(
         )
         if cursor_value
     }
-    if events_scanned == 0 and encoded_next in saved_checkpoints:
-        return ReplayResult(
-            applied=0,
-            skipped=0,
-            events_scanned=0,
-            cursor=encoded_next,
-            completed=True,
-        )
+    if events_scanned == 0:
+        for saved_value in saved_checkpoints:
+            try:
+                saved_cursor = decode_cursor(saved_value)
+            except ReplayCursorError:
+                continue
+            if (
+                saved_cursor.mount_id == validated.mount_id
+                and saved_cursor.replica_id == validated.replica_id
+                and saved_cursor.history_id == validated.history_id
+                and saved_cursor.base_snapshot_id == validated.base_snapshot_id
+                and saved_cursor.namespace == validated.namespace
+                and saved_cursor.seq == validated.seq
+                and saved_cursor.anchor_event_id == validated.anchor_event_id
+            ):
+                # No source events were examined. Keep the hydrated/last
+                # checkpoint byte-stable even when a legacy create-only cursor
+                # would otherwise be upgraded to the wider #98 scope.
+                return ReplayResult(
+                    applied=0,
+                    skipped=0,
+                    events_scanned=0,
+                    cursor=saved_value,
+                    completed=True,
+                )
 
     # Pass 2: stream the same window and apply transitions one page at a time
     # inside a single transaction. Any failure rolls back to the last committed cursor.

@@ -1458,6 +1458,79 @@ def test_max_events_requires_positive_integer(tmp_path: Path):
 # -- #98 WP1: Versioned reconstructing event envelope & mutation primitives ---
 
 
+def test_cursor_scope_defaults_explicit_narrow_and_legacy_upgrade(tmp_path: Path):
+    """#98 review: new cursors are reconstructing-wide, explicit narrow cursors
+    are honored, and unmarked legacy create-only cursors upgrade on replay."""
+    from hotmem.events import (
+        RECONSTRUCTING_EVENT_TYPES,
+        SCOPE_MODE_EXPLICIT,
+        SCOPE_MODE_LEGACY,
+        SCOPE_MODE_RECONSTRUCTING,
+        ReplayCursor,
+        ReplayExecutionError,
+        decode_cursor,
+        issue_replay_cursor,
+        replay_with_cursor,
+        update_memory_record,
+    )
+
+    src = MemoryDB(tmp_path / "scope_src.sqlite")
+    target = MemoryDB(tmp_path / "scope_target.sqlite")
+    target_legacy = MemoryDB(tmp_path / "scope_target_legacy.sqlite")
+    target_narrow = MemoryDB(tmp_path / "scope_target_narrow.sqlite")
+    try:
+        created = _emit_created_fact(src, 1, namespace="ops")
+        mid = created["memory_id"]
+        update_memory_record(src, mid, fact_text="scope update fact", importance=0.0)
+
+        cur = issue_replay_cursor(src, position="start", namespace="ops")
+        assert cur.event_types == RECONSTRUCTING_EVENT_TYPES
+        assert cur.scope_mode == SCOPE_MODE_RECONSTRUCTING
+        assert cur.scope["scope_mode"] == SCOPE_MODE_RECONSTRUCTING
+        round_tripped = decode_cursor(cur.encode())
+        assert round_tripped == cur
+        assert round_tripped.event_types == RECONSTRUCTING_EVENT_TYPES
+
+        res = replay_with_cursor(src, target, cursor=cur.encode())
+        assert res.applied == 2
+        next_cur = decode_cursor(res.cursor)
+        assert next_cur.event_types == RECONSTRUCTING_EVENT_TYPES
+        assert next_cur.scope_mode == SCOPE_MODE_RECONSTRUCTING
+
+        # An unmarked pre-#98 create-only cursor upgrades to reconstructing on use.
+        legacy = ReplayCursor(
+            mount_id=cur.mount_id,
+            replica_id=cur.replica_id,
+            history_id=cur.history_id,
+            base_snapshot_id=cur.base_snapshot_id,
+            namespace="ops",
+            seq=0,
+            anchor_event_id="",
+        )
+        assert legacy.scope_mode == SCOPE_MODE_LEGACY
+        legacy_res = replay_with_cursor(src, target_legacy, cursor=legacy.encode())
+        assert legacy_res.applied == 2
+        assert decode_cursor(legacy_res.cursor).event_types == RECONSTRUCTING_EVENT_TYPES
+
+        # An explicitly issued narrow cursor is not silently widened.
+        narrow = issue_replay_cursor(
+            src,
+            position="start",
+            namespace="ops",
+            event_types=("memory.created",),
+        )
+        assert narrow.scope_mode == SCOPE_MODE_EXPLICIT
+        with pytest.raises(ReplayExecutionError) as exc_scope:
+            replay_with_cursor(src, target_narrow, cursor=narrow.encode())
+        assert exc_scope.value.reason == "incomplete_reconstructing_scope"
+        assert target_narrow.count() == 0
+    finally:
+        src.close()
+        target.close()
+        target_legacy.close()
+        target_narrow.close()
+
+
 def test_reconstructing_vs_observational_event_classification(tmp_path: Path):
     """#98 criteria 1, 2, 5, 11: consumers can distinguish reconstructing
     create/update/delete events from observational events."""
