@@ -559,6 +559,10 @@ def issue_replay_cursor(
       (``seq=0`` if the event log is empty).
     - ``seq=<n>`` issues a cursor anchored to exact event ``seq=<n>`` (which must
       exist in ``db`` when ``n > 0``).
+    - ``event_types`` defaults to the full reconstructing scope
+      (``memory.created``, ``memory.updated``, ``memory.deleted``) with
+      ``scope_mode="reconstructing"``. An explicit narrow scope is preserved
+      with ``scope_mode="explicit"`` and is never silently widened.
     """
     ident = db.mount_identity()
     _require_persistent_identity(ident, "Source")
@@ -1288,7 +1292,9 @@ def replay(
 
     When ``cursor`` is provided, validates it as an opaque portable
     ``ReplayCursor`` against ``db`` (rejecting raw SQLite sequences or wrong
-    sources/bases before streaming) and filters by the cursor's scope.
+    sources/bases before streaming) and filters by the cursor's effective
+    scope. Legacy create-only cursors upgrade to the full reconstructing scope;
+    explicit narrow cursors remain narrow.
     When ``cursor`` is omitted, streams intra-store events strictly after
     ``after_seq``.
     """
@@ -2939,10 +2945,11 @@ def replay_into(
     """Reconstruct memory state from the event log into ``target_db`` (#73/#94/#100).
 
     Validates source/base/history identity before any mutation and replays
-    ``memory.created`` events via bounded page batches in a single transaction.
-    A clean target becomes a clone of the source mount (identity binding is a
-    documented side effect); targets with foreign local state are rejected.
-    Returns the number of records actually applied.
+    ``memory.created`` / ``memory.updated`` / ``memory.deleted`` transitions via
+    bounded page batches in a single transaction, reconstructing terminal state
+    and persistent tombstones. A clean target becomes a clone of the source
+    mount (identity binding is a documented side effect); targets with foreign
+    local state are rejected. Returns the number of records actually applied.
     """
     res = replay_with_cursor(
         db,

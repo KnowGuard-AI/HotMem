@@ -541,6 +541,13 @@ class MemoryDB:
             )"""
         )
         self._conn.commit()
+        if current_version < 7:
+            self._conn.execute("PRAGMA user_version = 7")
+            self._conn.commit()
+            _trace.info(
+                "migrate",
+                "replay tombstones/watermarks available; user_version=7",
+            )
 
         self._ensure_mount_identity()
 

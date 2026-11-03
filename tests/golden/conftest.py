@@ -120,6 +120,15 @@ def golden_cursor_vectors() -> dict[str, str]:
             "lZCJdLCJuYW1lc3BhY2UiOm51bGx9LCJzZXEiOjAsInYiOjF9.8411dc0734cf905a6095435f659f8e"
             "6b8a40cbf6212586d3eca4b6211e4df33c"
         ),
+        "reconstructing_v1": (
+            "hmc1.eyJhbmNob3JfZXZlbnRfaWQiOiJldnQtMDAwMyIsImJhc2Vfc25hcHNob3RfaWQiOiJzbmFwLWJ"
+            "hc2UtMDEiLCJoaXN0b3J5X2lkIjoiaGlzdC0wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSI"
+            "sIm1vdW50X2lkIjoibW50LTAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwicmVwbGljYV9"
+            "pZCI6InJlcC0wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSIsInNjb3BlIjp7ImV2ZW50X3R"
+            "5cGVzIjpbIm1lbW9yeS5jcmVhdGVkIiwibWVtb3J5LmRlbGV0ZWQiLCJtZW1vcnkudXBkYXRlZCJdLCJ"
+            "uYW1lc3BhY2UiOiJvcHMiLCJzY29wZV9tb2RlIjoicmVjb25zdHJ1Y3RpbmcifSwic2VxIjozLCJ2IjoxfQ."
+            "1a7d25f75a2170d748cc5e20d347d5ba8bb8cc065d51a7544952f97e2d87e1ba"
+        ),
         "scoped_head_v1": (
             "hmc1.eyJhbmNob3JfZXZlbnRfaWQiOiJldnQtMDAwMyIsImJhc2Vfc25hcHNob3RfaWQiOiJzbmFwLWJ"
             "hc2UtMDEiLCJoaXN0b3J5X2lkIjoiaGlzdC0wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMSI"

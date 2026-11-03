@@ -481,7 +481,11 @@ delete` sequences without duplicate application or deleted-record resurrection:
      from `memories` and persist a tombstone in `memory_tombstones`
      (`memory_id`, `namespace`, `identifier`, `content_hash`,
      `record_fingerprint`, `deleted_at`, `deleted_at_seq`, `delete_event_id`,
-     `origin_mount_id`, `origin_replica_id`, `origin_history_id`, `reason`).
+     `origin_mount_id`, `origin_replica_id`, `origin_history_id`,
+     `metadata_json`, `tags`, `reason`).
+   - The replay tables are part of schema `user_version=7` (v6 stores migrate
+     additively; `metadata_json`/`tags` are added to pre-existing tombstone
+     tables).
    - Replaying a range containing `create -> update -> delete` a second time
      recognizes that `deleted_at_seq >= event.seq` in the same history and skips
      superseded transitions without resurrecting the deleted record.
@@ -505,6 +509,21 @@ delete` sequences without duplicate application or deleted-record resurrection:
    - Tombstones retain non-secret `metadata_json`/`tags` classification inputs so
      `/v1/events` can apply the same private/secret disclosure policy to a
      `memory.deleted` event even after the live row is gone.
+   - Known limitations of the #98 event-replay surface:
+     - `memory.updated` / `memory.deleted` are library primitives exposed by
+       `hotmem.events`; this issue does not add HTTP/CLI mutation endpoints.
+       `runtime.add` is the production create-event path, and lifecycle
+       promotion/candidate mutations emit reconstructing updates.
+     - Legacy writers that insert directly (`swap.add_memory`, direct
+       `MemoryDB.insert`, hydration/import) do not synthesize historical
+       `memory.created` events. Event replay covers stores written through the
+       runtime/new primitives; pre-existing rows should be hydrated from a
+       snapshot/package base before relying on event replay.
+     - Pre-#98 deletes have no delete event or tombstone to migrate. Replay
+       protection applies to deletes recorded after this contract.
+     - File-backed canonical hashes are recomputed for relative references;
+       absolute host paths require the source `base_dir` and are carried as
+       declared identity.
    - Authoritative hydration clears tombstones, replay watermarks, the saved
      replay checkpoint, and the history-epoch boundary for the restored record
      ids. A restored row therefore cannot remain both live and tombstoned, and

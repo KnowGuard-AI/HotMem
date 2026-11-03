@@ -121,10 +121,47 @@ def test_migration_adds_events_table(v1_db_path: Path):
             row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         assert "events" in tables
+        assert "memory_tombstones" in tables
+        assert "memory_replay_watermarks" in tables
+        tomb_cols = {
+            row[1] for row in db._conn.execute("PRAGMA table_info(memory_tombstones)").fetchall()
+        }
+        assert {"metadata_json", "tags"}.issubset(tomb_cols)
         # The event log starts empty; no backfill of historical rows.
         rows = db._conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         assert rows == 0
-        # user_version bumped through the additive migrations (now 6: namespace identity).
-        assert db._conn.execute("PRAGMA user_version").fetchone()[0] == 6
+        # user_version bumped through the additive migrations (now 7: replay tombstones/watermarks).
+        assert db._conn.execute("PRAGMA user_version").fetchone()[0] == 7
+    finally:
+        db.close()
+
+
+def test_v6_database_migrates_replay_tables_and_version(tmp_path: Path):
+    """#98: an existing v6 store gains tombstone/watermark tables and user_version 7."""
+    import sqlite3
+
+    db_path = tmp_path / "v6.sqlite"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE memories (
+            id TEXT PRIMARY KEY,
+            identifier TEXT NOT NULL,
+            fact_text TEXT,
+            embedding BLOB,
+            content_hash TEXT DEFAULT '',
+            created_at TEXT
+        )"""
+    )
+    conn.execute("PRAGMA user_version = 6")
+    conn.commit()
+    conn.close()
+
+    db = MemoryDB(db_path)
+    try:
+        assert db._conn.execute("PRAGMA user_version").fetchone()[0] == 7
+        tables = {
+            row[0] for row in db._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        assert {"memory_tombstones", "memory_replay_watermarks"}.issubset(tables)
     finally:
         db.close()
