@@ -1453,3 +1453,178 @@ def test_max_events_requires_positive_integer(tmp_path: Path):
     finally:
         src.close()
         target.close()
+
+
+# -- #98 WP1: Versioned reconstructing event envelope & mutation primitives ---
+
+
+def test_reconstructing_vs_observational_event_classification(tmp_path: Path):
+    """#98 criteria 1, 2, 5, 11: consumers can distinguish reconstructing
+    create/update/delete events from observational events."""
+    from hotmem.events import (
+        EVENT_PAYLOAD_SCHEMA_VERSION,
+        OBSERVATIONAL_EVENT_TYPES,
+        RECONSTRUCTING_EVENT_TYPES,
+        EventType,
+        append_event,
+        classify_event,
+        delete_memory_record,
+        is_reconstructing_event,
+        query_events,
+        update_memory_record,
+    )
+
+    assert set(RECONSTRUCTING_EVENT_TYPES) == {
+        EventType.MEMORY_CREATED,
+        EventType.MEMORY_UPDATED,
+        EventType.MEMORY_DELETED,
+    }
+    assert RECONSTRUCTING_EVENT_TYPES and not (
+        set(RECONSTRUCTING_EVENT_TYPES) & OBSERVATIONAL_EVENT_TYPES
+    )
+
+    for etype in RECONSTRUCTING_EVENT_TYPES:
+        assert is_reconstructing_event(etype) is True
+        assert classify_event(etype) == "reconstructing"
+    for etype in OBSERVATIONAL_EVENT_TYPES:
+        assert is_reconstructing_event(etype) is False
+        assert classify_event(etype) == "observational"
+
+    db = MemoryDB(tmp_path / "classify.sqlite")
+    try:
+        created_evt = _emit_created_fact(db, 1, namespace="ops")
+        mid = created_evt["memory_id"]
+        upd_res = update_memory_record(
+            db,
+            mid,
+            fact_text="Updated canonical fact 1",
+            importance=0.0,
+            schema_version=2,
+            reason="refine fact",
+        )
+        obs_evt = append_event(
+            db,
+            event_type=EventType.MEMORY_PROMOTION,
+            memory_id=mid,
+            namespace="ops",
+            payload={"from": "HOT", "to": "READY", "reason": "vetted"},
+        )
+        del_res = delete_memory_record(db, mid, reason="obsolete")
+
+        events = query_events(db, limit=20)["events"]
+        assert [e["event_type"] for e in events] == [
+            EventType.MEMORY_CREATED,
+            EventType.MEMORY_UPDATED,
+            EventType.MEMORY_PROMOTION,
+            EventType.MEMORY_DELETED,
+        ]
+        assert [e["reconstructing"] for e in events] == [True, True, False, True]
+        assert [e["event_category"] for e in events] == [
+            "reconstructing",
+            "reconstructing",
+            "observational",
+            "reconstructing",
+        ]
+        assert is_reconstructing_event(obs_evt) is False
+
+        ident = db.mount_identity()
+        for recon_evt, expected_transition in (
+            (events[0], "create"),
+            (events[1], "update"),
+            (events[3], "delete"),
+        ):
+            p = recon_evt["payload"]
+            assert p["payload_schema_version"] == EVENT_PAYLOAD_SCHEMA_VERSION == 1
+            assert p["event_category"] == "reconstructing"
+            assert p["transition"] == expected_transition
+            assert p["id"] == mid
+            assert p["namespace"] == "ops"
+            assert p["content_hash"]
+            assert len(p["record_fingerprint"]) == 64
+            assert p["occurred_at"] == recon_evt["occurred_at"]
+            assert p["origin"] == {
+                "mount_id": ident.mount_id,
+                "replica_id": ident.replica_id,
+                "history_id": ident.history_id,
+                "runtime_generation": ident.runtime_generation,
+            }
+
+        # Verify update payload carries prior-state preconditions and preserves
+        # importance=0.0 and schema_version.
+        upd_payload = upd_res["event"]["payload"]
+        assert upd_payload["importance"] == 0.0
+        assert upd_payload["schema_version"] == 2
+        assert upd_payload["previous_content_hash"] == created_evt["payload"]["content_hash"]
+        assert (
+            upd_payload["previous_record_fingerprint"]
+            == created_evt["payload"]["record_fingerprint"]
+        )
+
+        # Verify delete removed active row and recorded persistent tombstone
+        assert db.get_memory(mid) is None
+        tombstone = db.get_tombstone(mid)
+        assert tombstone is not None
+        assert tombstone["memory_id"] == mid
+        assert tombstone["namespace"] == "ops"
+        assert tombstone["deleted_at_seq"] == del_res["event"]["seq"]
+        assert tombstone["delete_event_id"] == del_res["event"]["event_id"]
+        assert tombstone["record_fingerprint"] == upd_payload["record_fingerprint"]
+        assert tombstone["origin_history_id"] == ident.history_id
+    finally:
+        db.close()
+
+
+def test_reconstructing_payload_preserves_all_99_portable_fields(tmp_path: Path):
+    """#98 criterion 9: reconstructing payloads preserve all 27 #99 portable
+    fields including explicit importance=0.0, schema_version, and file-backed fields."""
+    from hotmem.events import _build_memory_created_payload, _event_to_memory_record
+    from hotmem.interchange.fingerprint import record_fingerprint
+
+    raw_row = {
+        "id": "mem-port-99",
+        "identifier": "docs/spec",
+        "fact_text": "",
+        "embedding": b"",
+        "embedding_dim": 0,
+        "embedding_model": "",
+        "source": "agent://test",
+        "importance": 0.0,
+        "metadata_json": '{"env":"prod"}',
+        "content_hash": "a" * 64,
+        "ttl_seconds": 7200,
+        "created_at": "2026-11-03T10:00:00Z",
+        "updated_at": "2026-11-03T11:00:00Z",
+        "namespace": "sec/alpha",
+        "tier": "warm",
+        "memory_type": "file",
+        "source_uri": "docs/spec.md",
+        "source_format": "text/markdown",
+        "source_checksum": "b" * 64,
+        "byte_offset": 128,
+        "byte_length": 512,
+        "snapshot_id": "snap-01",
+        "promotion_state": "READY",
+        "promotion_candidate": 1,
+        "parent_memory": "mem-parent-01",
+        "related_memories": '["mem-rel-01","mem-rel-02"]',
+        "tags": '["model:gpt-5","project:hotmem"]',
+        "schema_version": 3,
+        "fact_summary": "File-backed security specification summary",
+        "provenance_json": '{"origin":{"session_id":"s-1"}}',
+    }
+    payload = _build_memory_created_payload(raw_row)
+    assert payload["importance"] == 0.0
+    assert payload["schema_version"] == 3
+    assert payload["byte_offset"] == 128
+    assert payload["byte_length"] == 512
+    assert payload["source_checksum"] == "b" * 64
+
+    rec = _event_to_memory_record({"payload": payload})
+    assert rec is not None
+    assert rec.importance == 0.0
+    assert rec.schema_version == 3
+    assert rec.byte_offset == 128
+    assert rec.byte_length == 512
+    assert rec.promotion_state == "READY"
+    assert rec.promotion_candidate == 1
+    assert record_fingerprint(raw_row) == payload["record_fingerprint"]

@@ -47,6 +47,8 @@ VALID_MOUNT_RELATIONSHIPS = (
 MUTATING_EVENT_TYPES = frozenset(
     {
         "memory.created",
+        "memory.updated",
+        "memory.deleted",
         "memory.promotion",
         "memory.candidate",
         "sync.applied",

@@ -26,7 +26,7 @@ import json
 import re
 import sqlite3
 import struct
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -230,6 +230,35 @@ CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
 BEGIN
     SELECT RAISE(ABORT, 'events table is append-only: DELETE is forbidden');
 END;
+
+-- #98: Persistent tombstones and replay progression watermarks prevent
+-- deleted-record resurrection and duplicate transition application.
+CREATE TABLE IF NOT EXISTS memory_tombstones (
+    memory_id          TEXT PRIMARY KEY,
+    namespace          TEXT NOT NULL DEFAULT '',
+    identifier         TEXT NOT NULL DEFAULT '',
+    content_hash       TEXT NOT NULL DEFAULT '',
+    record_fingerprint TEXT NOT NULL DEFAULT '',
+    deleted_at         TEXT NOT NULL,
+    deleted_at_seq     INTEGER NOT NULL DEFAULT 0,
+    delete_event_id    TEXT NOT NULL DEFAULT '',
+    origin_mount_id    TEXT NOT NULL DEFAULT '',
+    origin_replica_id  TEXT NOT NULL DEFAULT '',
+    origin_history_id  TEXT NOT NULL DEFAULT '',
+    reason             TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_tombstones_namespace_seq
+    ON memory_tombstones(namespace, deleted_at_seq);
+
+CREATE TABLE IF NOT EXISTS memory_replay_watermarks (
+    memory_id          TEXT PRIMARY KEY,
+    namespace          TEXT NOT NULL DEFAULT '',
+    content_hash       TEXT NOT NULL DEFAULT '',
+    record_fingerprint TEXT NOT NULL DEFAULT '',
+    last_seq           INTEGER NOT NULL DEFAULT 0,
+    last_event_id      TEXT NOT NULL DEFAULT '',
+    history_id         TEXT NOT NULL DEFAULT ''
+);
 """
 
 _FTS_TOKEN_RE = re.compile(r"[\w]+")
@@ -467,6 +496,39 @@ class MemoryDB:
             self._conn.execute("PRAGMA user_version = 6")
             self._conn.commit()
             _trace.info("migrate", "namespace identity + operation ledger; user_version=6")
+
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS memory_tombstones (
+                memory_id          TEXT PRIMARY KEY,
+                namespace          TEXT NOT NULL DEFAULT '',
+                identifier         TEXT NOT NULL DEFAULT '',
+                content_hash       TEXT NOT NULL DEFAULT '',
+                record_fingerprint TEXT NOT NULL DEFAULT '',
+                deleted_at         TEXT NOT NULL,
+                deleted_at_seq     INTEGER NOT NULL DEFAULT 0,
+                delete_event_id    TEXT NOT NULL DEFAULT '',
+                origin_mount_id    TEXT NOT NULL DEFAULT '',
+                origin_replica_id  TEXT NOT NULL DEFAULT '',
+                origin_history_id  TEXT NOT NULL DEFAULT '',
+                reason             TEXT NOT NULL DEFAULT ''
+            )"""
+        )
+        self._conn.execute(
+            """CREATE INDEX IF NOT EXISTS idx_tombstones_namespace_seq
+               ON memory_tombstones(namespace, deleted_at_seq)"""
+        )
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS memory_replay_watermarks (
+                memory_id          TEXT PRIMARY KEY,
+                namespace          TEXT NOT NULL DEFAULT '',
+                content_hash       TEXT NOT NULL DEFAULT '',
+                record_fingerprint TEXT NOT NULL DEFAULT '',
+                last_seq           INTEGER NOT NULL DEFAULT 0,
+                last_event_id      TEXT NOT NULL DEFAULT '',
+                history_id         TEXT NOT NULL DEFAULT ''
+            )"""
+        )
+        self._conn.commit()
 
         self._ensure_mount_identity()
 
@@ -1141,6 +1203,7 @@ class MemoryDB:
         # A replacement starts a new history epoch; retention watermarks from
         # the previous epoch must not make new cursors unusable (#94).
         self.set_meta("trimmed_through_seq", "0", _commit=False)
+        self.set_meta("compacted_tombstones_through_seq", "0", _commit=False)
         self.set_meta("last_known_head_seq", "0", _commit=False)
         self.set_meta("last_known_head_event_id", "", _commit=False)
         if _commit:
@@ -1667,6 +1730,234 @@ class MemoryDB:
         inserted = cursor.rowcount if cursor.rowcount != -1 else 0
         _trace.debug("insert_many", f"stored {inserted} memories", detail={"attempted": len(rows)})
         return inserted
+
+    def replace_memory_record(self, record: MemoryRecord, *, _commit: bool = True) -> bool:
+        """Replace an existing memory row's portable columns in place (#98)."""
+        update_cols = [c for c in _MEMORY_COLUMNS if c != "id"]
+        set_clause = ", ".join(f"{col} = ?" for col in update_cols)
+        params = [getattr(record, col) for col in update_cols]
+        params.append(record.id)
+        cursor = self._conn.execute(
+            f"UPDATE memories SET {set_clause} WHERE id = ?",
+            params,
+        )
+        if _commit:
+            self._conn.commit()
+        return (cursor.rowcount if cursor.rowcount != -1 else 0) > 0
+
+    def delete_memory_row(self, memory_id: str, *, _commit: bool = True) -> bool:
+        """Delete an active memory row by primary key (#98)."""
+        cursor = self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        if _commit:
+            self._conn.commit()
+        return (cursor.rowcount if cursor.rowcount != -1 else 0) > 0
+
+    def get_tombstone(self, memory_id: str) -> dict[str, Any] | None:
+        """Return the persistent tombstone for ``memory_id`` if present (#98)."""
+        try:
+            row = self._conn.execute(
+                "SELECT * FROM memory_tombstones WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return dict(row) if row is not None else None
+
+    def get_tombstones(
+        self,
+        memory_ids: Sequence[str] | None = None,
+        *,
+        namespace: str | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Return tombstones keyed by ``memory_id`` (#98)."""
+        out: dict[str, dict[str, Any]] = {}
+        try:
+            if memory_ids is not None:
+                ordered = sorted({str(m) for m in memory_ids if m})
+                if not ordered:
+                    return out
+                for start in range(0, len(ordered), _SEARCH_BIND_CHUNK):
+                    chunk = ordered[start : start + _SEARCH_BIND_CHUNK]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    if namespace is not None:
+                        rows = self._conn.execute(
+                            f"""SELECT * FROM memory_tombstones
+                                WHERE memory_id IN ({placeholders}) AND namespace = ?""",
+                            [*chunk, namespace],
+                        ).fetchall()
+                    else:
+                        rows = self._conn.execute(
+                            f"SELECT * FROM memory_tombstones WHERE memory_id IN ({placeholders})",
+                            chunk,
+                        ).fetchall()
+                    for row in rows:
+                        out[str(row["memory_id"])] = dict(row)
+                return out
+            if namespace is not None:
+                rows = self._conn.execute(
+                    """SELECT * FROM memory_tombstones
+                       WHERE namespace = ?
+                       ORDER BY deleted_at_seq ASC""",
+                    (namespace,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM memory_tombstones ORDER BY deleted_at_seq ASC"
+                ).fetchall()
+            for row in rows:
+                out[str(row["memory_id"])] = dict(row)
+        except sqlite3.OperationalError:
+            return {}
+        return out
+
+    def list_tombstones(self, *, namespace: str | None = None) -> list[dict[str, Any]]:
+        """Return persistent tombstones ordered by ``(deleted_at_seq, memory_id)`` (#98)."""
+        try:
+            if namespace is not None:
+                rows = self._conn.execute(
+                    """SELECT * FROM memory_tombstones
+                       WHERE namespace = ?
+                       ORDER BY deleted_at_seq ASC, memory_id ASC""",
+                    (namespace,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """SELECT * FROM memory_tombstones
+                       ORDER BY deleted_at_seq ASC, memory_id ASC"""
+                ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [dict(r) for r in rows]
+
+    def record_tombstone(
+        self,
+        *,
+        memory_id: str,
+        namespace: str = "",
+        identifier: str = "",
+        content_hash: str = "",
+        record_fingerprint: str = "",
+        deleted_at: str,
+        deleted_at_seq: int = 0,
+        delete_event_id: str = "",
+        origin_mount_id: str = "",
+        origin_replica_id: str = "",
+        origin_history_id: str = "",
+        reason: str = "",
+        _commit: bool = True,
+    ) -> None:
+        """Insert or update a persistent tombstone row (#98)."""
+        self._conn.execute(
+            """INSERT INTO memory_tombstones (
+                   memory_id, namespace, identifier, content_hash,
+                   record_fingerprint, deleted_at, deleted_at_seq,
+                   delete_event_id, origin_mount_id, origin_replica_id,
+                   origin_history_id, reason
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(memory_id) DO UPDATE SET
+                   namespace = excluded.namespace,
+                   identifier = excluded.identifier,
+                   content_hash = excluded.content_hash,
+                   record_fingerprint = excluded.record_fingerprint,
+                   deleted_at = excluded.deleted_at,
+                   deleted_at_seq = excluded.deleted_at_seq,
+                   delete_event_id = excluded.delete_event_id,
+                   origin_mount_id = excluded.origin_mount_id,
+                   origin_replica_id = excluded.origin_replica_id,
+                   origin_history_id = excluded.origin_history_id,
+                   reason = excluded.reason""",
+            (
+                memory_id,
+                namespace or "",
+                identifier or "",
+                content_hash or "",
+                record_fingerprint or "",
+                deleted_at,
+                int(deleted_at_seq),
+                delete_event_id or "",
+                origin_mount_id or "",
+                origin_replica_id or "",
+                origin_history_id or "",
+                reason or "",
+            ),
+        )
+        if _commit:
+            self._conn.commit()
+
+    def get_replay_watermarks(
+        self, memory_ids: Sequence[str] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Return per-record replay watermarks keyed by ``memory_id`` (#98)."""
+        out: dict[str, dict[str, Any]] = {}
+        try:
+            if memory_ids is not None:
+                ordered = sorted({str(m) for m in memory_ids if m})
+                if not ordered:
+                    return out
+                for start in range(0, len(ordered), _SEARCH_BIND_CHUNK):
+                    chunk = ordered[start : start + _SEARCH_BIND_CHUNK]
+                    placeholders = ", ".join("?" for _ in chunk)
+                    rows = self._conn.execute(
+                        f"SELECT * FROM memory_replay_watermarks "
+                        f"WHERE memory_id IN ({placeholders})",
+                        chunk,
+                    ).fetchall()
+                    for row in rows:
+                        out[str(row["memory_id"])] = dict(row)
+                return out
+            rows = self._conn.execute("SELECT * FROM memory_replay_watermarks").fetchall()
+            for row in rows:
+                out[str(row["memory_id"])] = dict(row)
+        except sqlite3.OperationalError:
+            return {}
+        return out
+
+    def set_replay_watermark(
+        self,
+        *,
+        memory_id: str,
+        namespace: str,
+        content_hash: str,
+        record_fingerprint: str,
+        last_seq: int,
+        last_event_id: str,
+        history_id: str,
+        _commit: bool = True,
+    ) -> None:
+        """Record the latest applied event sequence/fingerprint for ``memory_id`` (#98)."""
+        self._conn.execute(
+            """INSERT INTO memory_replay_watermarks (
+                   memory_id, namespace, content_hash, record_fingerprint,
+                   last_seq, last_event_id, history_id
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(memory_id) DO UPDATE SET
+                   namespace = excluded.namespace,
+                   content_hash = excluded.content_hash,
+                   record_fingerprint = excluded.record_fingerprint,
+                   last_seq = excluded.last_seq,
+                   last_event_id = excluded.last_event_id,
+                   history_id = excluded.history_id""",
+            (
+                memory_id,
+                namespace or "",
+                content_hash or "",
+                record_fingerprint or "",
+                int(last_seq),
+                last_event_id or "",
+                history_id or "",
+            ),
+        )
+        if _commit:
+            self._conn.commit()
+
+    def delete_replay_watermark(self, memory_id: str, *, _commit: bool = True) -> None:
+        """Remove a replay watermark when its record is tombstoned (#98)."""
+        self._conn.execute(
+            "DELETE FROM memory_replay_watermarks WHERE memory_id = ?",
+            (memory_id,),
+        )
+        if _commit:
+            self._conn.commit()
 
     def search_with_cosine(
         self,

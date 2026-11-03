@@ -74,6 +74,12 @@ from hotmem.db import MemoryDB
 CURSOR_VERSION = 1
 CURSOR_PREFIX = "hmc1"
 DEFAULT_REPLAY_EVENT_TYPES: tuple[str, ...] = ("memory.created",)
+RECONSTRUCTING_EVENT_TYPES: tuple[str, ...] = (
+    "memory.created",
+    "memory.deleted",
+    "memory.updated",
+)
+EVENT_PAYLOAD_SCHEMA_VERSION = 1
 # Untrusted cursor inputs are bounded to keep parsing cheap (resource safety).
 MAX_CURSOR_TOKEN = 64 * 1024
 MAX_CURSOR_FIELD = 512
@@ -548,6 +554,8 @@ class EventType:
     """Canonical event type strings. Stored as plain text for SQL introspection."""
 
     MEMORY_CREATED = "memory.created"
+    MEMORY_UPDATED = "memory.updated"
+    MEMORY_DELETED = "memory.deleted"
     MEMORY_DEDUPLICATED = "memory.deduplicated"
     MEMORY_PROMOTION = "memory.promotion"
     MEMORY_CANDIDATE = "memory.candidate"
@@ -561,28 +569,144 @@ class EventType:
     HANDOFF_APPLIED = "handoff.applied"
 
 
+OBSERVATIONAL_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        EventType.MEMORY_DEDUPLICATED,
+        EventType.MEMORY_PROMOTION,
+        EventType.MEMORY_CANDIDATE,
+        EventType.SNAPSHOT_IMPORTED,
+        EventType.BUNDLE_IMPORTED,
+        EventType.BUNDLE_DISCOVERED,
+        EventType.HYGIENE_CHECKED,
+        EventType.HYGIENE_WARNING,
+        EventType.INDEX_REBUILT,
+        EventType.SYNC_APPLIED,
+        EventType.HANDOFF_APPLIED,
+    }
+)
+
+
+def is_reconstructing_event(event_or_type: str | Mapping[str, Any]) -> bool:
+    """Return True iff the event or event_type is a state-reconstructing mutation (#98).
+
+    Observational events (deduplication, promotion/candidate signals, hygiene,
+    imports, index rebuilds, sync/handoff summaries) are never reconstructing
+    unless their contract explicitly declares otherwise.
+    """
+    if isinstance(event_or_type, str):
+        return event_or_type in RECONSTRUCTING_EVENT_TYPES
+    if isinstance(event_or_type, Mapping):
+        etype = str(event_or_type.get("event_type") or "")
+        payload = event_or_type.get("payload")
+        if isinstance(payload, Mapping):
+            category = payload.get("event_category")
+            if category == "observational":
+                return False
+        return etype in RECONSTRUCTING_EVENT_TYPES
+    return False
+
+
+def classify_event(
+    event_or_type: str | Mapping[str, Any],
+) -> Literal["reconstructing", "observational"]:
+    """Return ``'reconstructing'`` or ``'observational'`` for an event or type (#98)."""
+    return "reconstructing" if is_reconstructing_event(event_or_type) else "observational"
+
+
 def _utc_now_iso() -> str:
     """Current UTC time as ISO-8601 (stdlib only)."""
     return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _build_memory_created_payload(record: dict[str, Any]) -> dict[str, Any]:
-    """Build a full-state payload from a memory row for deterministic replay.
+def _extract_origin_identity(db: MemoryDB | None) -> dict[str, str]:
+    """Return the source/runtime identity envelope for ``db`` (#98)."""
+    if db is None:
+        return {
+            "mount_id": "",
+            "replica_id": "",
+            "history_id": "",
+            "runtime_generation": "",
+        }
+    ident = db.mount_identity()
+    return {
+        "mount_id": str(ident.mount_id or ""),
+        "replica_id": str(ident.replica_id or ""),
+        "history_id": str(ident.history_id or ""),
+        "runtime_generation": str(ident.runtime_generation or ""),
+    }
 
-    Captures all columns needed to reconstruct the row via INSERT OR IGNORE.
+
+_ENVELOPE_ONLY_KEYS: frozenset[str] = frozenset(
+    {
+        "payload_schema_version",
+        "event_category",
+        "transition",
+        "record_fingerprint",
+        "previous_content_hash",
+        "previous_record_fingerprint",
+        "origin",
+        "occurred_at",
+        "deleted_at",
+        "reason",
+    }
+)
+
+
+def _strip_envelope_keys(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``record`` without reconstructing-envelope-only metadata keys."""
+    return {k: v for k, v in record.items() if k not in _ENVELOPE_ONLY_KEYS}
+
+
+def _safe_record_fingerprint(record: Mapping[str, Any]) -> str:
+    """Compute the canonical #99 record_fingerprint for a record dict, or '' on malformed input."""
+    from hotmem.interchange.fingerprint import record_fingerprint
+
+    try:
+        return record_fingerprint(_strip_envelope_keys(record))
+    except Exception:
+        return ""
+
+
+def _serialize_json_column(val: Any, default: str | None) -> str | None:
+    if val is None:
+        return default
+    if isinstance(val, str):
+        return val if val else default
+    return json.dumps(val, sort_keys=True)
+
+
+def _build_memory_created_payload(
+    record: dict[str, Any],
+    *,
+    origin: dict[str, str] | None = None,
+    occurred_at: str | None = None,
+) -> dict[str, Any]:
+    """Build a full-state v1 payload from a memory row for deterministic replay (#98, #99).
+
+    Captures all 27 portable columns required by #99/#100 plus the #98
+    reconstructing envelope metadata (`payload_schema_version`,
+    `event_category`, `transition`, `record_fingerprint`, `origin`).
     Embeddings are base64-encoded so the payload stays JSON-safe.
     """
-    import base64
+    raw_imp = record.get("importance")
+    importance = 0.5 if raw_imp is None else float(raw_imp)
+    raw_schema_ver = record.get("schema_version")
+    schema_version = 1 if raw_schema_ver is None else int(raw_schema_ver)
+    raw_cand = record.get("promotion_candidate")
+    promotion_candidate = 0 if raw_cand is None else int(bool(raw_cand))
 
     payload: dict[str, Any] = {
+        "payload_schema_version": EVENT_PAYLOAD_SCHEMA_VERSION,
+        "event_category": "reconstructing",
+        "transition": "create",
         "id": record.get("id", ""),
         "identifier": record.get("identifier", ""),
         "fact_text": record.get("fact_text") or "",
         "embedding_dim": record.get("embedding_dim") or 0,
         "embedding_model": record.get("embedding_model") or "",
         "source": record.get("source") or "",
-        "importance": record.get("importance") or 0.5,
-        "metadata_json": record.get("metadata_json") or "{}",
+        "importance": importance,
+        "metadata_json": _serialize_json_column(record.get("metadata_json"), "{}"),
         "content_hash": record.get("content_hash") or "",
         "namespace": record.get("namespace") or "",
         "tier": record.get("tier") or "hot",
@@ -593,22 +717,83 @@ def _build_memory_created_payload(record: dict[str, Any]) -> dict[str, Any]:
         "byte_offset": record.get("byte_offset"),
         "byte_length": record.get("byte_length"),
         "promotion_state": record.get("promotion_state") or "HOT",
-        "promotion_candidate": record.get("promotion_candidate") or 0,
-        "tags": record.get("tags") or "[]",
+        "promotion_candidate": promotion_candidate,
+        "tags": _serialize_json_column(record.get("tags"), "[]"),
+        "schema_version": schema_version,
         "fact_summary": record.get("fact_summary"),
-        "provenance_json": record.get("provenance_json"),
+        "provenance_json": _serialize_json_column(record.get("provenance_json"), None),
         "snapshot_id": record.get("snapshot_id") or "",
         "parent_memory": record.get("parent_memory") or "",
-        "related_memories": record.get("related_memories") or "[]",
+        "related_memories": _serialize_json_column(record.get("related_memories"), "[]"),
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
     }
     emb = record.get("embedding")
     if emb:
         payload["embedding_b64"] = base64.b64encode(emb).decode("ascii")
+    elif record.get("embedding_b64"):
+        payload["embedding_b64"] = str(record["embedding_b64"])
     ttl = record.get("ttl_seconds")
     if ttl is not None:
         payload["ttl_seconds"] = ttl
+    payload["record_fingerprint"] = _safe_record_fingerprint(payload)
+    if origin is not None:
+        payload["origin"] = dict(origin)
+    if occurred_at is not None:
+        payload["occurred_at"] = occurred_at
+    return payload
+
+
+def _build_memory_updated_payload(
+    after_record: dict[str, Any],
+    *,
+    before_record: Mapping[str, Any] | None = None,
+    origin: dict[str, str] | None = None,
+    occurred_at: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Build a versioned complete-after-state update payload (#98)."""
+    payload = _build_memory_created_payload(
+        after_record,
+        origin=origin,
+        occurred_at=occurred_at,
+    )
+    payload["transition"] = "update"
+    if before_record is not None:
+        payload["previous_content_hash"] = str(before_record.get("content_hash") or "")
+        payload["previous_record_fingerprint"] = _safe_record_fingerprint(before_record)
+    if reason:
+        payload["reason"] = str(reason)
+    return payload
+
+
+def _build_memory_deleted_payload(
+    before_record: Mapping[str, Any],
+    *,
+    deleted_at: str | None = None,
+    origin: dict[str, str] | None = None,
+    occurred_at: str | None = None,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Build a versioned delete/tombstone event payload (#98)."""
+    ts = deleted_at or occurred_at or _utc_now_iso()
+    payload: dict[str, Any] = {
+        "payload_schema_version": EVENT_PAYLOAD_SCHEMA_VERSION,
+        "event_category": "reconstructing",
+        "transition": "delete",
+        "id": str(before_record.get("id") or ""),
+        "identifier": str(before_record.get("identifier") or ""),
+        "namespace": str(before_record.get("namespace") or ""),
+        "content_hash": str(before_record.get("content_hash") or ""),
+        "record_fingerprint": _safe_record_fingerprint(before_record),
+        "deleted_at": ts,
+    }
+    if origin is not None:
+        payload["origin"] = dict(origin)
+    if occurred_at is not None:
+        payload["occurred_at"] = occurred_at
+    if reason:
+        payload["reason"] = str(reason)
     return payload
 
 
@@ -629,7 +814,16 @@ def append_event(
     """
     event_id = uuid.uuid4().hex
     occurred_at = occurred_at or _utc_now_iso()
-    payload_json = json.dumps(payload or {}, sort_keys=True, default=str)
+    stored_payload: dict[str, Any] = dict(payload) if isinstance(payload, dict) else {}
+    if (
+        event_type in RECONSTRUCTING_EVENT_TYPES
+        and stored_payload.get("payload_schema_version") == EVENT_PAYLOAD_SCHEMA_VERSION
+    ):
+        if "origin" not in stored_payload:
+            stored_payload["origin"] = _extract_origin_identity(db)
+        if "occurred_at" not in stored_payload:
+            stored_payload["occurred_at"] = occurred_at
+    payload_json = json.dumps(stored_payload, sort_keys=True, default=str)
     seq = db.append_event(
         event_type=event_type,
         event_id=event_id,
@@ -639,6 +833,7 @@ def append_event(
         payload_json=payload_json,
         _commit=_commit,
     )
+    reconstructing = is_reconstructing_event({"event_type": event_type, "payload": stored_payload})
     return {
         "seq": seq,
         "event_id": event_id,
@@ -646,7 +841,9 @@ def append_event(
         "namespace": namespace,
         "event_type": event_type,
         "occurred_at": occurred_at,
-        "payload": payload or {},
+        "reconstructing": reconstructing,
+        "event_category": "reconstructing" if reconstructing else "observational",
+        "payload": stored_payload,
     }
 
 
@@ -1006,7 +1203,7 @@ _REPLAY_BATCH = 1000
 
 
 def _event_to_memory_record(event: dict[str, Any]) -> Any | None:
-    """Convert a ``memory.created`` event payload into a ``MemoryRecord``."""
+    """Convert a ``memory.created`` or ``memory.updated`` event payload into a ``MemoryRecord``."""
     from hotmem.db import MemoryRecord
 
     p = event.get("payload") or {}
@@ -1014,6 +1211,12 @@ def _event_to_memory_record(event: dict[str, Any]) -> Any | None:
         return None
     emb_b64 = p.get("embedding_b64")
     emb = base64.b64decode(emb_b64) if emb_b64 else b""
+    raw_imp = p.get("importance")
+    importance = 0.5 if raw_imp is None else float(raw_imp)
+    raw_schema_ver = p.get("schema_version")
+    schema_version = 1 if raw_schema_ver is None else int(raw_schema_ver)
+    raw_cand = p.get("promotion_candidate")
+    promotion_candidate = 0 if raw_cand is None else int(bool(raw_cand))
     return MemoryRecord(
         id=p["id"],
         identifier=p.get("identifier", ""),
@@ -1022,7 +1225,7 @@ def _event_to_memory_record(event: dict[str, Any]) -> Any | None:
         embedding_dim=p.get("embedding_dim") or 0,
         embedding_model=p.get("embedding_model") or "",
         source=p.get("source") or "",
-        importance=p.get("importance") or 0.5,
+        importance=importance,
         metadata_json=p.get("metadata_json") or "{}",
         content_hash=p.get("content_hash") or "",
         ttl_seconds=p.get("ttl_seconds"),
@@ -1035,8 +1238,9 @@ def _event_to_memory_record(event: dict[str, Any]) -> Any | None:
         byte_offset=p.get("byte_offset"),
         byte_length=p.get("byte_length"),
         promotion_state=p.get("promotion_state") or "HOT",
-        promotion_candidate=p.get("promotion_candidate") or 0,
+        promotion_candidate=promotion_candidate,
         tags=p.get("tags") or "[]",
+        schema_version=schema_version,
         fact_summary=p.get("fact_summary"),
         provenance_json=p.get("provenance_json"),
         snapshot_id=p.get("snapshot_id") or "",
@@ -1347,6 +1551,7 @@ def _row_to_event(row: dict[str, Any]) -> dict[str, Any]:
             payload = {}
     else:
         payload = payload or {}
+    reconstructing = is_reconstructing_event({"event_type": row["event_type"], "payload": payload})
     return {
         "seq": row["seq"],
         "event_id": row["event_id"],
@@ -1354,8 +1559,460 @@ def _row_to_event(row: dict[str, Any]) -> dict[str, Any]:
         "namespace": row["namespace"],
         "event_type": row["event_type"],
         "occurred_at": row["occurred_at"],
+        "reconstructing": reconstructing,
+        "event_category": "reconstructing" if reconstructing else "observational",
         "payload": payload,
     }
+
+
+_UNSET = object()
+
+
+def update_memory_record(
+    db: MemoryDB,
+    memory_id: str,
+    *,
+    identifier: str | None = None,
+    fact_text: str | None = None,
+    importance: float | None = None,
+    metadata: dict[str, Any] | str | None = None,
+    source: str | None = None,
+    ttl_seconds: Any = _UNSET,
+    tier: str | None = None,
+    promotion_state: str | None = None,
+    promotion_candidate: int | bool | None = None,
+    parent_memory: str | None = None,
+    related_memories: list[str] | str | None = None,
+    tags: list[str] | str | None = None,
+    schema_version: int | None = None,
+    fact_summary: Any = _UNSET,
+    provenance: Any = _UNSET,
+    snapshot_id: str | None = None,
+    source_uri: str | None = None,
+    source_format: str | None = None,
+    source_checksum: str | None = None,
+    byte_offset: Any = _UNSET,
+    byte_length: Any = _UNSET,
+    updated_at: str | None = None,
+    occurred_at: str | None = None,
+    reason: str | None = None,
+    embedder: Any = None,
+    idempotency_key: str | None = None,
+    caller_id: str = "local",
+    _commit: bool = True,
+) -> dict[str, Any]:
+    """Atomically replace/update a memory record and emit a ``memory.updated`` event (#98).
+
+    Enforces #99 portable record validation, #100 namespace-scoped content_hash
+    uniqueness, and tombstone resurrection prevention. Supports optional
+    ``idempotency_key`` via ``operation_ledger`` (#109) for safe retry recovery.
+    """
+    from hotmem.embed import DEFAULT_EMBEDDER, pack_embedding
+    from hotmem.interchange.canonical import compute_content_hash
+    from hotmem.interchange.record import normalize_record, validate_record
+
+    clean_key = (idempotency_key or "").strip()
+    request_digest = ""
+    if clean_key:
+        req_spec = {
+            "op": "update_memory_record",
+            "memory_id": memory_id,
+            "identifier": identifier,
+            "fact_text": fact_text,
+            "importance": importance,
+            "metadata": metadata,
+            "source": source,
+            "ttl_seconds": None if ttl_seconds is _UNSET else ttl_seconds,
+            "tier": tier,
+            "promotion_state": promotion_state,
+            "promotion_candidate": promotion_candidate,
+            "parent_memory": parent_memory,
+            "related_memories": related_memories,
+            "tags": tags,
+            "schema_version": schema_version,
+            "fact_summary": None if fact_summary is _UNSET else fact_summary,
+            "provenance": None if provenance is _UNSET else provenance,
+            "snapshot_id": snapshot_id,
+            "source_uri": source_uri,
+            "source_format": source_format,
+            "source_checksum": source_checksum,
+            "byte_offset": None if byte_offset is _UNSET else byte_offset,
+            "byte_length": None if byte_length is _UNSET else byte_length,
+            "reason": reason,
+        }
+        request_digest = hashlib.sha256(
+            json.dumps(req_spec, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    before_row = db.get_memory(memory_id)
+    tombstone = db.get_tombstone(memory_id)
+
+    if clean_key:
+        probe_ns = str((before_row or tombstone or {}).get("namespace") or "")
+        existing_op = db.get_idempotent_operation(
+            caller_id=caller_id,
+            namespace=probe_ns,
+            operation_key=clean_key,
+        )
+        if existing_op is not None:
+            if existing_op["request_hash"] != request_digest:
+                raise ValueError(
+                    f"idempotency_key {clean_key!r} already used with a different update payload"
+                )
+            cached = json.loads(existing_op["response_json"])
+            cached["idempotent_replay"] = True
+            return cached
+
+    if tombstone is not None and before_row is None:
+        raise KeyError(
+            f"memory {memory_id!r} has been deleted "
+            f"(tombstoned at seq={tombstone['deleted_at_seq']})"
+        )
+    if before_row is None:
+        raise KeyError(f"memory {memory_id!r} not found")
+
+    ns = str(before_row.get("namespace") or "")
+    new_ident = before_row["identifier"] if identifier is None else str(identifier)
+    new_fact = (before_row.get("fact_text") or "") if fact_text is None else str(fact_text)
+    new_summary = (
+        before_row.get("fact_summary")
+        if fact_summary is _UNSET
+        else (None if fact_summary is None else str(fact_summary))
+    )
+    new_uri = str(before_row.get("source_uri") or "") if source_uri is None else str(source_uri)
+    new_mem_type = "file" if new_uri else str(before_row.get("memory_type") or "fact")
+
+    if new_uri:
+        # File-backed record: if identifier or summary or checksum changed, recompute hash
+        new_checksum = (
+            str(before_row.get("source_checksum") or "")
+            if source_checksum is None
+            else str(source_checksum)
+        )
+        if (
+            identifier is not None
+            or fact_text is not None
+            or fact_summary is not _UNSET
+            or source_checksum is not None
+        ):
+            hash_basis = new_fact or new_summary or new_checksum or new_uri
+            new_chash = compute_content_hash(new_ident, hash_basis)
+        else:
+            new_chash = str(before_row.get("content_hash") or "")
+    else:
+        if identifier is not None or fact_text is not None:
+            new_chash = compute_content_hash(new_ident, new_fact)
+        else:
+            new_chash = str(before_row.get("content_hash") or "")
+
+    # Check #100 (namespace, content_hash) uniqueness against other records
+    if new_chash:
+        existing_by_hash = db.find_by_namespace_and_hash(ns, new_chash)
+        if existing_by_hash is not None and str(existing_by_hash["id"]) != memory_id:
+            raise ValueError(
+                f"update would collide with existing memory {existing_by_hash['id']!r} "
+                f"in namespace {ns!r} for content_hash {new_chash!r}"
+            )
+
+    text_changed = (fact_text is not None and new_fact != (before_row.get("fact_text") or "")) or (
+        fact_summary is not _UNSET and new_summary != before_row.get("fact_summary")
+    )
+    if text_changed or embedder is not None:
+        active_embedder = embedder if embedder is not None else DEFAULT_EMBEDDER
+        search_text = new_fact if new_fact else (new_summary or "")
+        if search_text:
+            vec = active_embedder.embed(search_text)
+            emb_bytes = pack_embedding(vec)
+            emb_dim = active_embedder.descriptor.dimension
+            emb_model = active_embedder.descriptor.key
+        else:
+            emb_bytes = b""
+            emb_dim = 0
+            emb_model = ""
+    else:
+        emb_bytes = before_row.get("embedding") or b""
+        emb_dim = int(before_row.get("embedding_dim") or 0)
+        emb_model = str(before_row.get("embedding_model") or "")
+
+    ts = updated_at or occurred_at or _utc_now_iso()
+    evt_time = occurred_at or ts
+
+    after_dict: dict[str, Any] = {
+        "id": memory_id,
+        "identifier": new_ident,
+        "fact_text": new_fact,
+        "embedding": emb_bytes,
+        "embedding_dim": emb_dim,
+        "embedding_model": emb_model,
+        "source": str(before_row.get("source") or "") if source is None else str(source),
+        "importance": (
+            (0.5 if before_row.get("importance") is None else float(before_row["importance"]))
+            if importance is None
+            else float(importance)
+        ),
+        "metadata_json": (
+            str(before_row.get("metadata_json") or "{}")
+            if metadata is None
+            else _serialize_json_column(metadata, "{}")
+        ),
+        "content_hash": new_chash,
+        "ttl_seconds": (before_row.get("ttl_seconds") if ttl_seconds is _UNSET else ttl_seconds),
+        "created_at": before_row.get("created_at"),
+        "namespace": ns,
+        "tier": str(before_row.get("tier") or "hot") if tier is None else str(tier),
+        "memory_type": new_mem_type,
+        "source_uri": new_uri,
+        "source_format": (
+            str(before_row.get("source_format") or "")
+            if source_format is None
+            else str(source_format)
+        ),
+        "source_checksum": (
+            str(before_row.get("source_checksum") or "")
+            if source_checksum is None
+            else str(source_checksum)
+        ),
+        "byte_offset": (before_row.get("byte_offset") if byte_offset is _UNSET else byte_offset),
+        "byte_length": (before_row.get("byte_length") if byte_length is _UNSET else byte_length),
+        "updated_at": ts,
+        "snapshot_id": (
+            str(before_row.get("snapshot_id") or "") if snapshot_id is None else str(snapshot_id)
+        ),
+        "promotion_state": (
+            str(before_row.get("promotion_state") or "HOT")
+            if promotion_state is None
+            else str(promotion_state)
+        ),
+        "promotion_candidate": (
+            int(bool(before_row.get("promotion_candidate")))
+            if promotion_candidate is None
+            else int(bool(promotion_candidate))
+        ),
+        "parent_memory": (
+            str(before_row.get("parent_memory") or "")
+            if parent_memory is None
+            else str(parent_memory)
+        ),
+        "related_memories": (
+            str(before_row.get("related_memories") or "[]")
+            if related_memories is None
+            else _serialize_json_column(related_memories, "[]")
+        ),
+        "tags": (
+            str(before_row.get("tags") or "[]")
+            if tags is None
+            else _serialize_json_column(tags, "[]")
+        ),
+        "schema_version": (
+            int(before_row.get("schema_version") or 1)
+            if schema_version is None
+            else int(schema_version)
+        ),
+        "fact_summary": new_summary,
+        "provenance_json": (
+            before_row.get("provenance_json")
+            if provenance is _UNSET
+            else _serialize_json_column(provenance, None)
+        ),
+    }
+
+    normalized = normalize_record(after_dict)
+    errors = validate_record(normalized)
+    if errors:
+        raise ValueError(f"invalid updated memory record {memory_id!r}: {'; '.join(errors)}")
+
+    origin = _extract_origin_identity(db)
+    payload = _build_memory_updated_payload(
+        after_dict,
+        before_record=before_row,
+        origin=origin,
+        occurred_at=evt_time,
+        reason=reason,
+    )
+    record_obj = _event_to_memory_record({"payload": payload})
+    assert record_obj is not None
+
+    try:
+        db.replace_memory_record(record_obj, _commit=False)
+        ev = append_event(
+            db,
+            event_type=EventType.MEMORY_UPDATED,
+            memory_id=memory_id,
+            namespace=ns,
+            payload=payload,
+            occurred_at=evt_time,
+            _commit=False,
+        )
+        db.set_replay_watermark(
+            memory_id=memory_id,
+            namespace=ns,
+            content_hash=new_chash,
+            record_fingerprint=payload["record_fingerprint"],
+            last_seq=int(ev["seq"]),
+            last_event_id=str(ev["event_id"]),
+            history_id=origin["history_id"],
+            _commit=False,
+        )
+        result = {
+            "memory_id": memory_id,
+            "namespace": ns,
+            "content_hash": new_chash,
+            "record_fingerprint": payload["record_fingerprint"],
+            "previous_content_hash": payload.get("previous_content_hash", ""),
+            "previous_record_fingerprint": payload.get("previous_record_fingerprint", ""),
+            "updated_at": ts,
+            "event": ev,
+            "idempotent_replay": False,
+        }
+        if clean_key:
+            db.record_idempotent_operation(
+                caller_id=caller_id,
+                namespace=ns,
+                operation_key=clean_key,
+                operation_name="update_memory_record",
+                request_hash=request_digest,
+                memory_id=memory_id,
+                content_hash=new_chash,
+                response_json=json.dumps(result, sort_keys=True, default=str),
+                commit=False,
+            )
+        if _commit:
+            db.commit()
+    except Exception:
+        if _commit:
+            db.rollback()
+        raise
+
+    return result
+
+
+def delete_memory_record(
+    db: MemoryDB,
+    memory_id: str,
+    *,
+    reason: str = "",
+    deleted_at: str | None = None,
+    occurred_at: str | None = None,
+    idempotency_key: str | None = None,
+    caller_id: str = "local",
+    _commit: bool = True,
+) -> dict[str, Any]:
+    """Atomically delete a memory record, persist its tombstone, and emit ``memory.deleted`` (#98).
+
+    Supports optional ``idempotency_key`` via ``operation_ledger`` (#109) so
+    retrying an ambiguous delete after a disconnect/restart returns the recorded
+    deletion outcome without emitting a duplicate ``memory.deleted`` event.
+    """
+    clean_key = (idempotency_key or "").strip()
+    request_digest = ""
+    if clean_key:
+        req_spec = {
+            "op": "delete_memory_record",
+            "memory_id": memory_id,
+            "reason": reason,
+        }
+        request_digest = hashlib.sha256(
+            json.dumps(req_spec, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+
+    before_row = db.get_memory(memory_id)
+    existing_tombstone = db.get_tombstone(memory_id)
+
+    if clean_key:
+        probe_ns = str((before_row or existing_tombstone or {}).get("namespace") or "")
+        existing_op = db.get_idempotent_operation(
+            caller_id=caller_id,
+            namespace=probe_ns,
+            operation_key=clean_key,
+        )
+        if existing_op is not None:
+            if existing_op["request_hash"] != request_digest:
+                raise ValueError(
+                    f"idempotency_key {clean_key!r} already used with a different delete payload"
+                )
+            cached = json.loads(existing_op["response_json"])
+            cached["idempotent_replay"] = True
+            return cached
+
+    if before_row is None:
+        if existing_tombstone is not None:
+            raise KeyError(
+                f"memory {memory_id!r} is already deleted "
+                f"(tombstoned at seq={existing_tombstone['deleted_at_seq']})"
+            )
+        raise KeyError(f"memory {memory_id!r} not found")
+
+    ns = str(before_row.get("namespace") or "")
+    ts = deleted_at or occurred_at or _utc_now_iso()
+    evt_time = occurred_at or ts
+    origin = _extract_origin_identity(db)
+    payload = _build_memory_deleted_payload(
+        before_row,
+        deleted_at=ts,
+        origin=origin,
+        occurred_at=evt_time,
+        reason=reason,
+    )
+
+    try:
+        db.delete_memory_row(memory_id, _commit=False)
+        db.delete_replay_watermark(memory_id, _commit=False)
+        ev = append_event(
+            db,
+            event_type=EventType.MEMORY_DELETED,
+            memory_id=memory_id,
+            namespace=ns,
+            payload=payload,
+            occurred_at=evt_time,
+            _commit=False,
+        )
+        db.record_tombstone(
+            memory_id=memory_id,
+            namespace=ns,
+            identifier=str(before_row.get("identifier") or ""),
+            content_hash=str(before_row.get("content_hash") or ""),
+            record_fingerprint=payload["record_fingerprint"],
+            deleted_at=ts,
+            deleted_at_seq=int(ev["seq"]),
+            delete_event_id=str(ev["event_id"]),
+            origin_mount_id=origin["mount_id"],
+            origin_replica_id=origin["replica_id"],
+            origin_history_id=origin["history_id"],
+            reason=reason,
+            _commit=False,
+        )
+        result = {
+            "memory_id": memory_id,
+            "namespace": ns,
+            "identifier": str(before_row.get("identifier") or ""),
+            "content_hash": str(before_row.get("content_hash") or ""),
+            "record_fingerprint": payload["record_fingerprint"],
+            "deleted_at": ts,
+            "deleted_at_seq": int(ev["seq"]),
+            "delete_event_id": str(ev["event_id"]),
+            "event": ev,
+            "idempotent_replay": False,
+        }
+        if clean_key:
+            db.record_idempotent_operation(
+                caller_id=caller_id,
+                namespace=ns,
+                operation_key=clean_key,
+                operation_name="delete_memory_record",
+                request_hash=request_digest,
+                memory_id=memory_id,
+                content_hash=str(before_row.get("content_hash") or ""),
+                response_json=json.dumps(result, sort_keys=True, default=str),
+                commit=False,
+            )
+        if _commit:
+            db.commit()
+    except Exception:
+        if _commit:
+            db.rollback()
+        raise
+
+    return result
 
 
 def emit_import_event(
