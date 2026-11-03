@@ -434,3 +434,43 @@ def test_legacy_state_only_base_binding_stays_clone_and_replayable(tmp_path: Pat
     finally:
         src.close()
         clone.close()
+
+
+@pytest.mark.parametrize("mutation", ["update", "delete"])
+def test_clone_diverging_via_update_or_delete_is_classified_as_fork(tmp_path: Path, mutation: str):
+    """#98 + #94: post-base update or delete on a clone is detected as a fork."""
+    from hotmem.events import (
+        ReplayCursorError,
+        delete_memory_record,
+        issue_replay_cursor,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.interchange.hydrate import hydrate_package
+    from hotmem.interchange.package import write_package
+
+    src = MemoryDB(tmp_path / f"fork_{mutation}_src.sqlite")
+    add_memory(src, "ops/item", "initial fact before clone")
+    pkg = tmp_path / f"fork_{mutation}_pkg"
+    write_package(src, pkg)
+
+    clone = MemoryDB(tmp_path / f"fork_{mutation}_clone.sqlite")
+    try:
+        hydrate_package(clone, pkg)
+        mid = clone.all_rows()[0]["id"]
+        if mutation == "update":
+            update_memory_record(clone, mid, fact_text="locally mutated on clone")
+        else:
+            delete_memory_record(clone, mid, reason="locally deleted on clone")
+
+        rel = compare_mount_lineage(src, clone)
+        assert rel["relationship"] == "fork", rel
+        assert rel["reason"] == "clone_diverged_after_base"
+
+        cursor = issue_replay_cursor(src, position="start").encode()
+        with pytest.raises(ReplayCursorError) as exc_info:
+            replay_with_cursor(src, clone, cursor=cursor)
+        assert exc_info.value.reason == "fork_diverged"
+    finally:
+        src.close()
+        clone.close()

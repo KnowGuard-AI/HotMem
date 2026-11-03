@@ -280,9 +280,10 @@ def test_migration_adds_events_table(tmp_path: Path):
         # Existing memories count is unaffected.
         assert db.count() == 0
         # user_version bumped to 3 (events), 4 (#73 sync checkpoints),
-        # then 5 (#101 handoff ledger), then 6 (namespace identity).
+        # then 5 (#101 handoff ledger), then 6 (namespace identity), then 7
+        # (replay tombstones/watermarks).
         version = db._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 6
+        assert version == 7
     finally:
         db.close()
 
@@ -293,11 +294,11 @@ def test_migration_is_idempotent_for_events(tmp_path: Path):
     conn.execute("PRAGMA user_version = 3")
     conn.commit()
     conn.close()
-    # Opening again must not error and must keep user_version at 6.
+    # Opening again must not error and must keep user_version at 7.
     db = MemoryDB(db_path)
     try:
         version = db._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 6
+        assert version == 7
     finally:
         db.close()
 
@@ -1453,3 +1454,1563 @@ def test_max_events_requires_positive_integer(tmp_path: Path):
     finally:
         src.close()
         target.close()
+
+
+# -- #98 WP1: Versioned reconstructing event envelope & mutation primitives ---
+
+
+def test_cursor_scope_defaults_explicit_narrow_and_legacy_upgrade(tmp_path: Path):
+    """#98 review: new cursors are reconstructing-wide, explicit narrow cursors
+    are honored, and unmarked legacy create-only cursors upgrade on replay."""
+    from hotmem.events import (
+        RECONSTRUCTING_EVENT_TYPES,
+        SCOPE_MODE_EXPLICIT,
+        SCOPE_MODE_LEGACY,
+        SCOPE_MODE_RECONSTRUCTING,
+        ReplayCursor,
+        ReplayExecutionError,
+        decode_cursor,
+        issue_replay_cursor,
+        replay_with_cursor,
+        update_memory_record,
+    )
+
+    src = MemoryDB(tmp_path / "scope_src.sqlite")
+    target = MemoryDB(tmp_path / "scope_target.sqlite")
+    target_legacy = MemoryDB(tmp_path / "scope_target_legacy.sqlite")
+    target_narrow = MemoryDB(tmp_path / "scope_target_narrow.sqlite")
+    try:
+        created = _emit_created_fact(src, 1, namespace="ops")
+        mid = created["memory_id"]
+        update_memory_record(src, mid, fact_text="scope update fact", importance=0.0)
+
+        cur = issue_replay_cursor(src, position="start", namespace="ops")
+        assert cur.event_types == RECONSTRUCTING_EVENT_TYPES
+        assert cur.scope_mode == SCOPE_MODE_RECONSTRUCTING
+        assert cur.scope["scope_mode"] == SCOPE_MODE_RECONSTRUCTING
+        round_tripped = decode_cursor(cur.encode())
+        assert round_tripped == cur
+        assert round_tripped.event_types == RECONSTRUCTING_EVENT_TYPES
+
+        res = replay_with_cursor(src, target, cursor=cur.encode())
+        assert res.applied == 2
+        next_cur = decode_cursor(res.cursor)
+        assert next_cur.event_types == RECONSTRUCTING_EVENT_TYPES
+        assert next_cur.scope_mode == SCOPE_MODE_RECONSTRUCTING
+
+        # An unmarked pre-#98 create-only cursor upgrades to reconstructing on use.
+        legacy = ReplayCursor(
+            mount_id=cur.mount_id,
+            replica_id=cur.replica_id,
+            history_id=cur.history_id,
+            base_snapshot_id=cur.base_snapshot_id,
+            namespace="ops",
+            seq=0,
+            anchor_event_id="",
+        )
+        assert legacy.scope_mode == SCOPE_MODE_LEGACY
+        legacy_res = replay_with_cursor(src, target_legacy, cursor=legacy.encode())
+        assert legacy_res.applied == 2
+        assert decode_cursor(legacy_res.cursor).event_types == RECONSTRUCTING_EVENT_TYPES
+
+        # An explicitly issued narrow cursor is not silently widened.
+        narrow = issue_replay_cursor(
+            src,
+            position="start",
+            namespace="ops",
+            event_types=("memory.created",),
+        )
+        assert narrow.scope_mode == SCOPE_MODE_EXPLICIT
+        with pytest.raises(ReplayExecutionError) as exc_scope:
+            replay_with_cursor(src, target_narrow, cursor=narrow.encode())
+        assert exc_scope.value.reason == "incomplete_reconstructing_scope"
+        assert target_narrow.count() == 0
+    finally:
+        src.close()
+        target.close()
+        target_legacy.close()
+        target_narrow.close()
+
+
+def test_reconstructing_vs_observational_event_classification(tmp_path: Path):
+    """#98 criteria 1, 2, 5, 11: consumers can distinguish reconstructing
+    create/update/delete events from observational events."""
+    from hotmem.events import (
+        EVENT_PAYLOAD_SCHEMA_VERSION,
+        OBSERVATIONAL_EVENT_TYPES,
+        RECONSTRUCTING_EVENT_TYPES,
+        EventType,
+        append_event,
+        classify_event,
+        delete_memory_record,
+        is_reconstructing_event,
+        query_events,
+        update_memory_record,
+    )
+
+    assert set(RECONSTRUCTING_EVENT_TYPES) == {
+        EventType.MEMORY_CREATED,
+        EventType.MEMORY_UPDATED,
+        EventType.MEMORY_DELETED,
+    }
+    assert RECONSTRUCTING_EVENT_TYPES and not (
+        set(RECONSTRUCTING_EVENT_TYPES) & OBSERVATIONAL_EVENT_TYPES
+    )
+
+    for etype in RECONSTRUCTING_EVENT_TYPES:
+        assert is_reconstructing_event(etype) is True
+        assert classify_event(etype) == "reconstructing"
+    for etype in OBSERVATIONAL_EVENT_TYPES:
+        assert is_reconstructing_event(etype) is False
+        assert classify_event(etype) == "observational"
+
+    db = MemoryDB(tmp_path / "classify.sqlite")
+    try:
+        created_evt = _emit_created_fact(db, 1, namespace="ops")
+        mid = created_evt["memory_id"]
+        upd_res = update_memory_record(
+            db,
+            mid,
+            fact_text="Updated canonical fact 1",
+            importance=0.0,
+            schema_version=2,
+            reason="refine fact",
+        )
+        obs_evt = append_event(
+            db,
+            event_type=EventType.MEMORY_PROMOTION,
+            memory_id=mid,
+            namespace="ops",
+            payload={"from": "HOT", "to": "READY", "reason": "vetted"},
+        )
+        del_res = delete_memory_record(db, mid, reason="obsolete")
+
+        events = query_events(db, limit=20)["events"]
+        assert [e["event_type"] for e in events] == [
+            EventType.MEMORY_CREATED,
+            EventType.MEMORY_UPDATED,
+            EventType.MEMORY_PROMOTION,
+            EventType.MEMORY_DELETED,
+        ]
+        assert [e["reconstructing"] for e in events] == [True, True, False, True]
+        assert [e["event_category"] for e in events] == [
+            "reconstructing",
+            "reconstructing",
+            "observational",
+            "reconstructing",
+        ]
+        assert is_reconstructing_event(obs_evt) is False
+
+        ident = db.mount_identity()
+        for recon_evt, expected_transition in (
+            (events[0], "create"),
+            (events[1], "update"),
+            (events[3], "delete"),
+        ):
+            p = recon_evt["payload"]
+            assert p["payload_schema_version"] == EVENT_PAYLOAD_SCHEMA_VERSION == 1
+            assert p["event_category"] == "reconstructing"
+            assert p["transition"] == expected_transition
+            assert p["id"] == mid
+            assert p["namespace"] == "ops"
+            assert p["content_hash"]
+            assert len(p["record_fingerprint"]) == 64
+            assert p["occurred_at"] == recon_evt["occurred_at"]
+            assert p["origin"] == {
+                "mount_id": ident.mount_id,
+                "replica_id": ident.replica_id,
+                "history_id": ident.history_id,
+                "runtime_generation": ident.runtime_generation,
+            }
+
+        # Verify update payload carries prior-state preconditions and preserves
+        # importance=0.0 and schema_version.
+        upd_payload = upd_res["event"]["payload"]
+        assert upd_payload["importance"] == 0.0
+        assert upd_payload["schema_version"] == 2
+        assert upd_payload["previous_content_hash"] == created_evt["payload"]["content_hash"]
+        assert (
+            upd_payload["previous_record_fingerprint"]
+            == created_evt["payload"]["record_fingerprint"]
+        )
+
+        # Verify delete removed active row and recorded persistent tombstone
+        assert db.get_memory(mid) is None
+        tombstone = db.get_tombstone(mid)
+        assert tombstone is not None
+        assert tombstone["memory_id"] == mid
+        assert tombstone["namespace"] == "ops"
+        assert tombstone["deleted_at_seq"] == del_res["event"]["seq"]
+        assert tombstone["delete_event_id"] == del_res["event"]["event_id"]
+        assert tombstone["record_fingerprint"] == upd_payload["record_fingerprint"]
+        assert tombstone["origin_history_id"] == ident.history_id
+    finally:
+        db.close()
+
+
+def test_reconstructing_payload_preserves_all_99_portable_fields(tmp_path: Path):
+    """#98 criterion 9: reconstructing payloads preserve all 27 #99 portable
+    fields including explicit importance=0.0, schema_version, and file-backed fields."""
+    from hotmem.events import _build_memory_created_payload, _event_to_memory_record
+    from hotmem.interchange.fingerprint import record_fingerprint
+
+    raw_row = {
+        "id": "mem-port-99",
+        "identifier": "docs/spec",
+        "fact_text": "",
+        "embedding": b"",
+        "embedding_dim": 0,
+        "embedding_model": "",
+        "source": "agent://test",
+        "importance": 0.0,
+        "metadata_json": '{"env":"prod"}',
+        "content_hash": "a" * 64,
+        "ttl_seconds": 7200,
+        "created_at": "2026-11-03T10:00:00Z",
+        "updated_at": "2026-11-03T11:00:00Z",
+        "namespace": "sec/alpha",
+        "tier": "warm",
+        "memory_type": "file",
+        "source_uri": "docs/spec.md",
+        "source_format": "text/markdown",
+        "source_checksum": "b" * 64,
+        "byte_offset": 128,
+        "byte_length": 512,
+        "snapshot_id": "snap-01",
+        "promotion_state": "READY",
+        "promotion_candidate": 1,
+        "parent_memory": "mem-parent-01",
+        "related_memories": '["mem-rel-01","mem-rel-02"]',
+        "tags": '["model:gpt-5","project:hotmem"]',
+        "schema_version": 3,
+        "fact_summary": "File-backed security specification summary",
+        "provenance_json": '{"origin":{"session_id":"s-1"}}',
+    }
+    payload = _build_memory_created_payload(raw_row)
+    assert payload["importance"] == 0.0
+    assert payload["schema_version"] == 3
+    assert payload["byte_offset"] == 128
+    assert payload["byte_length"] == 512
+    assert payload["source_checksum"] == "b" * 64
+
+    rec = _event_to_memory_record({"payload": payload})
+    assert rec is not None
+    assert rec.importance == 0.0
+    assert rec.schema_version == 3
+    assert rec.byte_offset == 128
+    assert rec.byte_length == 512
+    assert rec.promotion_state == "READY"
+    assert rec.promotion_candidate == 1
+    assert record_fingerprint(raw_row) == payload["record_fingerprint"]
+
+
+# -- #98 WP2: Atomic replay transition engine, idempotency & failure rules ---
+
+
+def test_replay_target_loading_is_page_scoped(tmp_path: Path):
+    """#98 review: replay loads target rows only for ids/identity pairs in the
+    current source page instead of materializing the entire target store."""
+    from hotmem.events import _load_target_replay_candidates
+    from hotmem.interchange.canonical import compute_content_hash
+
+    target = MemoryDB(tmp_path / "bounded_target.sqlite")
+    try:
+        for idx in range(10):
+            ident = f"bulk/{idx}"
+            target.insert(
+                id=f"bulk-{idx}",
+                identifier=ident,
+                fact_text=f"bulk fact {idx}",
+                embedding=b"",
+                content_hash=compute_content_hash(ident, f"bulk fact {idx}"),
+                namespace="ops",
+            )
+        live: dict = {}
+        by_hash: dict = {}
+        tombs: dict = {}
+        watermarks: dict = {}
+        _load_target_replay_candidates(
+            target,
+            [
+                {
+                    "seq": 1,
+                    "event_type": "memory.created",
+                    "memory_id": "bulk-3",
+                    "namespace": "ops",
+                    "payload": {
+                        "id": "bulk-3",
+                        "namespace": "ops",
+                        "content_hash": compute_content_hash("bulk/3", "bulk fact 3"),
+                    },
+                }
+            ],
+            live_by_id=live,
+            live_id_by_ns_hash=by_hash,
+            tombstones_by_id=tombs,
+            watermarks_by_id=watermarks,
+            loaded_live_ids=set(),
+            loaded_pairs=set(),
+            loaded_tombstones=set(),
+            loaded_watermarks=set(),
+            mutated_in_this_run=set(),
+        )
+        assert set(live) == {"bulk-3"}
+        assert set(by_hash) == {("ops", compute_content_hash("bulk/3", "bulk fact 3"))}
+    finally:
+        target.close()
+
+
+def test_retry_after_compaction_and_empty_compaction(tmp_path: Path):
+    """#98 review: safe retries survive tombstone compaction; empty compaction is a no-op."""
+    from hotmem.events import (
+        compact_tombstones,
+        delete_memory_record,
+        update_memory_record,
+    )
+
+    db = MemoryDB(tmp_path / "retry_compaction.sqlite")
+    try:
+        created = _emit_created_fact(db, 1, namespace="ops")
+        mid = created["memory_id"]
+        update_memory_record(
+            db,
+            mid,
+            fact_text="retry update fact",
+            idempotency_key="idem-update-retry",
+            caller_id="caller-retry",
+        )
+        deleted = delete_memory_record(
+            db,
+            mid,
+            reason="retry delete",
+            idempotency_key="idem-delete-retry",
+            caller_id="caller-retry",
+        )
+        seq = deleted["deleted_at_seq"]
+        db.trim_events_before_seq(seq + 1)
+        compact_tombstones(db, through_seq=seq, acked_cursor_seq=seq)
+        assert db.get_tombstone(mid) is None
+
+        retried_delete = delete_memory_record(
+            db,
+            mid,
+            reason="retry delete",
+            idempotency_key="idem-delete-retry",
+            caller_id="caller-retry",
+        )
+        assert retried_delete["idempotent_replay"] is True
+        assert retried_delete["delete_event_id"] == deleted["delete_event_id"]
+
+        retried_update = update_memory_record(
+            db,
+            mid,
+            fact_text="retry update fact",
+            idempotency_key="idem-update-retry",
+            caller_id="caller-retry",
+        )
+        assert retried_update["idempotent_replay"] is True
+    finally:
+        db.close()
+
+    empty = MemoryDB(tmp_path / "empty_compaction.sqlite")
+    try:
+        _emit_created_fact(empty, 1)
+        result = compact_tombstones(empty, through_seq=5)
+        assert result == {
+            "compacted": 0,
+            "remaining": 0,
+            "compacted_through_seq": 0,
+        }
+    finally:
+        empty.close()
+
+
+def test_deleted_private_event_uses_tombstone_policy_classification(tmp_path: Path):
+    """#98/#110 review: delete-event disclosure evaluates the deleted row's
+    classification metadata instead of defaulting to public."""
+    from hotmem.events import _build_memory_created_payload, append_event, delete_memory_record
+    from hotmem.interchange.canonical import compute_content_hash
+    from hotmem.policy import CallerCredential, PolicyConfig
+    from hotmem.runtime import HotMemRuntime
+
+    db_path = tmp_path / "deleted_private.sqlite"
+    db = MemoryDB(db_path)
+    try:
+        mid = "deleted-private-1"
+        ident = "ops/private-deleted"
+        fact = "private deleted fact"
+        db.insert(
+            id=mid,
+            identifier=ident,
+            fact_text=fact,
+            embedding=b"",
+            content_hash=compute_content_hash(ident, fact),
+            namespace="ops/shared",
+            metadata_json='{"classification":"private"}',
+            tags='["classification:private"]',
+        )
+        row = db.get_memory(mid)
+        assert row is not None
+        append_event(
+            db,
+            event_type="memory.created",
+            memory_id=mid,
+            namespace="ops/shared",
+            payload=_build_memory_created_payload(row),
+        )
+        delete_memory_record(db, mid, reason="private delete")
+        assert db.get_tombstone(mid)["metadata_json"] == '{"classification":"private"}'
+    finally:
+        db.close()
+
+    policy = PolicyConfig(
+        store_id="store-98",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-private-reader",
+                caller_id="private-reader",
+                store_id="store-98",
+                namespaces=("ops/shared",),
+                operations=("read",),
+                private_classification_action="omit",
+                secret_action="redact",
+            )
+        ],
+    )
+    rt = HotMemRuntime(
+        db_path=str(db_path),
+        store_id="store-98",
+        policy=policy,
+        base_dir=tmp_path,
+    ).open()
+    try:
+        ctx = rt.resolve_caller(
+            token="tok-private-reader",
+            session_id="sess-private",
+            namespace="ops/shared",
+        )
+        events = rt.list_events(ctx, limit=20)["events"]
+        assert events == []
+    finally:
+        rt.close()
+
+
+def test_legacy_create_replay_idempotency_and_dedupe_targets(tmp_path: Path):
+    """#98 review: legacy create replay is idempotent without a delete, and
+    legacy dedupe targets skip later updates/deletes instead of failing."""
+    from hotmem.events import (
+        EventType,
+        append_event,
+        issue_replay_cursor,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.interchange.canonical import compute_content_hash
+
+    src = MemoryDB(tmp_path / "legacy_idem_src.sqlite")
+    target = MemoryDB(tmp_path / "legacy_idem_target.sqlite")
+    try:
+        mid = "legacy-idem-1"
+        chash = compute_content_hash("legacy/idem", "legacy idempotent fact")
+        src.insert(
+            id=mid,
+            identifier="legacy/idem",
+            fact_text="legacy idempotent fact",
+            embedding=b"",
+            content_hash=chash,
+            namespace="ops",
+        )
+        append_event(
+            src,
+            event_type=EventType.MEMORY_CREATED,
+            memory_id=mid,
+            namespace="ops",
+            payload={
+                "id": mid,
+                "identifier": "legacy/idem",
+                "fact_text": "legacy idempotent fact",
+                "content_hash": chash,
+                "namespace": "ops",
+            },
+        )
+        cur = issue_replay_cursor(src, position="start", namespace="ops").encode()
+        first = replay_with_cursor(src, target, cursor=cur)
+        second = replay_with_cursor(src, target, cursor=cur)
+        assert first.applied == 1
+        assert second.applied == 0
+        assert second.skipped == 1
+        assert target.count() == 1
+        assert target.get_memory(mid) is not None
+    finally:
+        src.close()
+        target.close()
+
+    src_dedupe = MemoryDB(tmp_path / "legacy_dedupe_src.sqlite")
+    target_dedupe = MemoryDB(tmp_path / "legacy_dedupe_target.sqlite")
+    try:
+        mid = "legacy-dedupe-1"
+        chash = compute_content_hash("legacy/dedupe", "legacy dedupe fact")
+        src_dedupe.insert(
+            id=mid,
+            identifier="legacy/dedupe",
+            fact_text="legacy dedupe fact",
+            embedding=b"",
+            content_hash=chash,
+            namespace="ops",
+        )
+        append_event(
+            src_dedupe,
+            event_type=EventType.MEMORY_CREATED,
+            memory_id=mid,
+            namespace="ops",
+            payload={
+                "id": mid,
+                "identifier": "legacy/dedupe",
+                "fact_text": "legacy dedupe fact",
+                "content_hash": chash,
+                "namespace": "ops",
+            },
+        )
+        target_dedupe.insert(
+            id="existing-other-id",
+            identifier="legacy/dedupe",
+            fact_text="legacy dedupe fact",
+            embedding=b"",
+            content_hash=chash,
+            namespace="ops",
+        )
+        dedupe_first = replay_with_cursor(src_dedupe, target_dedupe)
+        assert dedupe_first.applied == 0
+        assert dedupe_first.skipped == 1
+        assert target_dedupe.count() == 1
+
+        update_memory_record(src_dedupe, mid, fact_text="legacy dedupe fact updated")
+        dedupe_second = replay_with_cursor(src_dedupe, target_dedupe)
+        assert dedupe_second.applied == 0
+        assert dedupe_second.skipped == 1
+        assert target_dedupe.count() == 1
+        assert target_dedupe.get_memory("existing-other-id")["fact_text"] == ("legacy dedupe fact")
+    finally:
+        src_dedupe.close()
+        target_dedupe.close()
+
+
+def test_replay_create_update_delete_terminal_state_and_idempotency(tmp_path: Path):
+    """#98 criteria 5, 6, 7: replay create -> update -> delete into a clean
+    compatible runtime to obtain the terminal state without resurrection, and
+    replaying the same range twice is idempotent."""
+    from hotmem.events import (
+        EventType,
+        append_event,
+        delete_memory_record,
+        issue_replay_cursor,
+        replay_into,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.interchange.fingerprint import record_fingerprint
+
+    src = MemoryDB(tmp_path / "cud_src.sqlite")
+    target = MemoryDB(tmp_path / "cud_target.sqlite")
+    target_stepped = MemoryDB(tmp_path / "cud_stepped.sqlite")
+    try:
+        # seq=1: create m1
+        e1 = _emit_created_fact(src, 1, namespace="ops")
+        m1 = e1["memory_id"]
+        # seq=2: update m1 (fact_text + explicit importance=0.0)
+        update_memory_record(
+            src,
+            m1,
+            fact_text="Updated fact 1 v2",
+            importance=0.0,
+            tags=["stage:v2"],
+            reason="first update",
+        )
+        # seq=3: update m1 again (promotion_state, candidate, schema_version)
+        update_memory_record(
+            src,
+            m1,
+            promotion_state="READY",
+            promotion_candidate=1,
+            schema_version=2,
+            reason="second update",
+        )
+        # seq=4: observational event (must not mutate state)
+        append_event(
+            src,
+            event_type=EventType.MEMORY_PROMOTION,
+            memory_id=m1,
+            namespace="ops",
+            payload={"from": "HOT", "to": "READY", "reason": "signal only"},
+        )
+        # seq=5: create m2
+        e5 = _emit_created_fact(src, 2, namespace="ops")
+        m2 = e5["memory_id"]
+        # seq=6: update m2
+        update_memory_record(
+            src,
+            m2,
+            fact_text="Surviving fact 2 updated",
+            importance=0.0,
+            parent_memory=m1,
+            related_memories=[m1],
+            schema_version=2,
+        )
+        # seq=7: delete m1 (tombstone)
+        del_m1 = delete_memory_record(src, m1, reason="superseded by m2")
+
+        start_cursor = issue_replay_cursor(src, position="start", namespace="ops").encode()
+
+        # 1. Full replay into clean target.
+        res1 = replay_with_cursor(src, target, cursor=start_cursor)
+        assert res1.applied == 6
+        assert res1.skipped == 0
+        assert res1.events_scanned == 7
+        assert res1.completed is True
+
+        # m1 is absent (deleted, not resurrected) and has a persistent tombstone.
+        assert target.get_memory(m1) is None
+        tomb = target.get_tombstone(m1)
+        assert tomb is not None
+        assert tomb["memory_id"] == m1
+        assert tomb["namespace"] == "ops"
+        assert tomb["deleted_at_seq"] == del_m1["deleted_at_seq"] == 7
+        assert tomb["delete_event_id"] == del_m1["delete_event_id"]
+
+        # m2 is present with exact terminal portable state matching src.
+        assert target.count() == 1
+        src_m2 = src.get_memory(m2)
+        tgt_m2 = target.get_memory(m2)
+        assert src_m2 is not None and tgt_m2 is not None
+        assert record_fingerprint(tgt_m2) == record_fingerprint(src_m2)
+        assert tgt_m2["fact_text"] == "Surviving fact 2 updated"
+        assert tgt_m2["importance"] == 0.0
+        assert tgt_m2["schema_version"] == 2
+        assert tgt_m2["parent_memory"] == m1
+
+        # 2. Replaying the exact same range a second time from start_cursor is idempotent
+        # (applied == 0) and does NOT resurrect m1 or duplicate m2.
+        res2 = replay_with_cursor(src, target, cursor=start_cursor)
+        assert res2.applied == 0
+        assert res2.skipped == 6
+        assert res2.events_scanned == 7
+        assert res2.completed is True
+        assert target.get_memory(m1) is None
+        assert target.count() == 1
+        assert record_fingerprint(target.get_memory(m2)) == record_fingerprint(src_m2)
+
+        # Replaying from the completed head cursor is also a no-op.
+        assert replay_into(src, target, cursor=res1.cursor) == 0
+
+        # 3. Stepped replay (max_events=2) reaches the exact same terminal state,
+        # and re-running any intermediate cursor is also idempotent without resurrection.
+        step_cur = start_cursor
+        step_cursors = [step_cur]
+        while True:
+            step_res = replay_with_cursor(src, target_stepped, cursor=step_cur, max_events=2)
+            step_cur = step_res.cursor
+            step_cursors.append(step_cur)
+            if step_res.completed:
+                break
+
+        assert target_stepped.get_memory(m1) is None
+        assert target_stepped.get_tombstone(m1) is not None
+        assert target_stepped.count() == 1
+        assert record_fingerprint(target_stepped.get_memory(m2)) == record_fingerprint(src_m2)
+
+        # Replaying from an intermediate cursor (where m1 was still live at seq=2)
+        # into target_stepped (where m1 is already tombstoned at seq=7) must NOT
+        # resurrect m1.
+        mid_repeat = replay_with_cursor(src, target_stepped, cursor=step_cursors[1])
+        assert mid_repeat.applied == 0
+        assert target_stepped.get_memory(m1) is None
+        assert target_stepped.count() == 1
+    finally:
+        src.close()
+        target.close()
+        target_stepped.close()
+
+
+def test_lifecycle_promotion_mutations_replay_as_reconstructing_updates(tmp_path: Path):
+    """#98 review: promotion/candidate portable state replay via memory.updated
+    while the promotion/candidate signal events remain observational."""
+    from hotmem.events import EventType, is_reconstructing_event, query_events, replay_with_cursor
+    from hotmem.interchange.fingerprint import record_fingerprint
+    from hotmem.lifecycle import mark_candidate, transition
+
+    src = MemoryDB(tmp_path / "lifecycle_src.sqlite")
+    target = MemoryDB(tmp_path / "lifecycle_target.sqlite")
+    target_silent = MemoryDB(tmp_path / "lifecycle_target_silent.sqlite")
+    try:
+        created = _emit_created_fact(src, 1, namespace="ops")
+        mid = created["memory_id"]
+        transition(src, mid, "READY", reason="vetted", actor="analyst")
+        mark_candidate(src, mid, True, reason="strong lead")
+        transition(src, mid, "PROMOTED", emit_event=False)
+
+        source_row = src.get_memory(mid)
+        assert source_row is not None
+
+        res = replay_with_cursor(src, target)
+        target_row = target.get_memory(mid)
+        assert target_row is not None
+        assert res.applied == 4
+        assert target_row["promotion_state"] == "PROMOTED"
+        assert target_row["promotion_candidate"] == 1
+        assert target_row["updated_at"] == source_row["updated_at"]
+        assert record_fingerprint(target_row) == record_fingerprint(source_row)
+
+        events = query_events(src, limit=20)["events"]
+        assert [e["event_type"] for e in events] == [
+            EventType.MEMORY_CREATED,
+            EventType.MEMORY_UPDATED,
+            EventType.MEMORY_PROMOTION,
+            EventType.MEMORY_UPDATED,
+            EventType.MEMORY_CANDIDATE,
+            EventType.MEMORY_UPDATED,
+        ]
+        assert [e["reconstructing"] for e in events] == [
+            True,
+            True,
+            False,
+            True,
+            False,
+            True,
+        ]
+        assert is_reconstructing_event(events[2]) is False
+
+        silent_replay = replay_with_cursor(src, target_silent)
+        silent_row = target_silent.get_memory(mid)
+        assert silent_row is not None
+        assert silent_replay.applied == 4
+        assert silent_row["promotion_state"] == "PROMOTED"
+        assert silent_row["promotion_candidate"] == 1
+        assert record_fingerprint(silent_row) == record_fingerprint(source_row)
+    finally:
+        src.close()
+        target.close()
+        target_silent.close()
+
+
+def test_observational_events_are_non_reconstructing_and_rejected_in_cursor_scope(
+    tmp_path: Path,
+):
+    """#98 criteria 5 & 11: observational events do not reconstruct state, and
+    cursors requesting observational event_types are rejected."""
+    from hotmem.events import (
+        OBSERVATIONAL_EVENT_TYPES,
+        ReplayCursor,
+        ReplayCursorError,
+        append_event,
+        replay_with_cursor,
+        validate_replay_cursor,
+    )
+    from hotmem.interchange.fingerprint import record_fingerprint
+
+    src = MemoryDB(tmp_path / "obs_src.sqlite")
+    target = MemoryDB(tmp_path / "obs_target.sqlite")
+    try:
+        created = _emit_created_fact(src, 1)
+        mid = created["memory_id"]
+        initial_fp = record_fingerprint(src.get_memory(mid))
+
+        for etype in sorted(OBSERVATIONAL_EVENT_TYPES):
+            append_event(
+                src,
+                event_type=etype,
+                memory_id=mid,
+                payload={"id": mid, "fact_text": "OBSERVATIONAL SHOULD NOT APPLY"},
+            )
+
+        res = replay_with_cursor(src, target)
+        assert res.applied == 1
+        assert res.events_scanned == 1 + len(OBSERVATIONAL_EVENT_TYPES)
+        assert record_fingerprint(target.get_memory(mid)) == initial_fp
+
+        ident = src.mount_identity()
+        bad_cursor = ReplayCursor(
+            mount_id=ident.mount_id,
+            replica_id=ident.replica_id,
+            history_id=ident.history_id,
+            event_types=("memory.created", "memory.promotion"),
+            seq=0,
+            anchor_event_id="",
+        ).encode()
+        with pytest.raises(ReplayCursorError) as exc_info:
+            validate_replay_cursor(src, bad_cursor)
+        assert exc_info.value.reason == "non_reconstructing_event_type"
+    finally:
+        src.close()
+        target.close()
+
+
+def test_replay_pre_mutation_failure_and_atomicity_guarantees(tmp_path: Path):
+    """#98 criteria 8 & 12: missing base, unknown schema version, invalid order,
+    resurrection attempts, and identity mismatches fail before partial application."""
+    from hotmem.events import (
+        EventType,
+        ReplayExecutionError,
+        _build_memory_created_payload,
+        _build_memory_deleted_payload,
+        _build_memory_updated_payload,
+        append_event,
+        apply_event_range,
+        delete_memory_record,
+        issue_replay_cursor,
+        replay_with_cursor,
+        update_memory_record,
+    )
+
+    # 1. Missing target record (update or delete after valid create of another record)
+    # must fail before partial application (m1 is NOT inserted into target).
+    for bad_op in ("update_missing", "delete_missing"):
+        src = MemoryDB(tmp_path / f"{bad_op}_src.sqlite")
+        target = MemoryDB(tmp_path / f"{bad_op}_target.sqlite")
+        try:
+            e1 = _emit_created_fact(src, 1)
+            row1 = src.get_memory(e1["memory_id"])
+            assert row1 is not None
+            ghost_row = {**row1, "id": "mem-ghost-9999"}
+            if bad_op == "update_missing":
+                append_event(
+                    src,
+                    event_type=EventType.MEMORY_UPDATED,
+                    memory_id="mem-ghost-9999",
+                    payload=_build_memory_updated_payload(ghost_row, before_record=ghost_row),
+                )
+            else:
+                append_event(
+                    src,
+                    event_type=EventType.MEMORY_DELETED,
+                    memory_id="mem-ghost-9999",
+                    payload=_build_memory_deleted_payload(ghost_row),
+                )
+            with pytest.raises(ReplayExecutionError) as exc_missing:
+                replay_with_cursor(src, target)
+            assert exc_missing.value.reason == "missing_target_record"
+            assert exc_missing.value.event_seq == 2
+            assert target.count() == 0
+            assert target.list_tombstones() == []
+        finally:
+            src.close()
+            target.close()
+
+    # 2. Unknown or missing payload_schema_version fails before partial application.
+    for ver_case, bad_payload_mod, expected_reason in (
+        ("future_v99", {"payload_schema_version": 99}, "unsupported_payload_version"),
+        ("zero_v0", {"payload_schema_version": 0}, "unsupported_payload_version"),
+        ("bool_ver", {"payload_schema_version": True}, "unsupported_payload_version"),
+        ("str_ver", {"payload_schema_version": "1"}, "unsupported_payload_version"),
+    ):
+        src = MemoryDB(tmp_path / f"{ver_case}_src.sqlite")
+        target = MemoryDB(tmp_path / f"{ver_case}_target.sqlite")
+        try:
+            e1 = _emit_created_fact(src, 1)
+            row1 = src.get_memory(e1["memory_id"])
+            assert row1 is not None
+            bad_p = {**_build_memory_updated_payload(row1, before_record=row1), **bad_payload_mod}
+            append_event(
+                src,
+                event_type=EventType.MEMORY_UPDATED,
+                memory_id=row1["id"],
+                payload=bad_p,
+            )
+            with pytest.raises(ReplayExecutionError) as exc_ver:
+                replay_with_cursor(src, target)
+            assert exc_ver.value.reason == expected_reason
+            assert target.count() == 0
+        finally:
+            src.close()
+            target.close()
+
+    # Update/delete missing payload_schema_version entirely also fails closed.
+    src_no_ver = MemoryDB(tmp_path / "no_ver_src.sqlite")
+    target_no_ver = MemoryDB(tmp_path / "no_ver_target.sqlite")
+    try:
+        e1 = _emit_created_fact(src_no_ver, 1)
+        row1 = src_no_ver.get_memory(e1["memory_id"])
+        assert row1 is not None
+        p_no_ver = _build_memory_deleted_payload(row1)
+        del p_no_ver["payload_schema_version"]
+        append_event(
+            src_no_ver,
+            event_type=EventType.MEMORY_DELETED,
+            memory_id=row1["id"],
+            payload=p_no_ver,
+        )
+        with pytest.raises(ReplayExecutionError) as exc_no_ver:
+            replay_with_cursor(src_no_ver, target_no_ver)
+        assert exc_no_ver.value.reason == "missing_payload_version"
+        assert target_no_ver.count() == 0
+    finally:
+        src_no_ver.close()
+        target_no_ver.close()
+
+    # 3. Invalid transition order after tombstone:
+    #    - create after delete -> tombstoned_record_resurrection
+    #    - update after delete -> tombstoned_record_mutation
+    #    - delete after delete -> already_tombstoned
+    for post_del_case, expected_reason in (
+        ("resurrect_create", "tombstoned_record_resurrection"),
+        ("mutate_deleted", "tombstoned_record_mutation"),
+        ("double_delete", "already_tombstoned"),
+    ):
+        src = MemoryDB(tmp_path / f"{post_del_case}_src.sqlite")
+        target = MemoryDB(tmp_path / f"{post_del_case}_target.sqlite")
+        try:
+            e1 = _emit_created_fact(src, 1)
+            mid = e1["memory_id"]
+            row1 = src.get_memory(mid)
+            assert row1 is not None
+            delete_memory_record(src, mid, reason="initial delete")
+            if post_del_case == "resurrect_create":
+                append_event(
+                    src,
+                    event_type=EventType.MEMORY_CREATED,
+                    memory_id=mid,
+                    payload=_build_memory_created_payload(row1),
+                )
+            elif post_del_case == "mutate_deleted":
+                append_event(
+                    src,
+                    event_type=EventType.MEMORY_UPDATED,
+                    memory_id=mid,
+                    payload=_build_memory_updated_payload(row1, before_record=row1),
+                )
+            else:
+                append_event(
+                    src,
+                    event_type=EventType.MEMORY_DELETED,
+                    memory_id=mid,
+                    payload=_build_memory_deleted_payload(row1),
+                )
+            with pytest.raises(ReplayExecutionError) as exc_order:
+                replay_with_cursor(src, target)
+            assert exc_order.value.reason == expected_reason
+            assert target.count() == 0
+            assert target.list_tombstones() == []
+        finally:
+            src.close()
+            target.close()
+
+    # 4. Non-monotonic sequence order in apply_event_range fails before mutation.
+    src_ord = MemoryDB(tmp_path / "ord_src.sqlite")
+    target_ord = MemoryDB(tmp_path / "ord_target.sqlite")
+    try:
+        ev1 = _emit_created_fact(src_ord, 1)
+        ev2 = _emit_created_fact(src_ord, 2)
+        with pytest.raises(ReplayExecutionError) as exc_seq:
+            apply_event_range(target_ord, [ev2, ev1])
+        assert exc_seq.value.reason == "invalid_event_order"
+        assert target_ord.count() == 0
+    finally:
+        src_ord.close()
+        target_ord.close()
+
+    # 5. Identity & base-state mismatches (tampered content_hash, wrong previous_content_hash,
+    #    envelope/payload id mismatch, origin history mismatch, incomplete scope).
+    src_id = MemoryDB(tmp_path / "id_mismatch_src.sqlite")
+    target_id = MemoryDB(tmp_path / "id_mismatch_target.sqlite")
+    try:
+        e1 = _emit_created_fact(src_id, 1, namespace="ops")
+        mid = e1["memory_id"]
+        row1 = src_id.get_memory(mid)
+        assert row1 is not None
+
+        # Wrong previous_content_hash on update fails with base_state_mismatch.
+        from hotmem.interchange.canonical import compute_content_hash
+
+        mut_row1 = {
+            **row1,
+            "fact_text": "updated text with wrong prior hash",
+            "content_hash": compute_content_hash(
+                row1["identifier"], "updated text with wrong prior hash"
+            ),
+        }
+        bad_upd = _build_memory_updated_payload(mut_row1, before_record=row1)
+        bad_upd["previous_content_hash"] = "f" * 64
+        bad_upd["origin"] = e1["payload"]["origin"]
+        with pytest.raises(ReplayExecutionError) as exc_base:
+            apply_event_range(
+                target_id,
+                [
+                    e1,
+                    {
+                        "seq": 2,
+                        "event_id": "evt-bad-base",
+                        "memory_id": mid,
+                        "namespace": "ops",
+                        "event_type": EventType.MEMORY_UPDATED,
+                        "occurred_at": "2026-11-03T12:00:00Z",
+                        "payload": bad_upd,
+                    },
+                ],
+            )
+        assert exc_base.value.reason == "base_state_mismatch"
+        assert target_id.count() == 0
+
+        # Envelope memory_id != payload.id fails with identity_mismatch.
+        with pytest.raises(ReplayExecutionError) as exc_env:
+            apply_event_range(
+                target_id,
+                [
+                    {
+                        **e1,
+                        "memory_id": "different-envelope-id",
+                    }
+                ],
+            )
+        assert exc_env.value.reason == "identity_mismatch"
+        assert target_id.count() == 0
+
+        # Restricted event_types=("memory.created",) when range contains update/delete
+        # fails with incomplete_reconstructing_scope.
+        update_memory_record(src_id, mid, fact_text="updated fact")
+        c_narrow = issue_replay_cursor(
+            src_id,
+            position="start",
+            namespace="ops",
+            event_types=(EventType.MEMORY_CREATED,),
+        ).encode()
+        with pytest.raises(ReplayExecutionError) as exc_narrow:
+            replay_with_cursor(
+                src_id,
+                target_id,
+                cursor=c_narrow,
+                event_types=(EventType.MEMORY_CREATED,),
+            )
+        assert exc_narrow.value.reason == "incomplete_reconstructing_scope"
+        assert target_id.count() == 0
+    finally:
+        src_id.close()
+        target_id.close()
+
+
+def test_v1_envelope_preconditions_category_and_unknown_event_rejection(tmp_path: Path):
+    """#98 review: v1 update/delete preconditions, origin/fingerprint identity,
+    category integrity, and the documented unknown-event fail-closed policy."""
+    from hotmem.events import (
+        EventType,
+        ReplayExecutionError,
+        _build_memory_created_payload,
+        _build_memory_deleted_payload,
+        _build_memory_updated_payload,
+        append_event,
+        apply_event_range,
+        replay_with_cursor,
+    )
+
+    def _seed(db: MemoryDB, mid: str = "env-1") -> tuple[dict, dict]:
+        created = _emit_created_fact(db, 1, namespace="ops")
+        row = db.get_memory(created["memory_id"])
+        assert row is not None
+        return created, row
+
+    # Update missing previous_* / record_fingerprint / origin is rejected.
+    for strip_keys, expected in (
+        (("previous_content_hash", "previous_record_fingerprint"), "malformed_event_payload"),
+        (("record_fingerprint",), "malformed_event_payload"),
+        (("origin",), "malformed_event_payload"),
+    ):
+        src = MemoryDB(tmp_path / f"v1_missing_{strip_keys[0]}.sqlite")
+        target = MemoryDB(tmp_path / f"v1_missing_target_{strip_keys[0]}.sqlite")
+        try:
+            created, row = _seed(src)
+            after = {**row, "fact_text": "precondition update", "content_hash": "e" * 64}
+            payload = _build_memory_updated_payload(after, before_record=row)
+            for key in strip_keys:
+                payload.pop(key, None)
+            with pytest.raises(ReplayExecutionError) as exc:
+                apply_event_range(
+                    target,
+                    [
+                        created,
+                        {
+                            "seq": 2,
+                            "event_id": "evt-precondition",
+                            "memory_id": row["id"],
+                            "namespace": "ops",
+                            "event_type": EventType.MEMORY_UPDATED,
+                            "occurred_at": "2026-11-03T12:00:00Z",
+                            "payload": payload,
+                        },
+                    ],
+                )
+            assert exc.value.reason == expected
+            assert target.count() == 0
+        finally:
+            src.close()
+            target.close()
+
+    # Delete identifier, content hash, and record fingerprint are mandatory and identity-checked.
+    src_del = MemoryDB(tmp_path / "v1_del_src.sqlite")
+    target_del = MemoryDB(tmp_path / "v1_del_target.sqlite")
+    try:
+        created, row = _seed(src_del, "env-del")
+        delete_payload = _build_memory_deleted_payload(row)
+        delete_payload["identifier"] = "wrong/identifier"
+        append_event(
+            src_del,
+            event_type=EventType.MEMORY_DELETED,
+            memory_id=row["id"],
+            namespace="ops",
+            payload=delete_payload,
+        )
+        with pytest.raises(ReplayExecutionError) as exc_del:
+            replay_with_cursor(src_del, target_del)
+        assert exc_del.value.reason == "identity_mismatch"
+        assert target_del.count() == 0
+    finally:
+        src_del.close()
+        target_del.close()
+
+    # A reconstructing event cannot downgrade itself to observational.
+    src_cat = MemoryDB(tmp_path / "v1_cat_src.sqlite")
+    target_cat = MemoryDB(tmp_path / "v1_cat_target.sqlite")
+    try:
+        created, row = _seed(src_cat, "env-cat")
+        payload = _build_memory_created_payload(row)
+        payload["event_category"] = "observational"
+        append_event(
+            src_cat,
+            event_type=EventType.MEMORY_CREATED,
+            memory_id=row["id"],
+            namespace="ops",
+            payload=payload,
+        )
+        with pytest.raises(ReplayExecutionError) as exc_cat:
+            replay_with_cursor(src_cat, target_cat)
+        assert exc_cat.value.reason == "malformed_event_payload"
+        assert target_cat.count() == 0
+    finally:
+        src_cat.close()
+        target_cat.close()
+
+    # Unknown event types fail closed by contract rather than silently applying or hiding state.
+    src_unknown = MemoryDB(tmp_path / "v1_unknown_src.sqlite")
+    target_unknown = MemoryDB(tmp_path / "v1_unknown_target.sqlite")
+    try:
+        _seed(src_unknown, "env-unknown")
+        append_event(
+            src_unknown,
+            event_type="memory.archived",
+            memory_id="env-unknown",
+            namespace="ops",
+            payload={"id": "env-unknown"},
+        )
+        with pytest.raises(ReplayExecutionError) as exc_unknown:
+            replay_with_cursor(src_unknown, target_unknown)
+        assert exc_unknown.value.reason == "unsupported_event_type"
+        assert target_unknown.count() == 0
+    finally:
+        src_unknown.close()
+        target_unknown.close()
+
+
+def test_file_backed_update_uses_canonical_reference_identity(tmp_path: Path):
+    """#98/#100 review: file-backed updates use the canonical reference hash,
+    preserve dedupe identity, and replay validates relative reference hashes."""
+    from hotmem.events import (
+        _build_memory_updated_payload,
+        append_event,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.memory import (
+        FileRef,
+        add_file_backed,
+        compute_file_content_hash,
+        find_existing_file_record,
+    )
+
+    backing = tmp_path / "doc.txt"
+    backing.write_text("0123456789abcdefghijklmnopqrstuvwxyz", encoding="utf-8")
+    src = MemoryDB(tmp_path / "file_identity_src.sqlite")
+    target = MemoryDB(tmp_path / "file_identity_target.sqlite")
+    try:
+        ref = FileRef(
+            source_uri="doc.txt",
+            byte_offset=0,
+            byte_length=10,
+            source_format="text/plain",
+            source_checksum="a" * 64,
+        )
+        mid, initial_hash = add_file_backed(
+            src,
+            "docs/doc",
+            ref,
+            base_dir=str(tmp_path),
+            summary="initial file summary",
+        )
+        assert initial_hash == compute_file_content_hash("docs/doc", ref, base_dir=str(tmp_path))
+        from hotmem.events import _build_memory_created_payload
+
+        initial_row = src.get_memory(mid)
+        assert initial_row is not None
+        append_event(
+            src,
+            event_type="memory.created",
+            memory_id=mid,
+            namespace=initial_row["namespace"],
+            payload=_build_memory_created_payload(initial_row),
+        )
+
+        update_memory_record(
+            src,
+            mid,
+            byte_offset=5,
+            byte_length=20,
+            fact_summary="updated file summary",
+            source_checksum="b" * 64,
+            base_dir=str(tmp_path),
+        )
+        row = src.get_memory(mid)
+        assert row is not None
+        new_ref = FileRef(
+            source_uri=row["source_uri"],
+            byte_offset=row["byte_offset"],
+            byte_length=row["byte_length"],
+            source_format=row["source_format"],
+            source_checksum=row["source_checksum"],
+        )
+        expected_hash = compute_file_content_hash(
+            row["identifier"], new_ref, base_dir=str(tmp_path)
+        )
+        assert row["content_hash"] == expected_hash
+        assert (
+            find_existing_file_record(
+                src, row["namespace"], row["identifier"], new_ref, base_dir=str(tmp_path)
+            )
+            is not None
+        )
+        assert (
+            add_file_backed(
+                src,
+                row["identifier"],
+                new_ref,
+                base_dir=str(tmp_path),
+                summary="updated file summary",
+            )[0]
+            == mid
+        )
+
+        res = replay_with_cursor(src, target)
+        assert res.applied == 2
+        replayed = target.get_memory(mid)
+        assert replayed is not None
+        assert replayed["content_hash"] == expected_hash
+        assert replayed["byte_offset"] == 5
+        assert replayed["byte_length"] == 20
+        assert replayed["source_checksum"] == "b" * 64
+
+        tampered_after = {
+            **row,
+            "content_hash": "f" * 64,
+        }
+        tampered = _build_memory_updated_payload(tampered_after, before_record=row)
+        append_event(
+            src,
+            event_type="memory.updated",
+            memory_id=mid,
+            namespace=row["namespace"],
+            payload=tampered,
+        )
+        with pytest.raises(Exception) as exc_hash:
+            replay_with_cursor(src, target, cursor=res.cursor)
+        assert getattr(exc_hash.value, "reason", "") == "identity_mismatch"
+        assert target.get_memory(mid)["content_hash"] == expected_hash
+    finally:
+        src.close()
+        target.close()
+
+
+def test_legacy_created_events_and_file_backed_transitions_replay_cleanly(tmp_path: Path):
+    """#98 criteria 9 & 12: legacy memory.created events (no payload_schema_version)
+    and file-backed record updates/deletes replay deterministically."""
+    from hotmem.events import (
+        EventType,
+        ReplayExecutionError,
+        _build_memory_updated_payload,
+        append_event,
+        delete_memory_record,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.interchange.canonical import compute_content_hash
+    from hotmem.memory import FileRef, compute_file_content_hash
+
+    src = MemoryDB(tmp_path / "legacy_mix_src.sqlite")
+    target = MemoryDB(tmp_path / "legacy_mix_target.sqlite")
+    try:
+        # 1. Insert a legacy memory.created event (no payload_schema_version, no origin).
+        mid_leg = "mem-legacy-01"
+        chash_leg = compute_content_hash("legacy/topic", "Legacy fact v0")
+        src.insert(
+            id=mid_leg,
+            identifier="legacy/topic",
+            fact_text="Legacy fact v0",
+            embedding=b"",
+            content_hash=chash_leg,
+            namespace="ops",
+        )
+        append_event(
+            src,
+            event_type=EventType.MEMORY_CREATED,
+            memory_id=mid_leg,
+            namespace="ops",
+            payload={
+                "id": mid_leg,
+                "identifier": "legacy/topic",
+                "fact_text": "Legacy fact v0",
+                "content_hash": chash_leg,
+                "namespace": "ops",
+            },
+        )
+        # Follow with a v1 update on the legacy-created record.
+        update_memory_record(
+            src,
+            mid_leg,
+            fact_text="Upgraded legacy fact v1",
+            importance=0.0,
+            schema_version=2,
+        )
+
+        # 2. Insert a file-backed record, update its byte window/summary, then delete leg.
+        mid_file = "mem-file-01"
+        file_chash = compute_file_content_hash(
+            "docs/runbook",
+            FileRef(
+                source_uri="docs/runbook.md",
+                byte_offset=0,
+                byte_length=256,
+                source_format="text/markdown",
+                source_checksum="c" * 64,
+            ),
+        )
+        src.insert_file_backed(
+            id=mid_file,
+            identifier="docs/runbook",
+            source_uri="docs/runbook.md",
+            source_format="text/markdown",
+            source_checksum="c" * 64,
+            byte_offset=0,
+            byte_length=256,
+            fact_summary="Initial file summary",
+            embedding=b"",
+            content_hash=file_chash,
+            namespace="ops",
+        )
+        file_row = src.get_memory(mid_file)
+        assert file_row is not None
+        from hotmem.events import _build_memory_created_payload
+
+        append_event(
+            src,
+            event_type=EventType.MEMORY_CREATED,
+            memory_id=mid_file,
+            namespace="ops",
+            payload=_build_memory_created_payload(file_row),
+        )
+        update_memory_record(
+            src,
+            mid_file,
+            byte_offset=64,
+            byte_length=512,
+            fact_summary="Updated file summary",
+            source_checksum="d" * 64,
+        )
+        delete_memory_record(src, mid_leg, reason="retired legacy record")
+
+        res = replay_with_cursor(src, target, namespace="ops")
+        assert res.applied == 5
+        assert target.get_memory(mid_leg) is None
+        assert target.get_tombstone(mid_leg) is not None
+        replayed_file = target.get_memory(mid_file)
+        assert replayed_file is not None
+        assert replayed_file["memory_type"] == "file"
+        assert replayed_file["source_uri"] == "docs/runbook.md"
+        assert replayed_file["byte_offset"] == 64
+        assert replayed_file["byte_length"] == 512
+        assert replayed_file["source_checksum"] == "d" * 64
+        assert replayed_file["fact_summary"] == "Updated file summary"
+
+        # Invalid file-backed field (negative byte_offset) in a replayed update fails closed.
+        bad_file_upd = _build_memory_updated_payload(replayed_file, before_record=replayed_file)
+        bad_file_upd["byte_offset"] = -5
+        append_event(
+            src,
+            event_type=EventType.MEMORY_UPDATED,
+            memory_id=mid_file,
+            namespace="ops",
+            payload=bad_file_upd,
+        )
+        with pytest.raises(ReplayExecutionError) as exc_bad_file:
+            replay_with_cursor(src, target, cursor=res.cursor)
+        assert exc_bad_file.value.reason == "malformed_event_payload"
+        assert target.get_memory(mid_file)["byte_offset"] == 64
+    finally:
+        src.close()
+        target.close()
+
+
+# -- #98 WP3: Tombstone retention & compaction preconditions ------------------
+
+
+def test_hydration_and_history_replacement_reconcile_replay_state(tmp_path: Path):
+    """#98 review: authoritative hydration clears stale tombstones/watermarks,
+    and history replacement clears replay state while skipping old audit events."""
+    from hotmem.events import (
+        compact_tombstones,
+        delete_memory_record,
+        issue_replay_cursor,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.snapshot import hydrate, snapshot
+
+    src = MemoryDB(tmp_path / "restore_src.sqlite")
+    snap_dir = tmp_path / "restore_snap"
+    try:
+        created = _emit_created_fact(src, 1, namespace="ops")
+        mid = created["memory_id"]
+        snapshot(src, snap_dir)
+        deleted = delete_memory_record(src, mid, reason="restore probe")
+        src.trim_events_before_seq(deleted["deleted_at_seq"] + 1)
+        assert src.get_tombstone(mid) is not None
+
+        hydrate(src, snap_dir)
+        assert src.get_memory(mid) is not None
+        assert src.get_tombstone(mid) is None
+        compaction = compact_tombstones(
+            src,
+            through_seq=deleted["deleted_at_seq"],
+            acked_cursor_seq=deleted["deleted_at_seq"],
+        )
+        assert compaction["compacted"] == 0
+    finally:
+        src.close()
+
+    history_src = MemoryDB(tmp_path / "history_src.sqlite")
+    history_target = MemoryDB(tmp_path / "history_target.sqlite")
+    try:
+        old = _emit_created_fact(history_src, 1, namespace="ops")
+        old_mid = old["memory_id"]
+        update_memory_record(history_src, old_mid, fact_text="old history fact")
+        delete_memory_record(history_src, old_mid, reason="old history delete")
+        assert history_src.list_tombstones()
+        history_src.replace_history(keep_mount_id=True)
+        assert history_src.list_tombstones() == []
+        assert history_src.get_replay_watermarks() == {}
+
+        new = _emit_created_fact(history_src, 2, namespace="ops")
+        new_mid = new["memory_id"]
+        cur = issue_replay_cursor(history_src, position="start", namespace="ops").encode()
+        res = replay_with_cursor(history_src, history_target, cursor=cur)
+        assert res.applied == 1
+        assert history_target.count() == 1
+        assert history_target.get_memory(new_mid) is not None
+        assert history_target.get_memory(old_mid) is None
+    finally:
+        history_src.close()
+        history_target.close()
+
+
+def test_tombstone_retention_and_compaction_preconditions(tmp_path: Path):
+    """#98 criteria 4 & 10: event trimming retains tombstones; tombstone
+    compaction enforces trimmed-event, acked-cursor, and no-live-row
+    preconditions and advances compacted_tombstones_through_seq."""
+    from hotmem.events import (
+        ReplayCursor,
+        ReplayCursorError,
+        TombstoneCompactionError,
+        compact_tombstones,
+        delete_memory_record,
+        update_memory_record,
+        validate_replay_cursor,
+    )
+
+    db = MemoryDB(tmp_path / "compact.sqlite")
+    try:
+        # Create and delete m1 (seq=1 create, seq=2 update, seq=3 delete)
+        e1 = _emit_created_fact(db, 1, namespace="ops")
+        m1 = e1["memory_id"]
+        update_memory_record(db, m1, fact_text="m1 updated before delete")
+        d1 = delete_memory_record(db, m1, reason="obsolete m1")
+        assert d1["deleted_at_seq"] == 3
+
+        # Create and delete m2 (seq=4 create, seq=5 delete)
+        e2 = _emit_created_fact(db, 2, namespace="ops")
+        m2 = e2["memory_id"]
+        d2 = delete_memory_record(db, m2, reason="obsolete m2")
+        assert d2["deleted_at_seq"] == 5
+
+        # Create m3 (seq=6 create, remains live)
+        _emit_created_fact(db, 3, namespace="ops")
+
+        # 1. Precondition: cannot compact tombstones while pre-delete events remain in events.
+        with pytest.raises(TombstoneCompactionError) as exc_untrimmed:
+            compact_tombstones(db, through_seq=3)
+        assert exc_untrimmed.value.reason == "events_not_trimmed_through_tombstone"
+        assert len(db.list_tombstones()) == 2
+
+        # Non-strict mode clamps to trimmed_through_seq (0) and compacts 0.
+        res_clamped = compact_tombstones(db, through_seq=3, strict=False)
+        assert res_clamped["compacted"] == 0
+        assert res_clamped["remaining"] == 2
+
+        # 2. Event trimming through seq=3 (trim_events_before_seq(4)) removes events 1..3
+        #    but MUST retain tombstones in memory_tombstones!
+        trimmed_count = db.trim_events_before_seq(4)
+        assert trimmed_count == 3
+        assert db.event_log_bounds()["trimmed_through_seq"] == 3
+        assert db.get_tombstone(m1) is not None
+        assert db.get_tombstone(m2) is not None
+
+        # 3. Precondition: if acked_cursor_seq < through_seq, strict compaction is rejected.
+        with pytest.raises(TombstoneCompactionError) as exc_unacked:
+            compact_tombstones(db, through_seq=3, acked_cursor_seq=2)
+        assert exc_unacked.value.reason == "unacknowledged_tombstone_horizon"
+        assert db.get_tombstone(m1) is not None
+
+        # 4. Precondition: if a rogue live row with id=m1 exists in memories, compaction fails.
+        db.insert(
+            id=m1,
+            identifier="rogue/m1",
+            fact_text="rogue live row",
+            embedding=b"",
+            content_hash="9" * 64,
+            namespace="ops",
+        )
+        with pytest.raises(TombstoneCompactionError) as exc_live:
+            compact_tombstones(db, through_seq=3, acked_cursor_seq=3)
+        assert exc_live.value.reason == "live_record_conflict"
+        db.delete_memory_row(m1)
+
+        # 5. All preconditions met for through_seq=3 (trimmed_through_seq=3, acked_cursor_seq=4):
+        #    m1 tombstone (deleted_at_seq=3) is compacted; m2 tombstone (deleted_at_seq=5) remains!
+        comp_res = compact_tombstones(db, through_seq=3, acked_cursor_seq=4)
+        assert comp_res == {
+            "compacted": 1,
+            "remaining": 1,
+            "compacted_through_seq": 3,
+        }
+        assert db.get_tombstone(m1) is None
+        assert db.get_tombstone(m2) is not None
+        assert int(db.get_meta("compacted_tombstones_through_seq") or 0) == 3
+
+        # 6. Any cursor prior to compacted_tombstones_through_seq (including seq=0 start cursor)
+        #    is rejected by validate_replay_cursor so compacted tombstones can never be bypassed.
+        ident = db.mount_identity()
+        stale_start = ReplayCursor(
+            mount_id=ident.mount_id,
+            replica_id=ident.replica_id,
+            history_id=ident.history_id,
+            seq=0,
+            anchor_event_id="",
+        ).encode()
+        with pytest.raises(ReplayCursorError) as exc_stale:
+            validate_replay_cursor(db, stale_start)
+        assert exc_stale.value.reason == "stale_base"
+    finally:
+        db.close()

@@ -1779,29 +1779,37 @@ class HotMemRuntime:
                     for ev in page
                 ]
                 page_meta = db.get_memories(page_ids)
+                page_tombstones = db.get_tombstones(page_ids)
                 for ev in page:
                     last_scanned_seq = int(ev["seq"])
                     ev_ns = str(ev.get("namespace") or "")
                     payload = dict(ev.get("payload") or {})
+                    ev_mid = str(ev.get("memory_id") or payload.get("id") or "")
+                    tomb_row = page_tombstones.get(ev_mid) if ev_mid else None
                     row_probe = {
-                        "id": ev.get("memory_id") or payload.get("id") or "",
-                        "identifier": payload.get("identifier") or "",
-                        "namespace": ev_ns or str(payload.get("namespace") or ""),
+                        "id": ev_mid,
+                        "identifier": payload.get("identifier")
+                        or (tomb_row.get("identifier") if tomb_row else "")
+                        or "",
+                        "namespace": ev_ns
+                        or str(payload.get("namespace") or "")
+                        or (str(tomb_row.get("namespace") or "") if tomb_row else ""),
                     }
                     if not ctx.can_access_row(row_probe, operation="read"):
                         continue
-                    ev_mid = ev.get("memory_id") or payload.get("id")
-                    mem_row = page_meta.get(str(ev_mid)) if ev_mid else None
+                    mem_row = page_meta.get(ev_mid) if ev_mid else None
                     payload_tags_raw = payload.get("tags")
                     payload_tags_str = (
                         json.dumps(payload_tags_raw)
                         if isinstance(payload_tags_raw, list)
                         else (payload_tags_raw or "[]")
                     )
+                    tomb_metadata = tomb_row.get("metadata_json") if tomb_row else None
+                    tomb_tags = tomb_row.get("tags") if tomb_row else None
                     payload_probe = {
                         **row_probe,
-                        "metadata_json": payload.get("metadata_json") or "{}",
-                        "tags": payload_tags_str,
+                        "metadata_json": payload.get("metadata_json") or tomb_metadata or "{}",
+                        "tags": (payload_tags_str if "tags" in payload else (tomb_tags or "[]")),
                         "provenance_json": payload.get("provenance_json"),
                     }
                     probe = mem_row if mem_row is not None else payload_probe

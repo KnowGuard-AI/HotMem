@@ -563,6 +563,14 @@ def hydrate_package(
                 if len(pending) >= HYDRATE_BATCH:
                     flush()
             flush()
+            # Authoritative hydration owns the restored ids: stale
+            # tombstones/watermarks/checkpoints from an earlier state must
+            # not block compaction or replay of the restored base (#98).
+            restored_ids = sorted(package_ids)
+            db.delete_tombstones(restored_ids, _commit=False)
+            db.delete_replay_watermarks(restored_ids, _commit=False)
+            db.delete_meta("last_replay_cursor", _commit=False)
+            db.set_meta("history_epoch_start_seq", "0", _commit=False)
             if record_clone:
                 from hotmem.interchange.fingerprint import state_fingerprint
 

@@ -364,7 +364,15 @@ Snapshot v2 manifests carry additive lineage and replay cursor fields:
   explicit non-goal); use authenticated transport for untrusted channels.
   Cursors and manifests must be treated as untrusted input.
   Scope (`namespace`, `event_types`) is fixed at issuance; replay callers cannot
-  narrow it later.
+  narrow it later. Cursors issued by the current runtime default to the full
+  reconstructing scope (`memory.created`, `memory.updated`, `memory.deleted`)
+  and carry `scope_mode: "reconstructing"`. Pre-#98 cursors lack that marker
+  and are treated as legacy create-only cursors: replay validates them as-is,
+  upgrades them to the full reconstructing scope on first use, and writes the
+  upgraded checkpoint. An explicitly issued narrow cursor carries
+  `scope_mode: "explicit"` and is never silently widened; replay fails with
+  `incomplete_reconstructing_scope` if its range contains an excluded
+  update/delete transition.
 
 Versioned (v1/v2) manifests and manifests carrying `replay_cursor` have their
 derived identity fields verified against the payload during `verify_manifest`
@@ -390,3 +398,138 @@ Verification and hydration rules:
   `"fork"`. Multi-writer ordering and automatic fork conflict resolution are
   intentionally undefined; cursor replay against a wrong source, stale/trimmed
   base, replaced history, or divergent fork fails closed before mutation.
+
+## Replay-safe state mutations and tombstones (issue #98)
+
+Event-log replay reconstructs terminal store state across `create -> update ->
+delete` sequences without duplicate application or deleted-record resurrection:
+
+1. **Reconstructing vs. observational classification (`is_reconstructing_event`
+   / `classify_event`)**:
+   - **Reconstructing (`reconstructing: true`, `event_category:
+     "reconstructing"`)**: `memory.created` (`transition: "create"`),
+     `memory.updated` (`transition: "update"`), and `memory.deleted`
+     (`transition: "delete"`).
+   - **Observational (`reconstructing: false`, `event_category:
+     "observational"`)**: `memory.deduplicated`, `memory.promotion`,
+     `memory.candidate`, `snapshot.imported`, `bundle.imported`,
+     `bundle.discovered`, `hygiene.checked`, `hygiene.warning`, `index.rebuilt`,
+     `sync.applied`, and `handoff.applied`. Observational events are never
+     applied as state transitions during replay, and replay cursors rejecting
+     non-reconstructing `event_types` fail closed with
+     `ReplayCursorError(reason="non_reconstructing_event_type")`.
+   - Lifecycle promotion/candidate functions mutate portable `promotion_state`,
+     `promotion_candidate`, and `updated_at`. They emit a reconstructing
+     `memory.updated` with the complete after-state in addition to the
+     observational `memory.promotion` / `memory.candidate` signal. The
+     `emit_event=False` lifecycle option suppresses only the signal; the
+     reconstructing update is always emitted.
+2. **Immutable envelope and payload schema (`EVENT_PAYLOAD_SCHEMA_VERSION = 1`)**:
+   - Every event carries `seq` (monotonic replay position), `event_id`
+     (UUID4 hex), `memory_id` (record `id`), `namespace` (scope), `event_type`,
+     `occurred_at` (ISO-8601 UTC), `reconstructing`, `event_category`, and
+     `payload`.
+   - Reconstructing v1 payloads must carry `payload_schema_version: 1`,
+     `event_category: "reconstructing"`, `transition`, `id`, `namespace`,
+     `content_hash`, `record_fingerprint` (#99 canonical digest), `occurred_at`,
+     and `origin: {"mount_id", "replica_id", "history_id",
+     "runtime_generation"}`. Envelope `memory_id` must equal `payload.id`.
+     `memory.updated` additionally requires non-empty
+     `previous_content_hash` and `previous_record_fingerprint`; `memory.deleted`
+     requires non-empty `identifier`, `content_hash`, and `record_fingerprint`.
+   - Category is derived from the event type. A reconstructing event whose
+     payload declares `event_category: "observational"` (or an observational
+     event declaring `"reconstructing"`) is rejected as
+     `malformed_event_payload`; it is never silently skipped.
+   - Unknown event types are rejected with `unsupported_event_type` under the
+     v1 contract. Adding a new event type requires a contract/version decision;
+     it is not silently treated as observational.
+   - Legacy `memory.created` events lacking `payload_schema_version` remain
+     replayable under v1 defaults (`schema_version = 1`) and are exempt only
+     from the v1 envelope-precondition requirements. Repeat replay recognizes
+     an already-applied legacy row by id + namespace + content hash; a legacy
+     create deduplicated into a different id records a dedupe marker so later
+     updates/deletes for that source id are skipped instead of failing as a
+     missing target.
+3. **Complete after-state update representation (`memory.updated`)**:
+   - `memory.updated` carries the complete 27-column portable after-state (#99,
+     including `schema_version`, explicit `importance: 0.0`, and file-backed
+     reference fields) plus `previous_content_hash` and
+     `previous_record_fingerprint`.
+   - File-backed updates derive `content_hash` with the canonical #100
+     reference identity (`identifier` + normalized `source_uri` +
+     `byte_offset` + `byte_length`; checksum excluded), not from the summary or
+     checksum. Replay recomputes that canonical hash for relative references
+     and accepts documented pre-#100 legacy aliases; absolute host paths cannot
+     be rederived without the source `base_dir` and are carried as declared.
+   - Complete after-state was selected over partial field patches so replay
+     reuses `#99` record normalization/validation and `#78` embedding resolution
+     directly, while making repeat replay of an already-applied range a
+     verified no-op (`live_fingerprint == after_fingerprint`).
+4. **Two-phase atomic validation and failure rules (`ReplayExecutionError`)**:
+   - Pass 1 validates the entire replay range before any SQLite write; Pass 2
+     executes inside one SQLite transaction and rolls back on any error.
+   - Pre-mutation failure reasons: `unsupported_payload_version`,
+     `missing_payload_version`, `malformed_event_payload`,
+     `invalid_event_order`, `missing_target_record`, `base_state_mismatch`,
+     `tombstoned_record_resurrection`, `tombstoned_record_mutation`,
+     `already_tombstoned`, `identity_mismatch`, `content_hash_conflict`,
+     `origin_identity_mismatch`, and `incomplete_reconstructing_scope`.
+5. **Tombstone identity, retention, and compaction preconditions
+   (`memory_tombstones` / `compact_tombstones`)**:
+   - `delete_memory_record` and `memory.deleted` replay remove the active row
+     from `memories` and persist a tombstone in `memory_tombstones`
+     (`memory_id`, `namespace`, `identifier`, `content_hash`,
+     `record_fingerprint`, `deleted_at`, `deleted_at_seq`, `delete_event_id`,
+     `origin_mount_id`, `origin_replica_id`, `origin_history_id`,
+     `metadata_json`, `tags`, `reason`).
+   - The replay tables are part of schema `user_version=7` (v6 stores migrate
+     additively; `metadata_json`/`tags` are added to pre-existing tombstone
+     tables).
+   - Replaying a range containing `create -> update -> delete` a second time
+     recognizes that `deleted_at_seq >= event.seq` in the same history and skips
+     superseded transitions without resurrecting the deleted record.
+   - `trim_events_before_seq` and `trim_events_by_count` never drop rows from
+     `memory_tombstones`.
+   - `compact_tombstones(db, through_seq=..., acked_cursor_seq=..., strict=...)`
+     removes tombstones with `deleted_at_seq <= through_seq` only when:
+     1. `through_seq <= trimmed_through_seq` (all pre-delete events have been
+        trimmed from `events`),
+     2. `acked_cursor_seq is None or through_seq <= acked_cursor_seq`,
+     3. no retained events with `seq <= deleted_at_seq` remain in `events` for
+        the tombstoned `memory_id`, and
+     4. no live row with `id == memory_id` exists in `memories`.
+   - Compaction advances `store_meta["compacted_tombstones_through_seq"]`, and
+     `validate_replay_cursor` rejects any cursor with
+     `seq < compacted_tombstones_through_seq` (`reason="stale_base"`).
+   - Compaction with no tombstones at or below the requested horizon is a no-op.
+     Safe retries after compaction resolve the operation ledger by
+     caller/key/memory-id, so a delete/update retried after its tombstone was
+     compacted still returns the recorded outcome.
+   - Tombstones retain non-secret `metadata_json`/`tags` classification inputs so
+     `/v1/events` can apply the same private/secret disclosure policy to a
+     `memory.deleted` event even after the live row is gone.
+   - Known limitations of the #98 event-replay surface:
+     - `memory.updated` / `memory.deleted` are library primitives exposed by
+       `hotmem.events`; this issue does not add HTTP/CLI mutation endpoints.
+       `runtime.add` is the production create-event path, and lifecycle
+       promotion/candidate mutations emit reconstructing updates.
+     - Legacy writers that insert directly (`swap.add_memory`, direct
+       `MemoryDB.insert`, hydration/import) do not synthesize historical
+       `memory.created` events. Event replay covers stores written through the
+       runtime/new primitives; pre-existing rows should be hydrated from a
+       snapshot/package base before relying on event replay.
+     - Pre-#98 deletes have no delete event or tombstone to migrate. Replay
+       protection applies to deletes recorded after this contract.
+     - File-backed canonical hashes are recomputed for relative references;
+       absolute host paths require the source `base_dir` and are carried as
+       declared identity.
+   - Authoritative hydration clears tombstones, replay watermarks, the saved
+     replay checkpoint, and the history-epoch boundary for the restored record
+     ids. A restored row therefore cannot remain both live and tombstoned, and
+     compaction is not blocked by a pre-restore delete.
+   - `replace_history` clears tombstones and replay watermarks, resets the
+     compaction/retention watermarks, and records
+     `store_meta["history_epoch_start_seq"]`. Replay of the new history starts
+     after the retained audit boundary, so old `hmc1` events remain immutable
+     audit history and are not replayed as the new epoch.

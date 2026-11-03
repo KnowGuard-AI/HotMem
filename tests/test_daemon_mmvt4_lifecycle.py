@@ -388,3 +388,187 @@ def test_mmvt4_graceful_restart_preserves_acknowledged_writes(tmp_path: Path):
         assert client.get_memory(memory_id)["fact_text"] == (
             "acknowledged before a graceful restart"
         )
+
+
+def test_mmvt4_reconstructing_mutations_idempotent_retries_and_read_isolation(
+    tmp_path: Path,
+):
+    """#98: daemon recovery/safe-retry reuses reconstructing mutation contract;
+    repeated reads/searches never mutate scores or emit reconstructing events;
+    list_events sanitizes memory.updated and memory.deleted under policy."""
+    from hotmem.events import (
+        delete_memory_record,
+        is_reconstructing_event,
+        query_events,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.interchange.fingerprint import record_fingerprint
+    from hotmem.runtime import HotMemRuntime
+
+    db_path = tmp_path / "retry_contract.sqlite"
+    policy = PolicyConfig(
+        store_id="store-98",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                caller_id="agent-ops",
+                token="tok-ops",
+                store_id="store-98",
+                namespaces=("ops/shared",),
+                operations=("read", "write"),
+                allowed_sessions=("sess-98-1",),
+            ),
+            CallerCredential.from_token(
+                caller_id="agent-other",
+                token="tok-other",
+                store_id="store-98",
+                namespaces=("ops/private",),
+                operations=("read",),
+                allowed_sessions=("sess-98-2",),
+            ),
+        ],
+    )
+
+    rt = HotMemRuntime(
+        db_path=str(db_path),
+        store_id="store-98",
+        policy=policy,
+        base_dir=tmp_path,
+    ).open()
+    try:
+        assert rt.db is not None
+        ctx_ops = rt.resolve_caller(
+            token="tok-ops",
+            session_id="sess-98-1",
+            namespace="ops/shared",
+            idempotency_key="idem-create-98",
+        )
+        added = rt.add(
+            ctx_ops,
+            identifier="ops/runbook-98",
+            fact="Initial runbook state v1",
+            importance=0.4,
+            tags=["team:ops"],
+        )
+        mid = added["memory_id"]
+
+        # Repeated searches and reads must NOT emit reconstructing events or
+        # mutate importance/fingerprint.
+        fp_before_reads = record_fingerprint(rt.db.get_memory(mid))
+        events_before_reads = len(query_events(rt.db, limit=50)["events"])
+
+        read_ctx = rt.resolve_caller(
+            token="tok-ops",
+            session_id="sess-98-1",
+            namespace="ops/shared",
+        )
+        for _ in range(3):
+            hits = rt.search(
+                read_ctx,
+                query="Initial runbook state",
+                top_k=5,
+            )
+            assert any(h["memory_id"] == mid for h in hits["memories"])
+            fetched = rt.get_memory(
+                read_ctx,
+                memory_id=mid,
+            )
+            assert fetched["importance"] == pytest.approx(0.4)
+
+        row_after_reads = rt.db.get_memory(mid)
+        assert row_after_reads is not None
+        assert row_after_reads["importance"] == pytest.approx(0.4)
+        assert record_fingerprint(row_after_reads) == fp_before_reads
+        all_evts = query_events(rt.db, limit=50)["events"]
+        assert len(all_evts) == events_before_reads == 1
+
+        # Safe retry on update_memory_record with idempotency_key:
+        upd1 = update_memory_record(
+            rt.db,
+            mid,
+            fact_text="Updated runbook state v2",
+            importance=0.0,
+            idempotency_key="idem-upd-98",
+            caller_id="agent-ops",
+        )
+        assert upd1["idempotent_replay"] is False
+        upd2 = update_memory_record(
+            rt.db,
+            mid,
+            fact_text="Updated runbook state v2",
+            importance=0.0,
+            idempotency_key="idem-upd-98",
+            caller_id="agent-ops",
+        )
+        assert upd2["idempotent_replay"] is True
+        assert upd2["event"]["event_id"] == upd1["event"]["event_id"]
+
+        # Conflicting update payload with same idempotency_key fails closed.
+        with pytest.raises(ValueError, match="already used with a different update payload"):
+            update_memory_record(
+                rt.db,
+                mid,
+                fact_text="Conflicting update v3",
+                idempotency_key="idem-upd-98",
+                caller_id="agent-ops",
+            )
+
+        # Safe retry on delete_memory_record with idempotency_key (even after row is deleted):
+        del1 = delete_memory_record(
+            rt.db,
+            mid,
+            reason="retired runbook",
+            idempotency_key="idem-del-98",
+            caller_id="agent-ops",
+        )
+        assert del1["idempotent_replay"] is False
+        del2 = delete_memory_record(
+            rt.db,
+            mid,
+            reason="retired runbook",
+            idempotency_key="idem-del-98",
+            caller_id="agent-ops",
+        )
+        assert del2["idempotent_replay"] is True
+        assert del2["delete_event_id"] == del1["delete_event_id"]
+
+        # Verify runtime.list_events sanitizes memory.updated / memory.deleted
+        # and enforces namespace isolation even after the record is deleted.
+        ops_events = rt.list_events(
+            read_ctx,
+            limit=20,
+        )["events"]
+        assert [e["event_type"] for e in ops_events] == [
+            "memory.created",
+            "memory.updated",
+            "memory.deleted",
+        ]
+        for ev in ops_events:
+            assert is_reconstructing_event(ev) is True
+            assert "fact_text" not in ev["payload"]
+            assert "embedding_b64" not in ev["payload"]
+
+        other_ctx = rt.resolve_caller(
+            token="tok-other",
+            session_id="sess-98-2",
+            namespace="ops/private",
+        )
+        other_events = rt.list_events(
+            other_ctx,
+            limit=20,
+        )["events"]
+        assert other_events == []
+
+        # Replaying the source DB into a clean target reconstructs the exact
+        # terminal state (deleted + tombstone).
+        target_db = MemoryDB(tmp_path / "reconstructed_98.sqlite")
+        try:
+            rep = replay_with_cursor(rt.db, target_db)
+            assert rep.applied == 3
+            assert target_db.count() == 0
+            assert target_db.get_tombstone(mid) is not None
+        finally:
+            target_db.close()
+    finally:
+        rt.close()

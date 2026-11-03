@@ -331,3 +331,22 @@ def test_golden_replay_cursor_hmc1_vectors_are_locked(golden_cursor_vectors):
     assert decoded.version == CURSOR_VERSION == 1
     assert golden_cursor_vectors["scoped_head_v1"].startswith(f"{CURSOR_PREFIX}.")
     assert decoded.scope == {"event_types": ["memory.created"], "namespace": "ops"}
+
+    c_reconstructing = ReplayCursor(
+        mount_id="mnt-00000000000000000000000000000001",
+        replica_id="rep-00000000000000000000000000000001",
+        history_id="hist-00000000000000000000000000000001",
+        seq=3,
+        anchor_event_id="evt-0003",
+        base_snapshot_id="snap-base-01",
+        namespace="ops",
+        event_types=("memory.created", "memory.deleted", "memory.updated"),
+        scope_mode="reconstructing",
+    )
+    assert encode_cursor(c_reconstructing) == golden_cursor_vectors["reconstructing_v1"]
+    assert decode_cursor(golden_cursor_vectors["reconstructing_v1"]) == c_reconstructing
+    assert c_reconstructing.scope == {
+        "event_types": ["memory.created", "memory.deleted", "memory.updated"],
+        "namespace": "ops",
+        "scope_mode": "reconstructing",
+    }

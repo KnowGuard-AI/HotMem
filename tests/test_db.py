@@ -216,7 +216,9 @@ def test_v2_migration_opens_v01_db(tmp_path):
             assert col in columns, f"missing v2 column: {col}"
 
         version = db._conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 6  # 3 events; 4 checkpoints; 5 handoff ledger; 6 namespace identity
+        assert (
+            version == 7
+        )  # 3 events; 4 checkpoints; 5 handoff ledger; 6 namespace identity; 7 replay state
 
         row = db.all_rows()[0]
         assert row["id"] == "legacy1"
