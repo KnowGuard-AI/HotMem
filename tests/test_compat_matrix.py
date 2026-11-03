@@ -736,3 +736,181 @@ def test_package_byte_integrity_and_semantic_record_fidelity_are_separate_proper
         hydrate(dst_tampered, snap_dir)
     assert dst_tampered.count() == 0
     dst_tampered.close()
+
+
+def test_snapshot_v2_and_interchange_v1_hydrate_then_replay_create_update_delete(
+    tmp_path: Path,
+):
+    """#98 + #94 + #96 + #99 + #100: hydrate Snapshot v2 and Interchange v1
+    clones at base checkpoint, then replay create -> update -> delete across
+    inline, file-backed, and multi-namespace records to identical terminal
+    semantic state without resurrection."""
+    from hotmem.events import (
+        EventType,
+        _build_memory_created_payload,
+        append_event,
+        delete_memory_record,
+        issue_replay_cursor,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.interchange.fingerprint import record_fingerprint, state_fingerprint
+    from hotmem.interchange.hydrate import hydrate_package
+    from hotmem.interchange.package import write_package
+    from hotmem.snapshot import hydrate, snapshot
+    from hotmem.snapshot.reader import verify_manifest
+
+    backing_doc = tmp_path / "runbook.md"
+    backing_doc.write_text("# Runbook\nInitial section content for file-backed memory.\n")
+
+    src = MemoryDB(tmp_path / "matrix98_src.sqlite")
+    clone_snap = MemoryDB(tmp_path / "matrix98_clone_snap.sqlite")
+    clone_pkg = MemoryDB(tmp_path / "matrix98_clone_pkg.sqlite")
+    try:
+        # 1. Seed base state on src (m_keep in ops, m_delete in ops, m_file in ops).
+        for mid, ident, text, ns in (
+            ("m-keep-ops", "ops/keep", "Base keep fact v1", "ops"),
+            ("m-del-ops", "ops/shared-topic", "Shared topic text in ops", "ops"),
+        ):
+            chash = compute_content_hash(ident, text)
+            src.insert(
+                id=mid,
+                identifier=ident,
+                fact_text=text,
+                embedding=pack_embedding(embed_text(text)),
+                embedding_dim=EMBEDDING_DIM,
+                embedding_model=EMBEDDING_MODEL,
+                source="agent://matrix",
+                importance=0.6,
+                content_hash=chash,
+                namespace=ns,
+            )
+            row = src.get_memory(mid)
+            assert row is not None
+            append_event(
+                src,
+                event_type=EventType.MEMORY_CREATED,
+                memory_id=mid,
+                namespace=ns,
+                payload=_build_memory_created_payload(row),
+            )
+
+        file_chash = compute_content_hash("ops/file-ref", "Initial file summary")
+        src.insert_file_backed(
+            id="m-file-ops",
+            identifier="ops/file-ref",
+            source_uri="runbook.md",
+            source_format="text/markdown",
+            source_checksum="a" * 64,
+            byte_offset=0,
+            byte_length=24,
+            fact_summary="Initial file summary",
+            embedding=pack_embedding(embed_text("Initial file summary")),
+            embedding_dim=EMBEDDING_DIM,
+            embedding_model=EMBEDDING_MODEL,
+            content_hash=file_chash,
+            namespace="ops",
+        )
+        file_row = src.get_memory("m-file-ops")
+        assert file_row is not None
+        append_event(
+            src,
+            event_type=EventType.MEMORY_CREATED,
+            memory_id="m-file-ops",
+            namespace="ops",
+            payload=_build_memory_created_payload(file_row),
+        )
+
+        # 2. Export Snapshot v2 and Interchange v1 at base (seq=3) and hydrate both clones.
+        snap_dir = tmp_path / "matrix98_snap"
+        pkg_dir = tmp_path / "matrix98_pkg"
+        snapshot(src, snap_dir)
+        write_package(src, pkg_dir)
+        verify_manifest(snap_dir)
+
+        hydrate(clone_snap, snap_dir)
+        hydrate_package(clone_pkg, pkg_dir)
+        assert clone_snap.count() == 3
+        assert clone_pkg.count() == 3
+
+        # 3. Post-base transitions on src:
+        #    - update m-keep-ops (importance=0.0, schema_version=2, tags)
+        update_memory_record(
+            src,
+            "m-keep-ops",
+            fact_text="Base keep fact v2 updated",
+            importance=0.0,
+            schema_version=2,
+            tags=["verified:true"],
+            promotion_state="READY",
+            promotion_candidate=1,
+        )
+        #    - update m-file-ops (byte window + summary + checksum)
+        update_memory_record(
+            src,
+            "m-file-ops",
+            byte_offset=10,
+            byte_length=38,
+            fact_summary="Updated file summary v2",
+            source_checksum="b" * 64,
+        )
+        #    - create a cross-namespace twin in 'sec' with the exact same (identifier, fact_text)
+        #      as 'm-del-ops' (#100), then delete 'm-del-ops' in 'ops'!
+        twin_chash = compute_content_hash("ops/shared-topic", "Shared topic text in ops")
+        src.insert(
+            id="m-twin-sec",
+            identifier="ops/shared-topic",
+            fact_text="Shared topic text in ops",
+            embedding=pack_embedding(embed_text("Shared topic text in ops")),
+            embedding_dim=EMBEDDING_DIM,
+            embedding_model=EMBEDDING_MODEL,
+            source="agent://sec",
+            importance=0.9,
+            content_hash=twin_chash,
+            namespace="sec",
+        )
+        twin_row = src.get_memory("m-twin-sec")
+        assert twin_row is not None
+        append_event(
+            src,
+            event_type=EventType.MEMORY_CREATED,
+            memory_id="m-twin-sec",
+            namespace="sec",
+            payload=_build_memory_created_payload(twin_row),
+        )
+        delete_memory_record(src, "m-del-ops", reason="removed from ops only")
+
+        # 4. Replay post-base transitions into both hydrated clones using their saved base_cursor.
+        res_snap = replay_with_cursor(src, clone_snap)
+        res_pkg = replay_with_cursor(src, clone_pkg)
+        assert res_snap.applied == 4
+        assert res_pkg.applied == 4
+
+        src_fp = state_fingerprint(src.all_rows(include_embedding=False))
+        for clone in (clone_snap, clone_pkg):
+            assert clone.count() == 3
+            assert clone.get_memory("m-del-ops") is None
+            assert clone.get_tombstone("m-del-ops") is not None
+            assert clone.get_memory("m-twin-sec") is not None
+            assert clone.get_memory("m-keep-ops")["importance"] == 0.0
+            assert clone.get_memory("m-keep-ops")["schema_version"] == 2
+            assert clone.get_memory("m-file-ops")["byte_offset"] == 10
+            assert clone.get_memory("m-file-ops")["byte_length"] == 38
+            assert state_fingerprint(clone.all_rows(include_embedding=False)) == src_fp
+            for mid in ("m-keep-ops", "m-file-ops", "m-twin-sec"):
+                assert record_fingerprint(clone.get_memory(mid)) == record_fingerprint(
+                    src.get_memory(mid)
+                )
+
+        # 5. Replaying the entire history again from start cursor into both clones
+        #    is idempotent (applied == 0) and does NOT resurrect m-del-ops.
+        start_cur = issue_replay_cursor(src, position="start").encode()
+        for clone in (clone_snap, clone_pkg):
+            rep_again = replay_with_cursor(src, clone, cursor=start_cur)
+            assert rep_again.applied == 0
+            assert clone.get_memory("m-del-ops") is None
+            assert clone.count() == 3
+    finally:
+        src.close()
+        clone_snap.close()
+        clone_pkg.close()

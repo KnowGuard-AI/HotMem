@@ -205,6 +205,13 @@ of the upserted record and survives transfer byte-for-byte.
 - Sync surface: `hotmem delta produce|apply` CLI plus the
   `hotmem.interchange.delta` library. No HTTP, MCP, or TypeScript response
   shape changes in v1.
+- Event-log replay surface (#98): `hotmem.events` complements package deltas
+  with versioned reconstructing events (`memory.created`, `memory.updated`
+  carrying complete 27-field portable after-state + `previous_content_hash` /
+  `previous_record_fingerprint`, and `memory.deleted` persisting tombstones in
+  `memory_tombstones`), two-phase pre-mutation validation (`ReplayExecutionError`),
+  and guarded tombstone compaction (`compact_tombstones`). See
+  `docs/snapshot-v2.md` for the full event-replay and tombstone contract.
 
 ## 10. Proposed fields (NOT emitted — pending contract review per ADR-003)
 

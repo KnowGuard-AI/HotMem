@@ -390,3 +390,76 @@ Verification and hydration rules:
   `"fork"`. Multi-writer ordering and automatic fork conflict resolution are
   intentionally undefined; cursor replay against a wrong source, stale/trimmed
   base, replaced history, or divergent fork fails closed before mutation.
+
+## Replay-safe state mutations and tombstones (issue #98)
+
+Event-log replay reconstructs terminal store state across `create -> update ->
+delete` sequences without duplicate application or deleted-record resurrection:
+
+1. **Reconstructing vs. observational classification (`is_reconstructing_event`
+   / `classify_event`)**:
+   - **Reconstructing (`reconstructing: true`, `event_category:
+     "reconstructing"`)**: `memory.created` (`transition: "create"`),
+     `memory.updated` (`transition: "update"`), and `memory.deleted`
+     (`transition: "delete"`).
+   - **Observational (`reconstructing: false`, `event_category:
+     "observational"`)**: `memory.deduplicated`, `memory.promotion`,
+     `memory.candidate`, `snapshot.imported`, `bundle.imported`,
+     `bundle.discovered`, `hygiene.checked`, `hygiene.warning`, `index.rebuilt`,
+     `sync.applied`, and `handoff.applied`. Observational events are never
+     applied as state transitions during replay, and replay cursors rejecting
+     non-reconstructing `event_types` fail closed with
+     `ReplayCursorError(reason="non_reconstructing_event_type")`.
+2. **Immutable envelope and payload schema (`EVENT_PAYLOAD_SCHEMA_VERSION = 1`)**:
+   - Every event carries `seq` (monotonic replay position), `event_id`
+     (UUID4 hex), `memory_id` (record `id`), `namespace` (scope), `event_type`,
+     `occurred_at` (ISO-8601 UTC), `reconstructing`, `event_category`, and
+     `payload`.
+   - Reconstructing v1 payloads carry `payload_schema_version: 1`,
+     `event_category: "reconstructing"`, `transition`, `id`, `namespace`,
+     `content_hash`, `record_fingerprint` (#99 canonical digest), `occurred_at`,
+     and `origin: {"mount_id", "replica_id", "history_id",
+     "runtime_generation"}`.
+   - Legacy `memory.created` events lacking `payload_schema_version` remain
+     replayable under v1 defaults (`schema_version = 1`).
+3. **Complete after-state update representation (`memory.updated`)**:
+   - `memory.updated` carries the complete 27-column portable after-state (#99,
+     including `schema_version`, explicit `importance: 0.0`, and file-backed
+     reference fields) plus `previous_content_hash` and
+     `previous_record_fingerprint`.
+   - Complete after-state was selected over partial field patches so replay
+     reuses `#99` record normalization/validation and `#78` embedding resolution
+     directly, while making repeat replay of an already-applied range a
+     verified no-op (`live_fingerprint == after_fingerprint`).
+4. **Two-phase atomic validation and failure rules (`ReplayExecutionError`)**:
+   - Pass 1 validates the entire replay range before any SQLite write; Pass 2
+     executes inside one SQLite transaction and rolls back on any error.
+   - Pre-mutation failure reasons: `unsupported_payload_version`,
+     `missing_payload_version`, `malformed_event_payload`,
+     `invalid_event_order`, `missing_target_record`, `base_state_mismatch`,
+     `tombstoned_record_resurrection`, `tombstoned_record_mutation`,
+     `already_tombstoned`, `identity_mismatch`, `content_hash_conflict`,
+     `origin_identity_mismatch`, and `incomplete_reconstructing_scope`.
+5. **Tombstone identity, retention, and compaction preconditions
+   (`memory_tombstones` / `compact_tombstones`)**:
+   - `delete_memory_record` and `memory.deleted` replay remove the active row
+     from `memories` and persist a tombstone in `memory_tombstones`
+     (`memory_id`, `namespace`, `identifier`, `content_hash`,
+     `record_fingerprint`, `deleted_at`, `deleted_at_seq`, `delete_event_id`,
+     `origin_mount_id`, `origin_replica_id`, `origin_history_id`, `reason`).
+   - Replaying a range containing `create -> update -> delete` a second time
+     recognizes that `deleted_at_seq >= event.seq` in the same history and skips
+     superseded transitions without resurrecting the deleted record.
+   - `trim_events_before_seq` and `trim_events_by_count` never drop rows from
+     `memory_tombstones`.
+   - `compact_tombstones(db, through_seq=..., acked_cursor_seq=..., strict=...)`
+     removes tombstones with `deleted_at_seq <= through_seq` only when:
+     1. `through_seq <= trimmed_through_seq` (all pre-delete events have been
+        trimmed from `events`),
+     2. `acked_cursor_seq is None or through_seq <= acked_cursor_seq`,
+     3. no retained events with `seq <= deleted_at_seq` remain in `events` for
+        the tombstoned `memory_id`, and
+     4. no live row with `id == memory_id` exists in `memories`.
+   - Compaction advances `store_meta["compacted_tombstones_through_seq"]`, and
+     `validate_replay_cursor` rejects any cursor with
+     `seq < compacted_tombstones_through_seq` (`reason="stale_base"`).
