@@ -1706,6 +1706,106 @@ def test_reconstructing_payload_preserves_all_99_portable_fields(tmp_path: Path)
 # -- #98 WP2: Atomic replay transition engine, idempotency & failure rules ---
 
 
+def test_legacy_create_replay_idempotency_and_dedupe_targets(tmp_path: Path):
+    """#98 review: legacy create replay is idempotent without a delete, and
+    legacy dedupe targets skip later updates/deletes instead of failing."""
+    from hotmem.events import (
+        EventType,
+        append_event,
+        issue_replay_cursor,
+        replay_with_cursor,
+        update_memory_record,
+    )
+    from hotmem.interchange.canonical import compute_content_hash
+
+    src = MemoryDB(tmp_path / "legacy_idem_src.sqlite")
+    target = MemoryDB(tmp_path / "legacy_idem_target.sqlite")
+    try:
+        mid = "legacy-idem-1"
+        chash = compute_content_hash("legacy/idem", "legacy idempotent fact")
+        src.insert(
+            id=mid,
+            identifier="legacy/idem",
+            fact_text="legacy idempotent fact",
+            embedding=b"",
+            content_hash=chash,
+            namespace="ops",
+        )
+        append_event(
+            src,
+            event_type=EventType.MEMORY_CREATED,
+            memory_id=mid,
+            namespace="ops",
+            payload={
+                "id": mid,
+                "identifier": "legacy/idem",
+                "fact_text": "legacy idempotent fact",
+                "content_hash": chash,
+                "namespace": "ops",
+            },
+        )
+        cur = issue_replay_cursor(src, position="start", namespace="ops").encode()
+        first = replay_with_cursor(src, target, cursor=cur)
+        second = replay_with_cursor(src, target, cursor=cur)
+        assert first.applied == 1
+        assert second.applied == 0
+        assert second.skipped == 1
+        assert target.count() == 1
+        assert target.get_memory(mid) is not None
+    finally:
+        src.close()
+        target.close()
+
+    src_dedupe = MemoryDB(tmp_path / "legacy_dedupe_src.sqlite")
+    target_dedupe = MemoryDB(tmp_path / "legacy_dedupe_target.sqlite")
+    try:
+        mid = "legacy-dedupe-1"
+        chash = compute_content_hash("legacy/dedupe", "legacy dedupe fact")
+        src_dedupe.insert(
+            id=mid,
+            identifier="legacy/dedupe",
+            fact_text="legacy dedupe fact",
+            embedding=b"",
+            content_hash=chash,
+            namespace="ops",
+        )
+        append_event(
+            src_dedupe,
+            event_type=EventType.MEMORY_CREATED,
+            memory_id=mid,
+            namespace="ops",
+            payload={
+                "id": mid,
+                "identifier": "legacy/dedupe",
+                "fact_text": "legacy dedupe fact",
+                "content_hash": chash,
+                "namespace": "ops",
+            },
+        )
+        target_dedupe.insert(
+            id="existing-other-id",
+            identifier="legacy/dedupe",
+            fact_text="legacy dedupe fact",
+            embedding=b"",
+            content_hash=chash,
+            namespace="ops",
+        )
+        dedupe_first = replay_with_cursor(src_dedupe, target_dedupe)
+        assert dedupe_first.applied == 0
+        assert dedupe_first.skipped == 1
+        assert target_dedupe.count() == 1
+
+        update_memory_record(src_dedupe, mid, fact_text="legacy dedupe fact updated")
+        dedupe_second = replay_with_cursor(src_dedupe, target_dedupe)
+        assert dedupe_second.applied == 0
+        assert dedupe_second.skipped == 1
+        assert target_dedupe.count() == 1
+        assert target_dedupe.get_memory("existing-other-id")["fact_text"] == ("legacy dedupe fact")
+    finally:
+        src_dedupe.close()
+        target_dedupe.close()
+
+
 def test_replay_create_update_delete_terminal_state_and_idempotency(tmp_path: Path):
     """#98 criteria 5, 6, 7: replay create -> update -> delete into a clean
     compatible runtime to obtain the terminal state without resurrection, and

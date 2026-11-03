@@ -1439,6 +1439,7 @@ def _validate_and_plan_event_step(
     mutated_in_this_run: set[str],
     created_in_this_run: set[str],
     legacy_created_ids: set[str] | None = None,
+    legacy_deduped_ids: set[str] | None = None,
 ) -> tuple[str, int, str, str, str]:
     """Validate one event in Pass 1 and advance the simulated state (#98).
 
@@ -1446,6 +1447,7 @@ def _validate_and_plan_event_step(
     where ``disposition`` is one of:
     - ``'observational'``
     - ``'skip_idempotent'``
+    - ``'skip_legacy_deduped'``
     - ``'apply_create'``
     - ``'apply_update'``
     - ``'apply_delete'``
@@ -1852,6 +1854,12 @@ def _validate_and_plan_event_step(
                         event_id=evt_id,
                         memory_id=mid,
                     )
+                if not is_v1 and live["content_hash"] == chash:
+                    # Legacy create payloads lack the fields needed to rebuild
+                    # the target's exact fingerprint. Same namespace + content
+                    # hash for the same id is the strongest available
+                    # idempotency signal.
+                    return ("skip_idempotent", seq, ns, chash, after_fp)
                 if live["record_fingerprint"] == after_fp and live["content_hash"] == chash:
                     return ("skip_idempotent", seq, ns, chash, after_fp)
                 wm = watermarks_by_id.get(mid)
@@ -1882,8 +1890,8 @@ def _validate_and_plan_event_step(
                     raise ReplayExecutionError(
                         "identity_mismatch",
                         f"Cannot apply memory.created at seq={seq}: (namespace={ns!r}, "
-                        f"content_hash={chash!r}) is already bound to memory_id={existing_id!r}, "
-                        f"not {mid!r}.",
+                        f"content_hash={chash!r}) is already bound to "
+                        f"memory_id={existing_id!r}, not {mid!r}.",
                         expected=existing_id,
                         actual=mid,
                         event_seq=seq,
@@ -1891,8 +1899,12 @@ def _validate_and_plan_event_step(
                         memory_id=mid,
                     )
                 # Legacy memory.created without payload_schema_version delegates
-                # content_hash deduplication to INSERT OR IGNORE (#73).
-                return ("apply_create", seq, ns, chash, after_fp)
+                # content_hash deduplication to INSERT OR IGNORE (#73). Track
+                # the source id as deduped so later updates/deletes do not fail
+                # as a missing target.
+                if legacy_deduped_ids is not None:
+                    legacy_deduped_ids.add(mid)
+                return ("skip_legacy_deduped", seq, ns, chash, after_fp)
 
             live_by_id[mid] = {
                 "id": mid,
@@ -1909,6 +1921,8 @@ def _validate_and_plan_event_step(
             return ("apply_create", seq, ns, chash, after_fp)
 
         # EventType.MEMORY_UPDATED
+        if legacy_deduped_ids is not None and mid in legacy_deduped_ids:
+            return ("skip_idempotent", seq, ns, chash, after_fp)
         if mid in tombstones_by_id:
             tomb = tombstones_by_id[mid]
             tomb_seq = int(tomb.get("deleted_at_seq") or 0)
@@ -1931,6 +1945,17 @@ def _validate_and_plan_event_step(
             )
 
         if mid not in live_by_id:
+            dedupe_marker = watermarks_by_id.get(mid)
+            if (
+                dedupe_marker is not None
+                and not dedupe_marker.get("record_fingerprint")
+                and (
+                    not dedupe_marker.get("history_id")
+                    or not src_hist
+                    or dedupe_marker.get("history_id") == src_hist
+                )
+            ):
+                return ("skip_legacy_deduped", seq, ns, chash, after_fp)
             raise ReplayExecutionError(
                 "missing_target_record",
                 f"Cannot apply memory.updated at seq={seq}: target record {mid!r} does not exist.",
@@ -2089,6 +2114,8 @@ def _validate_and_plan_event_step(
         )
     expected_chash = str(payload.get("content_hash") or "")
     expected_fp = str(payload.get("record_fingerprint") or "")
+    if legacy_deduped_ids is not None and mid in legacy_deduped_ids:
+        return ("skip_idempotent", seq, ns, expected_chash, expected_fp)
     if is_v1 and (
         not expected_chash or not expected_fp or not str(payload.get("identifier") or "")
     ):
@@ -2133,6 +2160,17 @@ def _validate_and_plan_event_step(
         )
 
     if mid not in live_by_id:
+        dedupe_marker = watermarks_by_id.get(mid)
+        if (
+            dedupe_marker is not None
+            and not dedupe_marker.get("record_fingerprint")
+            and (
+                not dedupe_marker.get("history_id")
+                or not src_hist
+                or dedupe_marker.get("history_id") == src_hist
+            )
+        ):
+            return ("skip_legacy_deduped", seq, ns, expected_chash, expected_fp)
         raise ReplayExecutionError(
             "missing_target_record",
             f"Cannot apply memory.deleted at seq={seq}: target record {mid!r} does not exist.",
@@ -2245,6 +2283,7 @@ def apply_event_range(
     mutated_in_this_run: set[str] = set()
     created_in_this_run: set[str] = set()
     legacy_created_ids: set[str] = set()
+    legacy_deduped_ids: set[str] = set()
     plan_by_seq: dict[int, tuple[str, str]] = {}
     prev_seq = 0
 
@@ -2261,6 +2300,7 @@ def apply_event_range(
             mutated_in_this_run=mutated_in_this_run,
             created_in_this_run=created_in_this_run,
             legacy_created_ids=legacy_created_ids,
+            legacy_deduped_ids=legacy_deduped_ids,
         )
         prev_seq = seq
         plan_by_seq[seq] = (disposition, after_fp)
@@ -2282,8 +2322,11 @@ def apply_event_range(
             inserted = target_db.insert_many_ignore(page_records, _commit=False)
             applied += inserted
             skipped += len(page_records) - inserted
-            for wm in page_watermarks:
-                target_db.set_replay_watermark(**wm, _commit=False)
+            if page_watermarks:
+                present = target_db.get_memories([str(wm["memory_id"]) for wm in page_watermarks])
+                for wm in page_watermarks:
+                    if str(wm["memory_id"]) in present:
+                        target_db.set_replay_watermark(**wm, _commit=False)
             page_records.clear()
             page_watermarks.clear()
 
@@ -2295,7 +2338,21 @@ def apply_event_range(
             if disposition == "skip_idempotent":
                 skipped += 1
                 continue
+            if disposition == "skip_legacy_deduped":
+                skipped += 1
+                target_db.set_replay_watermark(
+                    memory_id=str(evt["payload"]["id"]),
+                    namespace=str(evt["payload"].get("namespace") or ""),
+                    content_hash=str(evt["payload"].get("content_hash") or ""),
+                    record_fingerprint="",
+                    last_seq=seq,
+                    last_event_id=str(evt.get("event_id") or ""),
+                    history_id=src_hist,
+                    _commit=False,
+                )
+                continue
             payload = evt["payload"]
+            evt_id = str(evt.get("event_id") or "")
             evt_id = str(evt.get("event_id") or "")
             if disposition == "apply_create":
                 rec = _event_to_memory_record(dict(evt))
@@ -2454,6 +2511,7 @@ def replay_with_cursor(
     mutated_in_this_run: set[str] = set()
     created_in_this_run: set[str] = set()
     legacy_created_ids: set[str] = set()
+    legacy_deduped_ids: set[str] = set()
     plan_by_seq: dict[int, tuple[str, str]] = {}
 
     # Pass 1 (no mutation): validate the replay window, transition sequence,
@@ -2491,6 +2549,7 @@ def replay_with_cursor(
                 mutated_in_this_run=mutated_in_this_run,
                 created_in_this_run=created_in_this_run,
                 legacy_created_ids=legacy_created_ids,
+                legacy_deduped_ids=legacy_deduped_ids,
             )
             prev_seq = seq
             last_seq = seq
@@ -2617,8 +2676,11 @@ def replay_with_cursor(
             inserted = target_db.insert_many_ignore(page_records, _commit=False)
             applied += inserted
             skipped += len(page_records) - inserted
-            for wm in page_watermarks:
-                target_db.set_replay_watermark(**wm, _commit=False)
+            if page_watermarks:
+                present = target_db.get_memories([str(wm["memory_id"]) for wm in page_watermarks])
+                for wm in page_watermarks:
+                    if str(wm["memory_id"]) in present:
+                        target_db.set_replay_watermark(**wm, _commit=False)
             page_records.clear()
             page_watermarks.clear()
 
@@ -2644,6 +2706,19 @@ def replay_with_cursor(
                     continue
                 if disposition == "skip_idempotent":
                     skipped += 1
+                    continue
+                if disposition == "skip_legacy_deduped":
+                    skipped += 1
+                    target_db.set_replay_watermark(
+                        memory_id=str(evt["payload"]["id"]),
+                        namespace=str(evt["payload"].get("namespace") or ""),
+                        content_hash=str(evt["payload"].get("content_hash") or ""),
+                        record_fingerprint="",
+                        last_seq=seq,
+                        last_event_id=str(evt.get("event_id") or ""),
+                        history_id=src_ident.history_id,
+                        _commit=False,
+                    )
                     continue
                 payload = evt["payload"]
                 evt_id = str(evt["event_id"])

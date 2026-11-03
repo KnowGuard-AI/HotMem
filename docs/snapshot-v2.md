@@ -446,7 +446,11 @@ delete` sequences without duplicate application or deleted-record resurrection:
      it is not silently treated as observational.
    - Legacy `memory.created` events lacking `payload_schema_version` remain
      replayable under v1 defaults (`schema_version = 1`) and are exempt only
-     from the v1 envelope-precondition requirements.
+     from the v1 envelope-precondition requirements. Repeat replay recognizes
+     an already-applied legacy row by id + namespace + content hash; a legacy
+     create deduplicated into a different id records a dedupe marker so later
+     updates/deletes for that source id are skipped instead of failing as a
+     missing target.
 3. **Complete after-state update representation (`memory.updated`)**:
    - `memory.updated` carries the complete 27-column portable after-state (#99,
      including `schema_version`, explicit `importance: 0.0`, and file-backed
