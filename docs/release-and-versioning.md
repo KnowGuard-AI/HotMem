@@ -13,9 +13,9 @@ release is tracked in [#130](https://github.com/KnowGuard-AI/HotMem/issues/130).
 
 | Target | Commitment |
 | --- | --- |
-| `0.2.7` | Preserve the already planned showcase, shared daemon, portable-workspace work, and minimal management/detachable interface in [#112](https://github.com/KnowGuard-AI/HotMem/issues/112). Existing acceptance still applies. |
-| Later `0.2.x` | Compatible fixes and maintenance, published when useful. `0.2.8` is available for such a release; it is not a mandatory intermediate release. |
-| `0.3.0` | Next planned feature release: complete Daemonite tray/pop-up integration, common memory operations, safe memory swaps, and supported system relay controls. |
+| `0.2.7` | Deliver the owned-memory core (`#94`, `#96`, `#98`, `#99`, `#100`), shared daemon and scoped disclosure (`#109`, `#110`, `#111`), native Claude/Codex task sync (`#125`), minimal management/detachable interface, and two-harness incident proof in [#112](https://github.com/KnowGuard-AI/HotMem/issues/112) / TECH-18. |
+| `0.2.8` | Planned ecosystem and showcase expansion in [#131](https://github.com/KnowGuard-AI/HotMem/issues/131): Hermes `#70`, OpenClaw `#71`–`#72`, portable clone reconciliation `#95`, public-language audit `#97`, `memory_walk` `#105`, `memory_map` `#106`, and personal-agent platform qualification `#113`–`#117`. |
+| `0.3.0` | Next planned desktop feature release ([#130](https://github.com/KnowGuard-AI/HotMem/issues/130) & [#129](https://github.com/KnowGuard-AI/HotMem/issues/129)): complete Daemonite tray/pop-up integration, common memory operations, safe memory swaps, and supported system relay controls. |
 | `1.0.0` | A deliberate commitment to a documented stable public API and compatibility contract. |
 
 The existing `0.2.7` feature/showcase target is retained as an explicit transition
@@ -91,3 +91,22 @@ Product docs, issues, packages, and release notes use HotMem/KnowGuard ownership
 and product language. Private organizational provenance stays out of those
 surfaces. Record actual shipping dependencies and their license obligations.
 The core remains headless and independent of the desktop interface.
+
+## v0.2.7 Release Compatibility Mapping & Known Limits
+
+| Surface / Contract | Version / Identifier | Notes |
+| --- | --- | --- |
+| Core Python package & runtime (`pyproject.toml`, `hotmem.__version__`, `uv.lock`, CLI/daemon) | `0.2.7` | Authoritative product release version for [#112](https://github.com/KnowGuard-AI/HotMem/issues/112) / TECH-18. |
+| TypeScript client (`ts/package.json`) | `@hotmem/client@0.2.4` | Independently versioned; compatible with HotMem `0.2.7` `/v1` HTTP daemon contract. |
+| SQLite store schema | `v7` | Auto-migrates from `v1`–`v6`; adds `store_meta`, `operation_ledger`, namespace-scoped identity (`v6`), and `memory_tombstones` (`v7`). |
+| Memory Record schema | `schema_version: 2` | 27-field inventory (`#99`); reader remains backward-compatible with `schema_version: 1`. |
+| Snapshot v2 manifest & semantic identity | `format_version: 2`, `snapshot_id_version: 2` (`hotmem-snapshot-id-v2`) | Deterministic semantic digest (`#96`); legacy v1 content-hash-list snapshots remain verifiable with explicit compatibility status. |
+| Interchange & handoff packages | `hotmem-interchange-v1`, `hotmem-handoff-v1` | Compatible with `v0.2.5` / `v0.2.6` artifacts. |
+| Replay cursor & session envelope | `hmc1` (`v1`), `hotmem-session-v1` | Single-writer sequential event log (`#94`) and explicit caller/harness/session provenance (`#111`). |
+| Qualified native client surfaces | Claude Code CLI `2.1.292`, OpenAI Codex CLI `0.164.0-alpha.11.1` (`codex exec`) | Verified across both `#125` task sync and `#112` two-harness incident decision recall. |
+
+**Known limits in v0.2.7:**
+
+- Daemon policy enforces caller, namespace, operation, and share-approval isolation across HTTP and MCP relay boundaries; it does not sandbox OS processes running as the same local user with direct filesystem access to the SQLite database, backing files, or `policy.json`.
+- Snapshots, interchange packages, and handoff bundles provide SHA-256 integrity verification and scoped redaction/omission, not encryption or cryptographic signing at rest.
+- Event replay (`hmc1`) targets a single-writer sequential log; automatic multi-writer merge and cross-clone reconciliation remain in `v0.2.8` (`#95` / `#131`).
