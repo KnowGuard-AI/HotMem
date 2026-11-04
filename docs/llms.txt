@@ -15,7 +15,7 @@ provenance, lifecycle events, MCP, and SDK/framework integrations.
 - Vision and Canon: https://docs.knowguardai.com/vision-and-canon/
 - Agent memory portability: https://docs.knowguardai.com/agent-memory-portability/
 - Architecture overview: https://docs.knowguardai.com/architecture/
-- Daemon / JSONL cassette / management UI developer guide (shared daemon planned): https://docs.knowguardai.com/daemon-and-management-ui/
+- Daemon / JSONL cassette / management UI developer guide: https://docs.knowguardai.com/daemon-and-management-ui/
 - Snapshot v2 specification: https://docs.knowguardai.com/snapshot-v2/
 - Session handoff: https://docs.knowguardai.com/handoff/
 - API reference: https://docs.knowguardai.com/api/
@@ -53,11 +53,14 @@ can be captured, verified, transferred, and restored across compatible runtimes.
 JSONL is the canonical interchange language; current shipping capability is
 described separately above.
 
-The v0.2.7 daemon/management UI and showcase direction is tracked by GitHub issue #112. JSONL is
-the owner's memory cassette. A shared daemon with scoped disclosure and a
-detachable management/relay view is planned; it is not a shipped security or
-zero-leakage guarantee. The first proposed proof is two clients collaborating
-on shared operations context while private memory stays inaccessible.
+HotMem v0.2.7 (#112) ships the persistent local daemon (`HotMemRuntime`),
+credential-bound scoped disclosure, explicit session/harness attribution,
+native Claude Code and Codex CLI task synchronization, and the minimal
+detachable CLI/terminal management view (`hotmem status --url` and
+`hotmem playground --url`). JSONL is the owner's memory cassette. Ecosystem
+showcases and graph traversal (`#70`–`#72`, `#95`, `#97`, `#105`, `#106`,
+`#113`–`#117`) are tracked in v0.2.8 (#131), and full Daemonite desktop
+integration is tracked in v0.3.0 (#130).
 
 ## Suggested description
 

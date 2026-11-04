@@ -124,3 +124,83 @@ def test_rich_progress_indeterminate_total_none():
     with r.progress(total=None, desc="reading") as tick:
         tick(1)
         tick(1)
+
+
+def test_plain_status_renders_scoped_daemon_management_view(
+    capsys: pytest.CaptureFixture[str], force_plain
+):
+    payload = {
+        "status": "ok",
+        "memory_count": 2,
+        "db_path": None,
+        "uptime_s": 5.4,
+        "policy_enforced": True,
+        "policy_revision": 3,
+        "store_id": "store-inc-112",
+        "mount_id": "mnt_abc123",
+        "store_state": "ready",
+        "total_memory_count": 3,
+        "runtime_generation": "gen-112",
+        "observed_at": "2026-11-04T14:00:00+00:00",
+        "freshness_model": "poll_and_event_observed",
+        "permission_state": {
+            "caller_id": "caller-mgmt",
+            "is_management": True,
+            "revoked": False,
+            "namespaces": ["ops/shared"],
+            "operations": ["read"],
+            "active_share_approvals": [
+                {
+                    "approval_id": "share-inc-112",
+                    "namespace": "ops/shared",
+                    "identifiers": ["ops/incident-112/decision"],
+                    "operations": ["read"],
+                    "audience": ["caller-b"],
+                }
+            ],
+            "active_caller_ids": ["caller-a", "caller-b", "caller-mgmt"],
+            "revoked_caller_ids": ["caller-old"],
+            "revoked_share_approvals": ["share-expired"],
+        },
+        "observed_clients": [
+            {
+                "caller_id": "caller-a",
+                "harness_id": "codex-cli",
+                "session_id": "sess-codex-1",
+                "source": "mcp://codex-a",
+                "namespace": "ops/shared",
+                "last_event_seq": 2,
+                "last_event_type": "memory.created",
+                "last_observed_at": "2026-11-04T13:59:59+00:00",
+                "observed_event_count": 2,
+                "observation_basis": "recorded_events",
+            }
+        ],
+        "recent_activity": {
+            "observation_basis": "recorded_events",
+            "latest_seq": 2,
+            "count": 1,
+            "events": [
+                {
+                    "seq": 2,
+                    "event_type": "memory.created",
+                    "identifier": "ops/incident-112/decision",
+                    "namespace": "ops/shared",
+                    "caller_id": "caller-a",
+                    "harness_id": "codex-cli",
+                    "session_id": "sess-codex-1",
+                }
+            ],
+        },
+    }
+    ui.get_renderer().status(payload)
+    out = capsys.readouterr().out
+    assert "Connection: connected (freshness=poll_and_event_observed" in out
+    assert "Store: store-inc-112 (mount_id=mnt_abc123, state=ready, generation=gen-112)" in out
+    assert "Total memory count: 3" in out
+    assert "Permissions: caller=caller-mgmt management=True policy_revision=3" in out
+    assert "Policy state: active_callers=[caller-a, caller-b, caller-mgmt]" in out
+    assert "Observed clients (observation_basis=recorded_events):" in out
+    assert "caller=caller-a harness=codex-cli session=sess-codex-1" in out
+    assert "Permitted activity (observation_basis=recorded_events, latest_seq=2):" in out
+    assert "seq=2 memory.created id=ops/incident-112/decision" in out

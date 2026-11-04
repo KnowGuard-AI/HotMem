@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -513,6 +514,108 @@ class HotMemRuntime:
 
     # ── Operations ───────────────────────────────────────────────────────
 
+    def _build_permission_state(self, ctx: CallerContext) -> dict[str, Any]:
+        """Build the non-secret permission and revocation summary for ``ctx`` (#112)."""
+        cred = ctx.credential
+        is_mgmt = bool(cred is not None and cred.is_management)
+        active_shares: list[dict[str, Any]] = []
+        if cred is not None:
+            for sa in cred.share_approvals:
+                if sa.revoked:
+                    continue
+                active_shares.append(
+                    {
+                        "approval_id": sa.approval_id,
+                        "namespace": sa.namespace,
+                        "identifiers": list(sa.identifiers),
+                        "operations": list(sa.operations),
+                        "audience": list(sa.audience),
+                    }
+                )
+        state: dict[str, Any] = {
+            "caller_id": ctx.caller_id,
+            "is_management": is_mgmt,
+            "revoked": bool(cred is not None and cred.revoked),
+            "namespaces": list(cred.namespaces) if cred is not None else [],
+            "operations": list(cred.operations) if cred is not None else [],
+            "allowed_sessions": list(cred.allowed_sessions) if cred is not None else [],
+            "allowed_harnesses": list(cred.allowed_harnesses) if cred is not None else [],
+            "allowed_sources": list(cred.allowed_sources) if cred is not None else [],
+            "active_share_approvals": active_shares,
+        }
+        if is_mgmt:
+            active_callers: list[str] = []
+            revoked_callers: set[str] = set()
+            revoked_shares: set[str] = set()
+            caller_summaries: list[dict[str, Any]] = []
+            for item in self.policy.credentials:
+                is_rev = bool(item.revoked)
+                if is_rev:
+                    revoked_callers.add(item.caller_id)
+                else:
+                    active_callers.append(item.caller_id)
+                for sa in item.share_approvals:
+                    if sa.revoked:
+                        revoked_shares.add(sa.approval_id)
+                caller_summaries.append(
+                    {
+                        "caller_id": item.caller_id,
+                        "is_management": bool(item.is_management),
+                        "revoked": is_rev,
+                        "namespaces": list(item.namespaces),
+                        "operations": list(item.operations),
+                        "allowed_sessions": list(item.allowed_sessions),
+                        "allowed_harnesses": list(item.allowed_harnesses),
+                        "allowed_sources": list(item.allowed_sources),
+                        "share_approval_ids": [
+                            sa.approval_id for sa in item.share_approvals if not sa.revoked
+                        ],
+                    }
+                )
+            state["credential_count"] = len(self.policy.credentials)
+            state["active_caller_ids"] = sorted(active_callers)
+            state["revoked_caller_ids"] = sorted(revoked_callers)
+            state["revoked_share_approvals"] = sorted(revoked_shares)
+            state["caller_permissions"] = caller_summaries
+        return state
+
+    @staticmethod
+    def _extract_event_attribution(ev: dict[str, Any]) -> dict[str, Any]:
+        """Extract normalized client/session attribution from a sanitized event."""
+        payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+        prov_raw = payload.get("provenance_json") or payload.get("provenance")
+        prov = (
+            _safe_json(prov_raw, {})
+            if isinstance(prov_raw, str)
+            else (prov_raw if isinstance(prov_raw, dict) else {})
+        )
+        if not isinstance(prov, dict):
+            prov = {}
+        caller_id = str(
+            payload.get("caller_id") or payload.get("actor") or prov.get("caller_id") or ""
+        )
+        harness_id = str(payload.get("harness_id") or prov.get("harness_id") or "")
+        session_id = str(payload.get("session_id") or prov.get("session_id") or "")
+        source = str(payload.get("source") or prov.get("source") or "")
+        namespace = str(
+            ev.get("namespace") or payload.get("namespace") or prov.get("namespace") or ""
+        )
+        identifier = str(payload.get("identifier") or "")
+        occurred_at = str(ev.get("occurred_at") or payload.get("created_at") or "")
+        return {
+            "seq": int(ev.get("seq") or 0),
+            "event_id": str(ev.get("event_id") or ""),
+            "event_type": str(ev.get("event_type") or ""),
+            "memory_id": str(ev.get("memory_id") or payload.get("id") or ""),
+            "identifier": identifier,
+            "namespace": namespace,
+            "caller_id": caller_id,
+            "harness_id": harness_id,
+            "session_id": session_id,
+            "source": source,
+            "occurred_at": occurred_at,
+        }
+
     def health(self, ctx: CallerContext) -> dict[str, Any]:
         ctx.require_operation("read")
         descriptor = self.embedder.descriptor
@@ -538,6 +641,13 @@ class HotMemRuntime:
                         continue
                 visible_rows = disclosed_visible
             visible_count = len(visible_rows)
+            permitted_events, latest_seq = self._collect_permitted_events(
+                ctx,
+                db,
+                limit=50,
+                order="desc",
+                ignore_fail_closed=True,
+            )
         if total_count == 0:
             store_state = "verified_empty"
         elif visible_count == 0:
@@ -545,6 +655,45 @@ class HotMemRuntime:
             store_state = "empty_scope"
         else:
             store_state = "ready"
+
+        recent_summaries = [self._extract_event_attribution(ev) for ev in permitted_events[:10]]
+        latest_permitted_seq = max(
+            (int(ev["seq"]) for ev in permitted_events if ev.get("seq") is not None),
+            default=None,
+        )
+        clients_by_key: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+        for ev in permitted_events:
+            attr = self._extract_event_attribution(ev)
+            has_identity = any(
+                (attr["caller_id"], attr["harness_id"], attr["session_id"], attr["source"])
+            )
+            if not has_identity:
+                continue
+            key = (
+                attr["caller_id"],
+                attr["harness_id"],
+                attr["session_id"],
+                attr["source"],
+                attr["namespace"],
+            )
+            existing = clients_by_key.get(key)
+            if existing is None:
+                clients_by_key[key] = {
+                    "caller_id": attr["caller_id"],
+                    "harness_id": attr["harness_id"],
+                    "session_id": attr["session_id"],
+                    "source": attr["source"],
+                    "namespace": attr["namespace"],
+                    "last_event_seq": attr["seq"],
+                    "last_event_type": attr["event_type"],
+                    "last_observed_at": attr["occurred_at"],
+                    "observed_event_count": 1,
+                    "observation_basis": "recorded_events",
+                }
+            else:
+                existing["observed_event_count"] += 1
+
+        observed_at = datetime.now(UTC).isoformat()
         return {
             "status": "ok",
             "memory_count": visible_count,
@@ -553,6 +702,7 @@ class HotMemRuntime:
             "uptime_s": round(time.time() - self.start_time, 1),
             "embedding": {"model": descriptor.key, "dim": descriptor.dimension},
             "store_id": self.store_id,
+            "mount_id": self.mount_id,
             "store_state": store_state,
             "total_memory_count": (
                 total_count if ctx.credential is not None and ctx.credential.is_management else 0
@@ -560,6 +710,16 @@ class HotMemRuntime:
             "runtime_generation": self.runtime_generation,
             "policy_enforced": True,
             "policy_revision": self.policy.revision,
+            "observed_at": observed_at,
+            "freshness_model": "poll_and_event_observed",
+            "permission_state": self._build_permission_state(ctx),
+            "observed_clients": list(clients_by_key.values()),
+            "recent_activity": {
+                "observation_basis": "recorded_events",
+                "latest_seq": latest_permitted_seq,
+                "count": len(recent_summaries),
+                "events": recent_summaries,
+            },
         }
 
     def add(
@@ -1707,6 +1867,159 @@ class HotMemRuntime:
             out["warnings"] = sanitized_warnings
         return out
 
+    def _collect_permitted_events(
+        self,
+        ctx: CallerContext,
+        db: MemoryDB,
+        *,
+        memory_id: str | None = None,
+        namespace: str | None = None,
+        event_type: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        after_seq: int | None = None,
+        before_seq: int | None = None,
+        limit: int = 100,
+        order: str = "asc",
+        ignore_fail_closed: bool = False,
+    ) -> tuple[list[dict[str, Any]], int | None]:
+        """Scan and sanitize events permitted for ``ctx``."""
+        filtered_events: list[dict[str, Any]] = []
+        scan_after = after_seq
+        scan_before = before_seq
+        last_scanned_seq: int | None = None
+        max_scan_pages = 50
+        for _ in range(max_scan_pages):
+            listing = query_events(
+                db,
+                memory_id=memory_id,
+                namespace=namespace,
+                event_type=event_type,
+                since=since,
+                until=until,
+                after_seq=scan_after,
+                before_seq=scan_before,
+                limit=limit,
+                ascending=(order == "asc"),
+            )
+            page = listing["events"]
+            if not page:
+                break
+            page_ids = [
+                str(ev.get("memory_id") or (ev.get("payload") or {}).get("id") or "") for ev in page
+            ]
+            page_meta = db.get_memories(page_ids)
+            page_tombstones = db.get_tombstones(page_ids)
+            for ev in page:
+                last_scanned_seq = int(ev["seq"])
+                ev_ns = str(ev.get("namespace") or "")
+                payload = dict(ev.get("payload") or {})
+                ev_mid = str(ev.get("memory_id") or payload.get("id") or "")
+                tomb_row = page_tombstones.get(ev_mid) if ev_mid else None
+                row_probe = {
+                    "id": ev_mid,
+                    "identifier": payload.get("identifier")
+                    or (tomb_row.get("identifier") if tomb_row else "")
+                    or "",
+                    "namespace": ev_ns
+                    or str(payload.get("namespace") or "")
+                    or (str(tomb_row.get("namespace") or "") if tomb_row else ""),
+                }
+                if not ctx.can_access_row(row_probe, operation="read"):
+                    continue
+                mem_row = page_meta.get(ev_mid) if ev_mid else None
+                payload_tags_raw = payload.get("tags")
+                payload_tags_str = (
+                    json.dumps(payload_tags_raw)
+                    if isinstance(payload_tags_raw, list)
+                    else (payload_tags_raw or "[]")
+                )
+                tomb_metadata = tomb_row.get("metadata_json") if tomb_row else None
+                tomb_tags = tomb_row.get("tags") if tomb_row else None
+                payload_probe = {
+                    **row_probe,
+                    "metadata_json": payload.get("metadata_json") or tomb_metadata or "{}",
+                    "tags": (payload_tags_str if "tags" in payload else (tomb_tags or "[]")),
+                    "provenance_json": payload.get("provenance_json"),
+                }
+                probe = mem_row if mem_row is not None else payload_probe
+                try:
+                    disclosed_probe = ctx.apply_disclosure_to_row(probe, operation="read")
+                    if disclosed_probe is None:
+                        continue
+                    disclosed_payload_probe = (
+                        ctx.apply_disclosure_to_row(payload_probe, operation="read")
+                        if mem_row is not None
+                        else disclosed_probe
+                    )
+                except PolicyError:
+                    if ignore_fail_closed:
+                        continue
+                    raise
+                if disclosed_payload_probe is None:
+                    continue
+                # Strip raw embedding blobs and full fact_text from the
+                # daemon activity stream.
+                sanitized_payload = dict(payload)
+                sanitized_payload.pop("embedding_b64", None)
+                sanitized_payload.pop("fact_text", None)
+                probe_for_payload = (
+                    disclosed_payload_probe
+                    if ev.get("event_type") == EventType.MEMORY_DEDUPLICATED
+                    else disclosed_probe
+                )
+                for key in (
+                    "identifier",
+                    "metadata_json",
+                    "provenance_json",
+                    "tags",
+                    "fact_summary",
+                    "parent_memory",
+                    "related_memories",
+                ):
+                    if key in sanitized_payload and key in probe_for_payload:
+                        val = probe_for_payload[key]
+                        if (
+                            key == "tags"
+                            and isinstance(payload.get("tags"), list)
+                            and isinstance(val, str)
+                        ):
+                            val = _safe_json(val, [])
+                        sanitized_payload[key] = val
+                secret_action, _ = ctx.effective_disclosure_actions(probe, operation="read")
+                if secret_action != "allow":
+                    redacted_payload, hits = redact_structure(sanitized_payload)
+                    if hits:
+                        patterns = sorted({p for p, _ in hits})
+                        if secret_action == "fail_closed":
+                            if ignore_fail_closed:
+                                continue
+                            raise PolicyError(
+                                403,
+                                "policy_disclosure_blocked",
+                                "policy blocked disclosure of secret/PII "
+                                f"pattern(s) in event {ev.get('seq')!r}",
+                                detail={"reason": "secret_detected", "patterns": patterns},
+                            )
+                        if secret_action == "omit":
+                            continue
+                        sanitized_payload = redacted_payload
+                for path_key in ("source_uri", "path", "root"):
+                    if path_key in sanitized_payload and ctx.redact_host_paths_enabled:
+                        sanitized_payload[path_key] = ctx.sanitize_source_uri(
+                            sanitized_payload.get(path_key), base_dir=self.base_dir
+                        )
+                filtered_events.append({**ev, "payload": sanitized_payload})
+            if len(filtered_events) >= limit or len(page) < limit:
+                break
+            if order == "asc":
+                scan_after = last_scanned_seq
+            else:
+                scan_before = last_scanned_seq
+        if len(filtered_events) > limit:
+            filtered_events = filtered_events[:limit]
+        return filtered_events, last_scanned_seq
+
     def list_events(
         self,
         ctx: CallerContext,
@@ -1753,135 +2066,19 @@ class HotMemRuntime:
             # advance over *scanned* events (not just visible ones), otherwise
             # a page full of another scope's events would look like the end of
             # the stream and visible events after it would never be returned.
-            filtered_events: list[dict[str, Any]] = []
-            scan_after = after_seq
-            scan_before = before_seq
-            last_scanned_seq: int | None = None
-            max_scan_pages = 50
-            for _ in range(max_scan_pages):
-                listing = query_events(
-                    db,
-                    memory_id=memory_id,
-                    namespace=namespace,
-                    event_type=event_type,
-                    since=since,
-                    until=until,
-                    after_seq=scan_after,
-                    before_seq=scan_before,
-                    limit=limit,
-                    ascending=(order == "asc"),
-                )
-                page = listing["events"]
-                if not page:
-                    break
-                page_ids = [
-                    str(ev.get("memory_id") or (ev.get("payload") or {}).get("id") or "")
-                    for ev in page
-                ]
-                page_meta = db.get_memories(page_ids)
-                page_tombstones = db.get_tombstones(page_ids)
-                for ev in page:
-                    last_scanned_seq = int(ev["seq"])
-                    ev_ns = str(ev.get("namespace") or "")
-                    payload = dict(ev.get("payload") or {})
-                    ev_mid = str(ev.get("memory_id") or payload.get("id") or "")
-                    tomb_row = page_tombstones.get(ev_mid) if ev_mid else None
-                    row_probe = {
-                        "id": ev_mid,
-                        "identifier": payload.get("identifier")
-                        or (tomb_row.get("identifier") if tomb_row else "")
-                        or "",
-                        "namespace": ev_ns
-                        or str(payload.get("namespace") or "")
-                        or (str(tomb_row.get("namespace") or "") if tomb_row else ""),
-                    }
-                    if not ctx.can_access_row(row_probe, operation="read"):
-                        continue
-                    mem_row = page_meta.get(ev_mid) if ev_mid else None
-                    payload_tags_raw = payload.get("tags")
-                    payload_tags_str = (
-                        json.dumps(payload_tags_raw)
-                        if isinstance(payload_tags_raw, list)
-                        else (payload_tags_raw or "[]")
-                    )
-                    tomb_metadata = tomb_row.get("metadata_json") if tomb_row else None
-                    tomb_tags = tomb_row.get("tags") if tomb_row else None
-                    payload_probe = {
-                        **row_probe,
-                        "metadata_json": payload.get("metadata_json") or tomb_metadata or "{}",
-                        "tags": (payload_tags_str if "tags" in payload else (tomb_tags or "[]")),
-                        "provenance_json": payload.get("provenance_json"),
-                    }
-                    probe = mem_row if mem_row is not None else payload_probe
-                    disclosed_probe = ctx.apply_disclosure_to_row(probe, operation="read")
-                    if disclosed_probe is None:
-                        continue
-                    disclosed_payload_probe = (
-                        ctx.apply_disclosure_to_row(payload_probe, operation="read")
-                        if mem_row is not None
-                        else disclosed_probe
-                    )
-                    if disclosed_payload_probe is None:
-                        continue
-                    # Strip raw embedding blobs and full fact_text from the
-                    # daemon activity stream.
-                    sanitized_payload = dict(payload)
-                    sanitized_payload.pop("embedding_b64", None)
-                    sanitized_payload.pop("fact_text", None)
-                    probe_for_payload = (
-                        disclosed_payload_probe
-                        if ev.get("event_type") == EventType.MEMORY_DEDUPLICATED
-                        else disclosed_probe
-                    )
-                    for key in (
-                        "identifier",
-                        "metadata_json",
-                        "provenance_json",
-                        "tags",
-                        "fact_summary",
-                        "parent_memory",
-                        "related_memories",
-                    ):
-                        if key in sanitized_payload and key in probe_for_payload:
-                            val = probe_for_payload[key]
-                            if (
-                                key == "tags"
-                                and isinstance(payload.get("tags"), list)
-                                and isinstance(val, str)
-                            ):
-                                val = _safe_json(val, [])
-                            sanitized_payload[key] = val
-                    secret_action, _ = ctx.effective_disclosure_actions(probe, operation="read")
-                    if secret_action != "allow":
-                        redacted_payload, hits = redact_structure(sanitized_payload)
-                        if hits:
-                            patterns = sorted({p for p, _ in hits})
-                            if secret_action == "fail_closed":
-                                raise PolicyError(
-                                    403,
-                                    "policy_disclosure_blocked",
-                                    "policy blocked disclosure of secret/PII "
-                                    f"pattern(s) in event {ev.get('seq')!r}",
-                                    detail={"reason": "secret_detected", "patterns": patterns},
-                                )
-                            if secret_action == "omit":
-                                continue
-                            sanitized_payload = redacted_payload
-                    for path_key in ("source_uri", "path", "root"):
-                        if path_key in sanitized_payload and ctx.redact_host_paths_enabled:
-                            sanitized_payload[path_key] = ctx.sanitize_source_uri(
-                                sanitized_payload.get(path_key), base_dir=self.base_dir
-                            )
-                    filtered_events.append({**ev, "payload": sanitized_payload})
-                if len(filtered_events) >= limit or len(page) < limit:
-                    break
-                if order == "asc":
-                    scan_after = last_scanned_seq
-                else:
-                    scan_before = last_scanned_seq
-            if len(filtered_events) > limit:
-                filtered_events = filtered_events[:limit]
-            next_seq = last_scanned_seq
+            filtered_events, next_seq = self._collect_permitted_events(
+                ctx,
+                db,
+                memory_id=memory_id,
+                namespace=namespace,
+                event_type=event_type,
+                since=since,
+                until=until,
+                after_seq=after_seq,
+                before_seq=before_seq,
+                limit=limit,
+                order=order,
+            )
         return {
             "events": filtered_events,
             "count": len(filtered_events),

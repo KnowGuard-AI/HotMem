@@ -78,6 +78,84 @@ class PlainRenderer(Renderer):
         for key in _STATUS_KEYS:
             if key in data:
                 click.echo(f"{key.replace('_', ' ').title()}: {data[key]}")
+        if not (data.get("policy_enforced") or "store_id" in data):
+            return
+
+        conn_state = data.get("connection_state", "connected")
+        freshness = data.get("freshness_model", "poll_and_event_observed")
+        observed_at = data.get("observed_at", "?")
+        click.echo(f"Connection: {conn_state} (freshness={freshness}, observed_at={observed_at})")
+        click.echo(
+            f"Store: {data.get('store_id', '?')} "
+            f"(mount_id={data.get('mount_id', '?')}, state={data.get('store_state', '?')}, "
+            f"generation={data.get('runtime_generation', '?')})"
+        )
+        perms = data.get("permission_state")
+        if isinstance(perms, dict):
+            is_mgmt = bool(perms.get("is_management"))
+            if is_mgmt:
+                click.echo(f"Total memory count: {data.get('total_memory_count', 0)}")
+            ns_list = ", ".join(perms.get("namespaces") or []) or "(none)"
+            op_list = ", ".join(perms.get("operations") or []) or "(none)"
+            shares = perms.get("active_share_approvals") or []
+            share_ids = (
+                ", ".join(str(s.get("approval_id", "")) for s in shares if isinstance(s, dict))
+                or "(none)"
+            )
+            click.echo(
+                f"Permissions: caller={perms.get('caller_id', '?')} "
+                f"management={is_mgmt} policy_revision={data.get('policy_revision', '?')} "
+                f"namespaces=[{ns_list}] operations=[{op_list}] shares=[{share_ids}]"
+            )
+            if is_mgmt:
+                active_callers = ", ".join(perms.get("active_caller_ids") or []) or "(none)"
+                revoked_callers = ", ".join(perms.get("revoked_caller_ids") or []) or "(none)"
+                revoked_shares = ", ".join(perms.get("revoked_share_approvals") or []) or "(none)"
+                click.echo(
+                    f"Policy state: active_callers=[{active_callers}] "
+                    f"revoked_callers=[{revoked_callers}] revoked_shares=[{revoked_shares}]"
+                )
+
+        clients = data.get("observed_clients")
+        if isinstance(clients, list):
+            click.echo("Observed clients (observation_basis=recorded_events):")
+            if not clients:
+                click.echo("  (none observed in permitted scope)")
+            for c in clients:
+                if not isinstance(c, dict):
+                    continue
+                click.echo(
+                    f"  - caller={c.get('caller_id') or '-'} "
+                    f"harness={c.get('harness_id') or '-'} "
+                    f"session={c.get('session_id') or '-'} "
+                    f"source={c.get('source') or '-'} "
+                    f"ns={c.get('namespace') or '-'} "
+                    f"last_seq={c.get('last_event_seq', '?')} "
+                    f"({c.get('last_event_type', '?')}) "
+                    f"events={c.get('observed_event_count', 0)}"
+                )
+
+        activity = data.get("recent_activity")
+        if isinstance(activity, dict):
+            ev_list = activity.get("events") or []
+            click.echo(
+                "Permitted activity "
+                f"(observation_basis={activity.get('observation_basis', 'recorded_events')}, "
+                f"latest_seq={activity.get('latest_seq')}):"
+            )
+            if not ev_list:
+                click.echo("  (no permitted events)")
+            for ev in ev_list:
+                if not isinstance(ev, dict):
+                    continue
+                click.echo(
+                    f"  - seq={ev.get('seq')} {ev.get('event_type')} "
+                    f"id={ev.get('identifier') or ev.get('memory_id') or '-'} "
+                    f"ns={ev.get('namespace') or '-'} "
+                    f"caller={ev.get('caller_id') or '-'} "
+                    f"harness={ev.get('harness_id') or '-'} "
+                    f"session={ev.get('session_id') or '-'}"
+                )
 
     def search_results(self, rows: list[dict[str, Any]]) -> None:
         if not rows:

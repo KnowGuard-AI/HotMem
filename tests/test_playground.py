@@ -54,3 +54,73 @@ def test_run_playground_rejects_both_db_and_url(tmp_path):
 
     with pytest.raises(ValueError, match="not both"):
         run_playground(db_path=_fresh_db(tmp_path), url="http://localhost:8711")
+
+
+def test_http_backend_disconnect_and_reconnect_state_machine(monkeypatch):
+    import httpx
+
+    from hotmem.playground import _HttpBackend
+
+    backend = _HttpBackend(
+        "http://127.0.0.1:8711",
+        token="tok-mgmt",
+        session_id="sess-mgmt",
+        harness_id="hotmem-console",
+        source="ui://mgmt",
+        expected_store_id="store-112",
+    )
+    try:
+        responses = [
+            {
+                "status": "ok",
+                "memory_count": 1,
+                "store_id": "store-112",
+                "mount_id": "mnt_112",
+                "store_state": "ready",
+                "runtime_generation": "gen-1",
+                "policy_enforced": True,
+                "policy_revision": 1,
+                "observed_at": "2026-11-04T14:00:00+00:00",
+                "freshness_model": "poll_and_event_observed",
+            },
+            httpx.ConnectError("connection refused"),
+            {
+                "status": "ok",
+                "memory_count": 1,
+                "store_id": "store-112",
+                "mount_id": "mnt_112",
+                "store_state": "ready",
+                "runtime_generation": "gen-2",
+                "policy_enforced": True,
+                "policy_revision": 1,
+                "observed_at": "2026-11-04T14:00:05+00:00",
+                "freshness_model": "poll_and_event_observed",
+            },
+        ]
+
+        def fake_health():
+            item = responses.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        monkeypatch.setattr(backend._client, "health", fake_health)
+
+        snap1 = backend.status_snapshot()
+        assert snap1["connection_state"] == "connected"
+        assert snap1["generation_changed"] is False
+
+        snap_disc = backend.status_snapshot()
+        assert snap_disc["connection_state"] == "disconnected"
+        assert snap_disc["status"] == "disconnected"
+        assert snap_disc["store_id"] == "store-112"
+        assert snap_disc["runtime_generation"] == "gen-1"
+        assert snap_disc["stale_age_s"] is not None
+        assert "ConnectError" in snap_disc["last_error"]
+
+        snap_rec = backend.status_snapshot()
+        assert snap_rec["connection_state"] == "reconnected"
+        assert snap_rec["generation_changed"] is True
+        assert snap_rec["runtime_generation"] == "gen-2"
+    finally:
+        backend.close()

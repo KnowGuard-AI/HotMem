@@ -6,7 +6,56 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-### Changed (snapshot identity, contract)
+## [0.2.7] - 2026-11-04
+
+### Added
+
+- **Persistent shared daemon & multi-client routing (#109, #112):**
+  `HotMemRuntime`, exclusive single-writer `StoreLock` with automatic stale-lock
+  recovery, and unified `--url` / `HOTMEM_URL` routing across CLI, MCP
+  (`hotmem mcp --url`), Python SDK (`HotMemClient` / `AsyncHotMemClient`), and
+  TypeScript SDK (`@hotmem/client`).
+- **Scoped runtime disclosure & policy management (#110):**
+  Credential-bound namespace/operation/`ShareApproval` authorization, pre-ranking
+  candidate filtering with exact post-filter ANN fallback, secret/PII and
+  classification disclosure controls (`allow` / `redact` / `omit` /
+  `fail_closed`), host-path redaction, and runtime revocation/reload
+  (`POST /v1/policy/revoke`, `POST /v1/policy/reload`, `hotmem policy revoke|reload`).
+- **Explicit session/harness attribution & canonical tags (#111):**
+  `hotmem-session-v1` provenance envelope (`caller_id`, `harness_id`,
+  `session_id`, `source`, `namespace`, `store_id`), canonical `tags`
+  (`model:*`, `project:*`, `org:*`), writer attribution preservation on recall
+  and deduplication, and scoped activity events (`GET /v1/events`).
+- **Minimal detachable management interface (#112):**
+  Scoped service, store, client, permitted activity, and permission state in
+  `GET /v1/health` (policy mode), `hotmem status --url` (`--json`), and
+  `hotmem playground --url` with stdlib terminal fallback, truthful poll/event
+  freshness (`poll_and_event_observed`, `recorded_events`), authorized operations
+  (`hygiene`, `search`, `revoke`, `reload`), disconnect/reconnect tracking with
+  `runtime_generation` rotation detection, and close/reopen lifecycle independence.
+- **Native Claude Code & Codex CLI task synchronization (#125 / TECH-20):**
+  `hotmem task-sync --adapter claude-code|codex` lifecycle hooks, deterministic
+  `list_memories` MCP tool and `GET /v1/memories` exact-identifier recall,
+  cross-process `seq` tie-break ordering, and durable hook outbox
+  (`task-sync-outbox.jsonl`) with idempotent replay.
+- **Portable mount identity & replay cursors (#94):**
+  Distinct `mount_id`, `replica_id`, `history_id`, `runtime_generation`, and
+  `store_id` contracts with opaque `hmc1` v1 replay cursor verification
+  (`base_snapshot_mismatch`, `history_mismatch`, `cursor_out_of_range`,
+  `history_truncated`).
+- **Replay-safe state mutations & tombstones (#98):**
+  `memory.updated`, `memory.deleted`, and `memory.forgotten` events, durable
+  `memory_tombstones` table (store schema v7), idempotent replay, and read-side
+  non-mutation invariance across `search`, `get_memory`, and `hydrate`.
+- **Complete Memory Record v2 portable state (#99) & namespace-safe identity (#100):**
+  27-field `MEMORY_FIELD_INVENTORY` (`preserve` vs. `derived`/`local_only`)
+  round-trip across Snapshot v2 and interchange packages, and namespace-scoped
+  logical identity `(namespace, content_hash)` (store schema v6).
+- **MCP snapshot/hydrate dispatch & Windows qualification (#121):**
+  Shared Snapshot v2 and JSONL/JSONL.GZ format dispatch across CLI/HTTP/MCP and
+  built-wheel Windows lifecycle qualification.
+
+### Changed (snapshot identity & daemon contracts)
 
 - Snapshot v2 `snapshot_id` is now a canonical semantic digest
   (`snapshot_id_version: 2`, `hotmem-snapshot-id-v2`) over the 27 portable
@@ -19,21 +68,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
   declared `state_fingerprint` is verified even without a replay cursor.
   `hmc1` v1 cursors are unchanged, and clone bindings persist the base
   snapshot's semantic scope so lineage comparison reproduces v2 ids.
-
-### Security
-
-- Daemon mode authenticates before disclosing the store id, and scoped
-  callers no longer receive other namespaces' records, counts, diagnostics,
-  events, or absolute store paths (#109, #110).
-- Hydration is namespace-scoped and fails closed before any write; daemon
-  filesystem paths (`snapshot`, `hydrate`, `handoff *`, `discover`) are
-  confined to the base directory; SQLite artifacts are rejected through the
-  HTTP boundary (#109).
-- Request-body `source` attribution can no longer impersonate another
-  caller's bound source (#111).
-
-### Changed (daemon mode, contract)
-
 - Policy-enforced writes now require `X-HotMem-Session-Id`
   (`400 session_required`).
 - Out-of-scope memory ids return `404` (never `403`), removing an existence
@@ -50,33 +84,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 - `/v1/events` cursors advance over invisible events instead of ending the
   stream.
 
-### Added
+### Security
 
-- Runtime policy management: `POST /v1/policy/revoke`,
-  `POST /v1/policy/reload`, and `hotmem policy revoke|reload`.
-- `hotmem handoff prepare|verify|inspect --url` daemon routing.
-- Per-thread read-only WAL connections so reads never observe uncommitted
-  writes and slow writes/exports do not block health or basic reads.
-- 19 regression tests covering the daemon review findings.
-- Store schema v6: `store_meta`, `operation_ledger`, and namespace-scoped
-  content identity (automatic, fail-closed migration).
+- Daemon mode authenticates before disclosing the store id, and scoped
+  callers no longer receive other namespaces' records, counts, diagnostics,
+  events, or absolute store paths (#109, #110).
+- Hydration is namespace-scoped and fails closed before any write; daemon
+  filesystem paths (`snapshot`, `hydrate`, `handoff *`, `discover`) are
+  confined to the base directory; SQLite artifacts are rejected through the
+  HTTP boundary (#109).
+- Request-body `source` attribution can no longer impersonate another
+  caller's bound source (#111).
 
 ### Fixed
 
 - Decode percent-encoded local file URIs so spaces, Unicode, and literal
   percent signs round-trip through file-backed reads and checksums (#121).
-- Synchronize the editable root-package version in `uv.lock` with 0.2.6 (#121).
+- Synchronize the editable root-package version in `uv.lock` with the release
+  version (#121, #112).
 - Preserve checksummed source fixtures on Windows Git checkouts and make
   fixture encoding/newline/path expectations explicit (#121).
-
-### Added
-
-- MCP snapshot/hydrate format dispatch shared with CLI/HTTP, including
-  verified Snapshot v2 directories alongside legacy JSONL/JSONL.GZ (#121).
-- Native Windows built-wheel qualification and real CLI/HTTP/MCP lifecycle,
-  persistence, corrupt-restore rejection, provenance, and cleanup tests (#121).
-- PowerShell and absolute-path Windows MCP setup with explicit support limits
-  and a distinction between the candidate and published 0.2.6 package (#121).
 
 ## [0.2.6] - 2026-10-21
 
