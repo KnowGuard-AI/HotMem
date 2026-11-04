@@ -59,7 +59,7 @@ def _stop_proc(proc: subprocess.Popen) -> None:
 
 
 @contextmanager
-def _daemon(mount: Path, *, store_id: str = "store-mmvt7"):
+def _daemon(mount: Path, *, store_id: str = "store-mmvt7", token: str = "tok-a"):
     port = _reserve_port()
     log_path = mount.parent / f"daemon_mmvt7_{port}.log"
     with log_path.open("w+b") as log:
@@ -80,7 +80,7 @@ def _daemon(mount: Path, *, store_id: str = "store-mmvt7"):
         )
         url = f"http://127.0.0.1:{port}"
         try:
-            with HotMemClient(url, token="tok-a", expected_store_id=store_id) as probe:
+            with HotMemClient(url, token=token, expected_store_id=store_id) as probe:
                 deadline = time.monotonic() + 15.0
                 while True:
                     if proc.poll() is not None or time.monotonic() > deadline:
@@ -632,3 +632,352 @@ def test_mmvt7_real_detachable_management_interface_close_reopen_and_actions(tmp
         assert priv_res["memory_id"] not in ui_out_2
     finally:
         _stop_proc(proc)
+
+
+def test_mmvt7_two_harness_mcp_incident_decision_and_full_route_isolation(tmp_path: Path):
+    """Exercise #112 Row 9 (Acceptance Items 2 & 3):
+    - Harness A (codex-cli) writes an approved sanitized shared rollback decision with
+      canonical tags (`model:*`, `project:*`, `org:*`), a follow-up with empty optional `tags=[]`,
+      and a private investigation canary through the MCP relay (`create_mcp_server(url=...)`).
+    - Harness B (claude-code) recalls the shared decision via MCP `search_memories` and
+      `list_memories` with writer `harness_id`, `session_id`, `caller_id`, `source`, `tags`,
+      and `provenance` preserved separately from reader context.
+    - Private canary is isolated across all exposed routes, diagnostics, events, and logs.
+    - Missing/mismatched/revoked credentials and spoofed session/harness/source/caller context
+      fail clearly.
+    """
+    import asyncio
+    from contextlib import asynccontextmanager
+    from datetime import timedelta
+
+    import httpx
+    import pytest
+
+    pytest.importorskip("mcp", reason="requires [mcp] extra")
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    mount = tmp_path / "inc112_mount"
+    mount.mkdir()
+    store_id = "store-incident-112"
+    policy = PolicyConfig(
+        store_id=store_id,
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-codex-a",
+                caller_id="caller-a",
+                store_id=store_id,
+                namespaces=("ops/shared", "ops/private"),
+                operations=("read", "write", "export", "hydrate"),
+                allowed_sessions=("sess-codex-inc112-a",),
+                allowed_harnesses=("codex-cli",),
+                allowed_sources=("mcp://codex-a",),
+            ),
+            CallerCredential.from_token(
+                token="tok-claude-b",
+                caller_id="caller-b",
+                store_id=store_id,
+                namespaces=("ops/b",),
+                operations=("read", "write"),
+                allowed_sessions=("sess-claude-inc112-b",),
+                allowed_harnesses=("claude-code",),
+                allowed_sources=("mcp://claude-b",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-inc-112-decision",
+                        namespace="ops/shared",
+                        identifiers=("ops/incident-112/rollback-decision",),
+                        audience=("caller-b",),
+                        operations=("read",),
+                    ),
+                ),
+            ),
+            CallerCredential.from_token(
+                token="tok-mgmt-112",
+                caller_id="caller-mgmt",
+                store_id=store_id,
+                namespaces=("ops/shared",),
+                operations=("read",),
+                is_management=True,
+            ),
+        ],
+    )
+    policy.save(mount / "policy.json")
+
+    canary_fact = "PRIVATE-CANARY-INC112: internal root-cause credential rotation trace 9f8e7d6c"
+    canary_secret = "9f8e7d6c"
+    decision_fact = (
+        "Approved rollback decision INC-112: revert checkout-worker to build 2026.10.30-rc1 "
+        "and drain shard-02 queue before re-enabling webhook consumers."
+    )
+    executable = _installed_cli()[0]
+
+    @asynccontextmanager
+    async def _mcp_relay(
+        url: str,
+        *,
+        token: str,
+        session_id: str,
+        harness_id: str,
+        source: str,
+    ):
+        params = StdioServerParameters(
+            command=executable,
+            args=[
+                "mcp",
+                "--url",
+                url,
+                "--token",
+                token,
+                "--session",
+                session_id,
+                "--harness",
+                harness_id,
+                "--source",
+                source,
+                "--store-id",
+                store_id,
+            ],
+        )
+        err_log_path = tmp_path / f"mcp_{session_id}.err"
+        with err_log_path.open("w", encoding="utf-8") as errlog:
+            async with (
+                stdio_client(params, errlog=errlog) as (read, write),
+                ClientSession(read, write, read_timeout_seconds=timedelta(seconds=10)) as session,
+            ):
+                await session.initialize()
+                yield session
+
+    with _daemon(mount, store_id=store_id, token="tok-codex-a") as url:
+
+        async def _run_mcp_flow():
+            async with _mcp_relay(
+                url,
+                token="tok-codex-a",
+                session_id="sess-codex-inc112-a",
+                harness_id="codex-cli",
+                source="mcp://codex-a",
+            ) as codex_sess:
+                r1 = await codex_sess.call_tool(
+                    "add_memory",
+                    {
+                        "identifier": "ops/incident-112/private-canary",
+                        "namespace": "ops/private",
+                        "fact": canary_fact,
+                        "metadata": {"classification": "private"},
+                        "importance": 0.95,
+                    },
+                )
+                r2 = await codex_sess.call_tool(
+                    "add_memory",
+                    {
+                        "identifier": "ops/incident-112/rollback-decision",
+                        "namespace": "ops/shared",
+                        "fact": decision_fact,
+                        "tags": ["model:gpt-6.1-sol", "project:hotmem-ops", "org:knowguard"],
+                        "importance": 0.9,
+                    },
+                )
+                r3 = await codex_sess.call_tool(
+                    "add_memory",
+                    {
+                        "identifier": "ops/incident-112/rollback-decision",
+                        "namespace": "ops/shared",
+                        "fact": (
+                            "INC-112 status: shard-02 queue drained; empty optional tags valid."
+                        ),
+                        "tags": [],
+                        "importance": 0.8,
+                    },
+                )
+
+            async with _mcp_relay(
+                url,
+                token="tok-claude-b",
+                session_id="sess-claude-inc112-b",
+                harness_id="claude-code",
+                source="mcp://claude-b",
+            ) as claude_sess:
+                l_sh = await claude_sess.call_tool(
+                    "list_memories",
+                    {"identifier": "ops/incident-112/rollback-decision"},
+                )
+                s_sh = await claude_sess.call_tool(
+                    "search_memories",
+                    {"query": "revert checkout-worker build 2026.10.30-rc1", "top_k": 5},
+                )
+                l_ca = await claude_sess.call_tool(
+                    "list_memories",
+                    {"identifier": "ops/incident-112/private-canary"},
+                )
+                s_ca = await claude_sess.call_tool(
+                    "search_memories",
+                    {"query": "PRIVATE-CANARY-INC112", "top_k": 5},
+                )
+
+            return (
+                json.loads(r1.content[0].text),
+                json.loads(r2.content[0].text),
+                json.loads(r3.content[0].text),
+                json.loads(l_sh.content[0].text),
+                json.loads(s_sh.content[0].text),
+                json.loads(l_ca.content[0].text),
+                json.loads(s_ca.content[0].text),
+            )
+
+        (
+            priv_res,
+            shared_res,
+            empty_tag_res,
+            list_shared,
+            search_shared,
+            list_canary,
+            search_canary,
+        ) = asyncio.run(_run_mcp_flow())
+
+        canary_id = priv_res["memory_id"]
+        shared_id = shared_res["memory_id"]
+        empty_tag_id = empty_tag_res["memory_id"]
+
+        # 1. Verify Claude recalls the shared decisions with Writer A's provenance & tags intact
+        assert list_shared["count"] == 2
+        by_id = {m.get("memory_id") or m["id"]: m for m in list_shared["memories"]}
+        rec_decision = by_id[shared_id]
+        assert (rec_decision.get("content") or rec_decision["fact_text"]) == decision_fact
+        assert rec_decision["tags"] == [
+            "model:gpt-6.1-sol",
+            "project:hotmem-ops",
+            "org:knowguard",
+        ]
+        assert rec_decision["provenance"]["caller_id"] == "caller-a"
+        assert rec_decision["provenance"]["harness_id"] == "codex-cli"
+        assert rec_decision["provenance"]["session_id"] == "sess-codex-inc112-a"
+        assert rec_decision["provenance"]["source"] == "mcp://codex-a"
+        assert rec_decision["provenance"]["namespace"] == "ops/shared"
+        assert rec_decision["provenance"]["store_id"] == store_id
+        # Empty optional tags remain valid
+        assert by_id[empty_tag_id]["tags"] == []
+
+        assert search_shared["count"] >= 1
+        assert search_shared["memories"][0]["memory_id"] == shared_id
+        assert search_shared["memories"][0]["provenance"]["harness_id"] == "codex-cli"
+        assert search_shared["memories"][0]["provenance"]["session_id"] == "sess-codex-inc112-a"
+
+        # 2. Verify private canary is absent from Claude MCP responses
+        assert list_canary["count"] == 0
+        assert canary_id not in json.dumps(list_canary)
+        assert canary_secret not in json.dumps(list_canary)
+        assert canary_id not in json.dumps(search_canary)
+        assert canary_secret not in json.dumps(search_canary)
+
+        # 3. Verify authentication, spoofed context, management authority, and route isolation
+        hdr_b = {
+            "Authorization": "Bearer tok-claude-b",
+            "X-HotMem-Store-Id": store_id,
+            "X-HotMem-Harness-Id": "claude-code",
+            "X-HotMem-Session-Id": "sess-claude-inc112-b",
+            "X-HotMem-Source": "mcp://claude-b",
+        }
+        with httpx.Client(base_url=url, timeout=10.0) as raw:
+            # Missing / invalid credentials / wrong store
+            assert raw.get("/v1/health").status_code == 401
+            assert (
+                raw.get("/v1/health", headers={"Authorization": "Bearer bad-token"}).json()["error"]
+                == "invalid_credential"
+            )
+            assert (
+                raw.get(
+                    "/v1/health",
+                    headers={**hdr_b, "X-HotMem-Store-Id": "wrong-store"},
+                ).json()["error"]
+                == "store_mismatch"
+            )
+            # Spoofed session, harness, source, and caller_id fail clearly
+            assert (
+                raw.get(
+                    "/v1/health",
+                    headers={**hdr_b, "X-HotMem-Session-Id": "sess-codex-inc112-a"},
+                ).json()["error"]
+                == "session_impersonation_denied"
+            )
+            assert (
+                raw.get(
+                    "/v1/health",
+                    headers={**hdr_b, "X-HotMem-Harness-Id": "codex-cli"},
+                ).json()["error"]
+                == "session_impersonation_denied"
+            )
+            assert (
+                raw.get(
+                    "/v1/health",
+                    headers={**hdr_b, "X-HotMem-Source": "mcp://codex-a"},
+                ).json()["error"]
+                == "session_impersonation_denied"
+            )
+            assert (
+                raw.get(
+                    "/v1/health",
+                    headers={**hdr_b, "X-HotMem-Caller-Id": "caller-a"},
+                ).json()["error"]
+                == "session_impersonation_denied"
+            )
+
+            # Route-by-route negative isolation for Client B against canary_id
+            assert raw.get(f"/v1/memory/{canary_id}", headers=hdr_b).status_code == 404
+            assert (
+                raw.post(f"/v1/memory/{canary_id}/hydrate", headers=hdr_b, json={}).status_code
+                == 404
+            )
+            batch = raw.post(
+                "/v1/memory/hydrate-batch",
+                headers=hdr_b,
+                json={"memory_ids": [canary_id, shared_id]},
+            ).json()
+            assert batch["results"][0] == {"memory_id": canary_id, "error": "not_found"}
+            assert batch["results"][1]["memory_id"] == shared_id
+            assert canary_secret not in json.dumps(batch)
+            assert (
+                raw.post(f"/v1/memory/{canary_id}/candidate", headers=hdr_b, json={}).status_code
+                == 403
+            )
+            assert (
+                raw.post(
+                    f"/v1/memory/{canary_id}/promote",
+                    headers=hdr_b,
+                    json={"to_state": "READY"},
+                ).status_code
+                == 403
+            )
+            assert raw.post("/v1/snapshot", headers=hdr_b, json={}).status_code == 403
+            assert (
+                raw.post(
+                    "/v1/hydrate", headers=hdr_b, json={"namespace": "ops/private"}
+                ).status_code
+                == 403
+            )
+            assert raw.get("/v1/bundles", headers=hdr_b).status_code == 403
+            assert (
+                raw.post("/v1/discover", headers=hdr_b, json={"root": str(mount)}).status_code
+                == 403
+            )
+            assert (
+                raw.post("/v1/policy/revoke", headers=hdr_b, json={"caller_id": "caller-a"}).json()[
+                    "error"
+                ]
+                == "management_authority_required"
+            )
+            assert (
+                raw.post("/v1/policy/reload", headers=hdr_b, json={}).json()["error"]
+                == "management_authority_required"
+            )
+            ev_b = raw.get("/v1/events", headers=hdr_b).json()
+            assert ev_b["count"] == 2
+            assert canary_id not in json.dumps(ev_b)
+            assert canary_secret not in json.dumps(ev_b)
+            health_b = raw.get("/v1/health", headers=hdr_b).json()
+            assert health_b["memory_count"] == 2
+            assert health_b["total_memory_count"] == 0
+            assert health_b["recent_activity"]["latest_seq"] == 3
+            assert canary_id not in json.dumps(health_b)
+            assert canary_secret not in json.dumps(health_b)

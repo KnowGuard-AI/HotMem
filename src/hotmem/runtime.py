@@ -657,6 +657,10 @@ class HotMemRuntime:
             store_state = "ready"
 
         recent_summaries = [self._extract_event_attribution(ev) for ev in permitted_events[:10]]
+        latest_permitted_seq = max(
+            (int(ev["seq"]) for ev in permitted_events if ev.get("seq") is not None),
+            default=None,
+        )
         clients_by_key: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
         for ev in permitted_events:
             attr = self._extract_event_attribution(ev)
@@ -712,7 +716,7 @@ class HotMemRuntime:
             "observed_clients": list(clients_by_key.values()),
             "recent_activity": {
                 "observation_basis": "recorded_events",
-                "latest_seq": latest_seq,
+                "latest_seq": latest_permitted_seq,
                 "count": len(recent_summaries),
                 "events": recent_summaries,
             },
