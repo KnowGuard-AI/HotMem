@@ -887,47 +887,77 @@ Begin with these existing code boundaries, inspected on 2026-10-21 at
 | [`cli.py`](https://github.com/KnowGuard-AI/HotMem/blob/c6ed9ae60bf9ee21320ede63c4357d7cb34c1633/src/hotmem/cli.py) | Explicit store/endpoint selection and direct-database compatibility paths. |
 | [`search.py`](https://github.com/KnowGuard-AI/HotMem/blob/c6ed9ae60bf9ee21320ede63c4357d7cb34c1633/src/hotmem/search.py) | Hybrid retrieval/stored importance; runtime scoping and access-driven scoring are not established here. |
 
-Host setup is tracked in [#109](https://github.com/KnowGuard-AI/HotMem/issues/109),
-export privacy in [#110](https://github.com/KnowGuard-AI/HotMem/issues/110), and
-session context in [#111](https://github.com/KnowGuard-AI/HotMem/issues/111).
+Host setup is delivered in [#109](https://github.com/KnowGuard-AI/HotMem/issues/109) ([PR #124](https://github.com/KnowGuard-AI/HotMem/pull/124)),
+scoped runtime disclosure and export privacy in [#110](https://github.com/KnowGuard-AI/HotMem/issues/110) ([PR #126](https://github.com/KnowGuard-AI/HotMem/pull/126)),
+session/harness attribution and canonical `tags` in [#111](https://github.com/KnowGuard-AI/HotMem/issues/111) ([PR #132](https://github.com/KnowGuard-AI/HotMem/pull/132)),
+and Codex/Claude native task synchronization and real-client discovery in [#125](https://github.com/KnowGuard-AI/HotMem/issues/125) / TECH-20 ([PR #133](https://github.com/KnowGuard-AI/HotMem/pull/133)).
 Portable mount identity and opaque `hmc1` replay cursors are delivered in
-[#94](https://github.com/KnowGuard-AI/HotMem/issues/94) (`mount_id` logical
+[#94](https://github.com/KnowGuard-AI/HotMem/issues/94) ([PR #136](https://github.com/KnowGuard-AI/HotMem/pull/136)) (`mount_id` logical
 workspace identity vs. `replica_id` runtime SQLite instance vs. `history_id`
 event-log epoch vs. `runtime_generation` process lifespan vs. `store_id` daemon
 routing; multi-writer ordering and conflict resolution remain intentionally
 undefined). Canonical semantic Snapshot v2 identity (`snapshot_id_version: 2`,
 `hotmem-snapshot-id-v2` over all 27 `#99` `preserve` columns, attachment
 references, and semantic namespace scope, with explicit v1 legacy compatibility)
-is delivered in [#96](https://github.com/KnowGuard-AI/HotMem/issues/96).
-Portable-state acceptance continues across
-[#95](https://github.com/KnowGuard-AI/HotMem/issues/95),
-[#97](https://github.com/KnowGuard-AI/HotMem/issues/97),
-[#98](https://github.com/KnowGuard-AI/HotMem/issues/98),
-[#99](https://github.com/KnowGuard-AI/HotMem/issues/99), and
-[#100](https://github.com/KnowGuard-AI/HotMem/issues/100).
+is delivered in [#96](https://github.com/KnowGuard-AI/HotMem/issues/96) ([PR #137](https://github.com/KnowGuard-AI/HotMem/pull/137)).
+Replay-safe state mutations (`memory.updated`) and tombstones (`memory.deleted`,
+`memory.forgotten`) are delivered in [#98](https://github.com/KnowGuard-AI/HotMem/issues/98) ([PR #139](https://github.com/KnowGuard-AI/HotMem/pull/139)),
+Memory Record v2 round-trip fidelity in [#99](https://github.com/KnowGuard-AI/HotMem/issues/99) ([PR #135](https://github.com/KnowGuard-AI/HotMem/pull/135)),
+and namespace-safe logical identity in [#100](https://github.com/KnowGuard-AI/HotMem/issues/100) ([PR #134](https://github.com/KnowGuard-AI/HotMem/pull/134)).
 
-The shared release target is **v0.2.7**: the portable-state foundation, secure
-shared service, minimal management/detachable relay, relationship traversal,
-and the platform showcase/qualification tracks all use that release number.
-The first executable slice remains the local two-client incident workflow;
-the other release deliverables follow in independent slices. The
-[Hermes showcase #70](https://github.com/KnowGuard-AI/HotMem/issues/70),
-[OpenClaw boundary #71](https://github.com/KnowGuard-AI/HotMem/issues/71) and
-[showcase #72](https://github.com/KnowGuard-AI/HotMem/issues/72),
-[walk #105](https://github.com/KnowGuard-AI/HotMem/issues/105),
-[deep map #106](https://github.com/KnowGuard-AI/HotMem/issues/106), and
-[platform roadmap #113 with children #114–#117](https://github.com/KnowGuard-AI/HotMem/issues/113)
-are included in the v0.2.7 release plan. Their tests and acceptance remain
-pending; sharing a release target does not make them prerequisites for the
-first local experiment. Broader remote and overmind features remain product
-direction unless a linked ticket explicitly defines their delivery.
+**Release milestone boundaries:**
 
-The published v0.2.6 Windows correction remains the current runtime baseline.
-This guide and the v0.2.7 milestone describe upcoming work, not a package
-publication or evidence that those features have shipped.
+- **v0.2.7 ([#112](https://github.com/KnowGuard-AI/HotMem/issues/112) / Linear TECH-18):** Ships the owned-memory core and local collaboration foundation (#94, #96, #98, #99, #100, #109, #110, #111, #125), the minimal detachable management interface (`hotmem status --url` and `hotmem playground --url`), the two-harness incident decision workflow, and the integrated two-client performance/responsiveness baseline.
+- **v0.2.8 ([#131](https://github.com/KnowGuard-AI/HotMem/issues/131)):** Holds the showcase, ecosystem, and follow-up portable-clone/traversal scope: [Hermes showcase #70](https://github.com/KnowGuard-AI/HotMem/issues/70), [OpenClaw boundary #71](https://github.com/KnowGuard-AI/HotMem/issues/71) and [showcase #72](https://github.com/KnowGuard-AI/HotMem/issues/72), [portable clone reconciliation #95](https://github.com/KnowGuard-AI/HotMem/issues/95), [public-language audit #97](https://github.com/KnowGuard-AI/HotMem/issues/97), [`memory_walk` #105](https://github.com/KnowGuard-AI/HotMem/issues/105), [`memory_map` #106](https://github.com/KnowGuard-AI/HotMem/issues/106), and [personal-agent platform roadmap #113 with children #114–#117](https://github.com/KnowGuard-AI/HotMem/issues/113).
+- **v0.3.0 ([#130](https://github.com/KnowGuard-AI/HotMem/issues/130) & [#129](https://github.com/KnowGuard-AI/HotMem/issues/129)):** Holds the full Daemonite desktop application (Tauri 2/Rust tray shell, interactive memory management, safe swaps, and automated desktop release packaging).
 
-The remaining choices are specific: the first credential/scope model, supported
-service-manager/platform combination, measured latency/resource budgets,
-detachable UI packaging, and the next remote collaboration boundary. Resolve
-them through working slices and recorded results. This guide preserves the
-2026-10-21 product decisions; it does not complete those implementation tickets.
+---
+
+## Integrated v0.2.7 Acceptance Evidence (#112 / TECH-18)
+
+### 1. Minimal Management / Detachable Interface (Row 8)
+
+HotMem v0.2.7 provides a zero-dependency CLI/terminal detachable management view through `hotmem status --url ...` (`src/hotmem/ui.py`, `src/hotmem/cli.py`) and `hotmem playground --url ...` (`src/hotmem/playground.py`), backed by policy-enforced `GET /v1/health` and `GET /v1/events` (`src/hotmem/runtime.py`):
+
+- **Service, store, client, permitted activity, and permission state:**
+  - `GET /v1/health` (when `policy_enforced=True`) returns `store_id`, `mount_id`, `store_state` (`verified_empty` | `empty_scope` | `ready`), `runtime_generation`, `policy_revision`, `observed_at`, `freshness_model: "poll_and_event_observed"`, `permission_state` (caller identity, `is_management`, permitted `namespaces`, `operations`, `active_share_approvals`, plus non-secret `active_caller_ids`, `revoked_caller_ids`, and `revoked_share_approvals` for management callers), `observed_clients` (`observation_basis: "recorded_events"`), and `recent_activity` (`observation_basis: "recorded_events"`, `latest_seq`, `events`). Unauthenticated `/v1/health` keeps its 5-key golden contract unchanged.
+- **Truthful freshness & disconnect/reconnect:**
+  - The detachable console explicitly reports poll- and event-observed state (`freshness_model: "poll_and_event_observed"`, `observation_basis: "recorded_events"`) and never claims unobserved live client presence.
+  - When the daemon becomes unreachable, `_HttpBackend.status_snapshot()` transitions `connection_state` to `"disconnected"` while preserving `last_connected_at`, `stale_age_s`, `store_id`, `runtime_generation`, and `last_error`. When the daemon returns, the console transitions to `"reconnected"` and surfaces `generation_changed=True` if `runtime_generation` rotated.
+- **Authorized operations & close/reopen lifecycle independence:**
+  - Operators can run `status`/`refresh`, `events`, `hygiene` (`GET /v1/hygiene`), `search`, `add`, `revoke caller <id>`, `revoke approval <id>` (`POST /v1/policy/revoke`), and `reload` (`POST /v1/policy/reload`) through the daemon.
+  - Closing (`quit`) and reopening the console process has zero effect on the running daemon or active agent sessions (`tests/test_daemon_mmvt7_e2e.py::test_mmvt7_real_detachable_management_interface_close_reopen_and_actions`).
+
+### 2. Explicit Two-Harness Incident Scenario (Row 9)
+
+Verified across both automated MCP stdio relay subprocess tests (`tests/test_daemon_mmvt7_e2e.py::test_mmvt7_two_harness_mcp_incident_decision_and_full_route_isolation`) and a live two-harness execution on macOS (`darwin` arm64) against disposable mount `store-incident-112` (`mount_id: mnt-33cc41f17e3e4f33a1ddae273fb39f47`):
+
+- **Client A (Writer):** OpenAI Codex CLI `codex-cli 0.164.0-alpha.11.1` (`codex exec --json`), native conversation `thread_id: 01a1a6f4-ed49-7683-acdd-a529395e4a42`, connected via `hotmem mcp --url ... --token tok-codex-a --harness codex-cli --session sess-codex-inc112-a --source mcp://codex-a --store-id store-incident-112`:
+  1. Wrote private investigation canary `ops/incident-112/private-canary` (`memory_id: 67c40aefbb5c417892e5001df67b51d5`, `namespace: ops/private`, `metadata: {"classification": "private"}`, server `trace_ms: 1.33`).
+  2. Wrote approved sanitized shared rollback decision `ops/incident-112/rollback-decision` (`memory_id: 0dbe324c798a469383631b0f684adb78`, `namespace: ops/shared`, `tags: ["model:gpt-6.1-sol", "project:hotmem-ops", "org:knowguard"]`, server `trace_ms: 0.65`).
+- **Client B (Reader):** Anthropic Claude Code CLI `2.1.292 (Claude Code)` (`claude -p --output-format json`), native conversation `session_id: 35c8fac4-710a-4350-91e0-647f560d3e42`, connected via `hotmem mcp --url ... --token tok-claude-b --harness claude-code --session sess-claude-inc112-b --source mcp://claude-b --store-id store-incident-112` with `ShareApproval(approval_id="share-inc-112-decision", namespace="ops/shared", identifiers=("ops/incident-112/rollback-decision",), audience=("caller-b",), operations=("read",))`:
+  1. Recalled `0dbe324c798a469383631b0f684adb78` via `mcp__hotmem__list_memories` and `mcp__hotmem__search_memories`, visibly preserving Writer A's `provenance` (`caller_id: "caller-a"`, `harness_id: "codex-cli"`, `session_id: "sess-codex-inc112-a"`, `source: "mcp://codex-a"`, `namespace: "ops/shared"`, `store_id: "store-incident-112"`) and `tags` (`["model:gpt-6.1-sol", "project:hotmem-ops", "org:knowguard"]`) distinct from Reader B's context.
+  2. Verified `0` hits and zero disclosure of `67c40aefbb5c417892e5001df67b51d5` / `PRIVATE-CANARY-INC112` across MCP `search_memories`, `list_memories`, and all 28 HTTP routes (`GET /v1/memory/{id}` -> `404`, `POST /v1/memory/{id}/hydrate` -> `404`, `POST /v1/memory/hydrate-batch` -> `not_found`, `POST /v1/snapshot` -> `403`, `POST /v1/hydrate` -> `403`, `GET /v1/events`, `GET /v1/health`, `GET /v1/hygiene`, `GET /v1/vector-index/status`, `GET /v1/promotion/by-state`, `GET /v1/bundles` -> `403`, `POST /v1/discover` -> `403`, `POST /v1/policy/revoke` -> `403`).
+- **Native vs. adapter session identity boundary:**
+  - Lifecycle hooks (`hotmem task-sync --adapter claude-code` and `--adapter codex` in #125) receive the host's native `session_id` directly in the hook stdin JSON payload.
+  - Standard MCP stdio tool calls do not automatically include the host's internal conversation UUID unless passed in tool arguments (`session_id`) or configured per session on the relay (`hotmem mcp --session <id>`). Setting `--session` per client relay keeps conversation identities distinct and auditable while `allowed_sessions` / `allowed_harnesses` / `allowed_sources` reject spoofing (`403 session_impersonation_denied`).
+  - `model:*`, `project:*`, and `org:*` use canonical `tags` only; no dedicated schema columns were added, and empty optional `tags: []` remain valid.
+
+### 3. Integrated Confidence, Portability, and Two-Client Baseline (Row 10)
+
+- **Lifecycle, abrupt-stop (`SIGKILL`), and retry attribution (`test_mmvt7_integrated_incident_lifecycle_retry_and_portable_restore`):**
+  - Acknowledged writes (inline shared decision + file-backed runbook + private canary) and `mount_id` survive both graceful daemon restart (`SIGTERM`) and abrupt termination (`SIGKILL`) with automatic stale-lock recovery.
+  - Ambiguous retries via `X-HotMem-Idempotency-Key` and same-namespace content hash return the existing `memory_id`, preserve Writer A's original `provenance` and `tags`, and emit `memory.deduplicated` activity without duplicating logical records.
+- **Portable export and clean restore (#94, #96, #98, #99, #100, #110, #111):**
+  - Scoped `POST /v1/snapshot` exports only permitted records (`exported_count: 2`, `omitted_count: 1` for the private canary, with zero canary bytes on disk), records `snapshot_id_version: 2` (`hotmem-snapshot-id-v2`), `mount_id`, `replay_cursor` (`hmc1.*`), and `file_backed_references` (`source_checksum`).
+  - Restoring into a separate clean daemon store (`store-clean-restore-112`) preserves logical identity, writer `provenance`, `tags`, and file-backed hydration; repeat hydration is idempotent (`loaded: 0`, `skipped_dupes: 2`).
+- **Repeated two-client latency & resource baseline (`bench/daemon/run_mmvt6_baseline.py`, 2026-11-04 on `a1ac7e8` + #112 branch):**
+  - **Setup:** macOS `darwin` arm64, Python `3.12`, SQLite WAL, `hotmem-hash-v1` (384-dim), 20 seeded memories (10 shared in `ops/shared`, 10 private in `ops/private`), 2 concurrent client contexts (`caller-a` and `caller-b`), 3 warmups + 25 measured searches per client (**50 measured reads per mode**):
+
+| Path | Samples | Wall p50 (ms) | Wall p95 (ms) | Wall Mean (ms) | Server `trace_ms` p50 | Server `trace_ms` p95 | Approx. Loopback Transport Delta p50 / p95 (ms) | Avg Payload (bytes) | Process CPU (s) | Daemon RSS (MB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Direct `HotMemRuntime` (in-process) | 50 | 0.568 | 0.894 | 0.616 | 0.560 | 0.880 | — | 2,451.5 | 0.0317 | — |
+| Pooled Loopback HTTP (`HotMemClient`) | 50 | 1.872 | 2.312 | 1.880 | 0.750 | 1.010 | +1.164 / +1.382 | 2,289.6 | 0.0913 | 70.8 |
+
+  - **Responsiveness under slow write contention (`tests/test_daemon_mmvt6_responsiveness.py`):** While a slow write holds `_write_slot` for `350 ms`, concurrent `GET /v1/health` and `POST /v1/search` reads complete in `< 200 ms`, and write-queue saturation returns bounded `503 write_queue_saturated` without wedging the server.
+  - **Relationship to TECH-20 (#125) measurements:** TECH-20 measured single-run CLI hook capture (`claude-code` hook `51.66–60.25 ms`, `codex` hook `52.14 ms`, server `POST /v1/add` `0.81–2.07 ms`) and end-to-end LLM turn wall times (`6.22–15.46 s`, dominated by remote model inference). Those TECH-20 measurements are cited only for hook/turn behavior; the 50-sample table above is the canonical #112 repeated two-client daemon baseline. No synthetic numeric performance gate or telemetry framework is introduced.

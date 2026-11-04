@@ -325,7 +325,14 @@ def test_mmvt7_dynamic_revocation_unavailable_store_and_route_audit(tmp_path: Pa
 
 
 def _start_daemon_on_port(
-    mount: Path, port: int, *, store_id: str = "store-mmvt7"
+    mount: Path,
+    port: int,
+    *,
+    store_id: str = "store-mmvt7",
+    token: str = "tok-a",
+    session_id: str | None = None,
+    harness_id: str | None = None,
+    source: str | None = None,
 ) -> subprocess.Popen:
     proc = subprocess.Popen(
         _installed_cli(
@@ -343,7 +350,14 @@ def _start_daemon_on_port(
         stderr=subprocess.DEVNULL,
     )
     url = f"http://127.0.0.1:{port}"
-    with HotMemClient(url, token="tok-a", expected_store_id=store_id) as probe:
+    with HotMemClient(
+        url,
+        token=token,
+        session_id=session_id,
+        harness_id=harness_id,
+        source=source,
+        expected_store_id=store_id,
+    ) as probe:
         deadline = time.monotonic() + 15.0
         while True:
             if proc.poll() is not None or time.monotonic() > deadline:
@@ -981,3 +995,371 @@ def test_mmvt7_two_harness_mcp_incident_decision_and_full_route_isolation(tmp_pa
             assert health_b["recent_activity"]["latest_seq"] == 3
             assert canary_id not in json.dumps(health_b)
             assert canary_secret not in json.dumps(health_b)
+
+
+def test_mmvt7_integrated_incident_lifecycle_retry_and_portable_restore(tmp_path: Path):
+    """Exercise #112 Row 10 (Acceptance Items 1, 5, 6) across integrated layers:
+    - Graceful restart and bounded abrupt stop (`SIGKILL`) preserve acknowledged writes
+      and #94 `mount_id`.
+    - Ambiguous retries (`idempotency_key` and same-namespace content hash) do not duplicate
+      logical memories or corrupt Writer A (`codex-cli`) provenance or tags, and record
+      `memory.deduplicated` activity.
+    - Scoped Snapshot v2 / interchange package export (`POST /v1/snapshot`) preserves
+      #96 semantic `snapshot_id` (`hotmem-snapshot-id-v2`), #99 Record v2 fields,
+      omission count (`omitted_count == 1`), and backing-file dependency declarations.
+    - Clean-store restore (`POST /v1/hydrate`) preserves logical identity, writer provenance,
+      context, and tags for Reader B (`claude-code`), and repeat hydration is idempotent.
+    """
+    import hashlib
+    import signal
+
+    import httpx
+
+    from hotmem.snapshot import verify as verify_snapshot
+
+    mount = tmp_path / "inc112_lifecycle_mount"
+    mount.mkdir()
+    store_id = "store-incident-112"
+
+    # Backing file inside mount for the shared incident runbook attachment
+    runbook_file = mount / "runbooks" / "inc112_rollback_steps.md"
+    runbook_file.parent.mkdir(parents=True, exist_ok=True)
+    runbook_bytes = (
+        b"# INC-112 Rollback Runbook\n"
+        b"1. Revert checkout-worker to 2026.10.30-rc1.\n"
+        b"2. Drain shard-02 queue.\n"
+    )
+    runbook_file.write_bytes(runbook_bytes)
+    runbook_sha = hashlib.sha256(runbook_bytes).hexdigest()
+
+    policy = PolicyConfig(
+        store_id=store_id,
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-codex-a",
+                caller_id="caller-a",
+                store_id=store_id,
+                namespaces=("ops/shared", "ops/private"),
+                operations=("read", "write", "export", "hydrate"),
+                allowed_sessions=("sess-codex-inc112-a", "sess-codex-retry"),
+                allowed_harnesses=("codex-cli",),
+                allowed_sources=("mcp://codex-a",),
+                allow_attachments=True,
+            ),
+            CallerCredential.from_token(
+                token="tok-claude-b",
+                caller_id="caller-b",
+                store_id=store_id,
+                namespaces=("ops/b",),
+                operations=("read", "write"),
+                allowed_sessions=("sess-claude-inc112-b",),
+                allowed_harnesses=("claude-code",),
+                allowed_sources=("mcp://claude-b",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-inc-112-all",
+                        namespace="ops/shared",
+                        identifiers=(
+                            "ops/incident-112/rollback-decision",
+                            "ops/incident-112/runbook",
+                        ),
+                        audience=("caller-b",),
+                        operations=("read",),
+                    ),
+                ),
+            ),
+        ],
+    )
+    policy.save(mount / "policy.json")
+
+    port = _reserve_port()
+    url = f"http://127.0.0.1:{port}"
+    canary_fact = "PRIVATE-CANARY-INC112: internal root-cause credential rotation trace 9f8e7d6c"
+    decision_fact = (
+        "Approved rollback decision INC-112: revert checkout-worker to build 2026.10.30-rc1 "
+        "and drain shard-02 queue before re-enabling webhook consumers."
+    )
+
+    def _boot() -> subprocess.Popen:
+        return _start_daemon_on_port(
+            mount,
+            port,
+            store_id=store_id,
+            token="tok-codex-a",
+            session_id="sess-codex-inc112-a",
+            harness_id="codex-cli",
+            source="mcp://codex-a",
+        )
+
+    proc = _boot()
+    try:
+        with (
+            HotMemClient(
+                url,
+                token="tok-codex-a",
+                session_id="sess-codex-inc112-a",
+                harness_id="codex-cli",
+                source="mcp://codex-a",
+                namespace="ops/shared",
+                expected_store_id=store_id,
+            ) as codex_shared,
+            HotMemClient(
+                url,
+                token="tok-codex-a",
+                session_id="sess-codex-inc112-a",
+                harness_id="codex-cli",
+                source="mcp://codex-a",
+                namespace="ops/private",
+                expected_store_id=store_id,
+            ) as codex_priv,
+        ):
+            h1 = codex_shared.health()
+            mount_id_1 = h1["mount_id"]
+            gen_1 = h1["runtime_generation"]
+
+            shared_res = codex_shared.add(
+                "ops/incident-112/rollback-decision",
+                decision_fact,
+                importance=0.9,
+                tags=["model:gpt-6.1-sol", "project:hotmem-ops", "org:knowguard"],
+                idempotency_key="idem-inc112-decision-1",
+            )
+            runbook_resp = codex_shared._client.post(
+                "/v1/add",
+                json={
+                    "identifier": "ops/incident-112/runbook",
+                    "file_uri": "runbooks/inc112_rollback_steps.md",
+                    "byte_offset": 0,
+                    "byte_length": len(runbook_bytes),
+                    "source_format": "md",
+                    "source_checksum": runbook_sha,
+                    "summary": "INC-112 rollback runbook steps",
+                    "importance": 0.85,
+                    "tags": ["model:gpt-6.1-sol", "project:hotmem-ops"],
+                },
+            )
+            runbook_resp.raise_for_status()
+            runbook_res = runbook_resp.json()
+            canary_res = codex_priv.add(
+                "ops/incident-112/private-canary",
+                canary_fact,
+                importance=0.95,
+                metadata={"classification": "private"},
+            )
+
+            # Ambiguous retry 1: exact idempotency_key retry returns same memory_id
+            retry_idem = codex_shared.add(
+                "ops/incident-112/rollback-decision",
+                decision_fact,
+                importance=0.9,
+                tags=["model:gpt-6.1-sol", "project:hotmem-ops", "org:knowguard"],
+                idempotency_key="idem-inc112-decision-1",
+            )
+            assert retry_idem["memory_id"] == shared_res["memory_id"]
+
+            # Ambiguous retry 2: content-hash retry from a second Codex session preserves
+            # original writer provenance/tags and emits memory.deduplicated
+            with HotMemClient(
+                url,
+                token="tok-codex-a",
+                session_id="sess-codex-retry",
+                harness_id="codex-cli",
+                source="mcp://codex-a",
+                namespace="ops/shared",
+                expected_store_id=store_id,
+            ) as codex_retry:
+                retry_hash = codex_retry.add(
+                    "ops/incident-112/rollback-decision",
+                    decision_fact,
+                    importance=0.9,
+                    tags=["model:other-model"],
+                )
+                assert retry_hash["memory_id"] == shared_res["memory_id"]
+
+        # 1. Graceful restart preserves acknowledged writes and mount_id
+        _stop_proc(proc)
+        proc = _boot()
+
+        # 2. Bounded abrupt stop (SIGKILL) + stale lock recovery preserves writes and attribution
+        if hasattr(signal, "SIGKILL"):
+            proc.send_signal(signal.SIGKILL)
+        else:
+            proc.kill()
+        proc.wait(timeout=10.0)
+        proc = _boot()
+
+        snap_dir = mount / "exports" / "inc112_snap_v2"
+        pkg_dir = mount / "exports" / "inc112_pkg"
+        with (
+            HotMemClient(
+                url,
+                token="tok-codex-a",
+                session_id="sess-codex-inc112-a",
+                harness_id="codex-cli",
+                source="mcp://codex-a",
+                namespace="ops/shared",
+                expected_store_id=store_id,
+            ) as codex_after,
+            HotMemClient(
+                url,
+                token="tok-claude-b",
+                session_id="sess-claude-inc112-b",
+                harness_id="claude-code",
+                source="mcp://claude-b",
+                expected_store_id=store_id,
+            ) as claude_b,
+        ):
+            h_after = codex_after.health()
+            assert h_after["mount_id"] == mount_id_1
+            assert h_after["runtime_generation"] != gen_1
+            assert h_after["memory_count"] == 2
+
+            # Verify Reader B sees original Writer A attribution untouched after retries & SIGKILL
+            rec_b = claude_b.get_memory(shared_res["memory_id"])
+            assert rec_b["provenance"]["session_id"] == "sess-codex-inc112-a"
+            assert rec_b["provenance"]["harness_id"] == "codex-cli"
+            assert rec_b["tags"] == [
+                "model:gpt-6.1-sol",
+                "project:hotmem-ops",
+                "org:knowguard",
+            ]
+            ev_b = claude_b.events()
+            ev_types = [e["event_type"] for e in ev_b["events"]]
+            assert "memory.created" in ev_types
+            assert "memory.deduplicated" in ev_types
+
+            # 3. Export scoped Snapshot v2 (copy_attachments=False to surface backing-file dep)
+            #    and interchange package
+            snap_resp = codex_after._client.post(
+                "/v1/snapshot",
+                json={"path": "exports/inc112_snap_v2", "copy_attachments": False},
+            )
+            snap_resp.raise_for_status()
+            snap_out = snap_resp.json()
+            assert snap_out["exported"] == 2
+            manifest_data = json.loads((snap_dir / "manifest.json").read_text(encoding="utf-8"))
+            assert manifest_data["snapshot_id_version"] == 2
+            assert manifest_data["snapshot_id_algorithm"] == "hotmem-snapshot-id-v2"
+            assert len(manifest_data["snapshot_id"]) == 64
+            assert manifest_data["scope"]["exported_count"] == 2
+            assert manifest_data["scope"]["omitted_count"] == 1
+            assert manifest_data["mount_id"] == mount_id_1
+            assert manifest_data["replay_cursor"].startswith("hmc1.")
+            deps = manifest_data["file_backed_references"]
+            assert len(deps) == 1
+            assert deps[0]["source_checksum"] == runbook_sha
+
+            v_res = verify_snapshot(snap_dir)
+            assert v_res["valid"] is True
+            assert v_res["snapshot_id_version"] == 2
+            assert v_res["snapshot_id_algorithm"] == "hotmem-snapshot-id-v2"
+            for f in snap_dir.rglob("*"):
+                if f.is_file():
+                    raw_text = f.read_text(encoding="utf-8", errors="ignore")
+                    assert canary_fact not in raw_text
+                    assert canary_res["memory_id"] not in raw_text
+
+            pkg_resp = codex_after._client.post(
+                "/v1/snapshot",
+                json={
+                    "path": "exports/inc112_pkg",
+                    "package": True,
+                    "copy_attachments": True,
+                },
+            )
+            pkg_resp.raise_for_status()
+            pkg_out = pkg_resp.json()
+            assert pkg_out["exported"] == 2
+            v_pkg = verify_snapshot(pkg_dir)
+            assert v_pkg["valid"] is True
+            assert v_pkg["record_count"] == 2
+    finally:
+        _stop_proc(proc)
+
+    # 4. Restore into a separate clean daemon store and verify provenance, tags,
+    #    backing-file hydration, and repeat-hydration idempotence
+    clean_mount = tmp_path / "clean_restore_mount"
+    clean_mount.mkdir()
+    clean_store_id = "store-clean-restore-112"
+    shutil.copytree(mount / "runbooks", clean_mount / "runbooks")
+    shutil.copytree(snap_dir, clean_mount / "inc112_snap_v2")
+    clean_policy = PolicyConfig(
+        store_id=clean_store_id,
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-a",
+                caller_id="caller-a",
+                store_id=clean_store_id,
+                namespaces=("ops/shared",),
+                operations=("read", "write", "hydrate"),
+                allowed_harnesses=("codex-cli",),
+            ),
+            CallerCredential.from_token(
+                token="tok-b",
+                caller_id="caller-b",
+                store_id=clean_store_id,
+                namespaces=("ops/b",),
+                operations=("read",),
+                allowed_harnesses=("claude-code",),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-restored",
+                        namespace="ops/shared",
+                        identifiers=(
+                            "ops/incident-112/rollback-decision",
+                            "ops/incident-112/runbook",
+                        ),
+                        audience=("caller-b",),
+                        operations=("read",),
+                    ),
+                ),
+            ),
+        ],
+    )
+    clean_policy.save(clean_mount / "policy.json")
+
+    with _daemon(clean_mount, store_id=clean_store_id, token="tok-a") as clean_url:
+        hdr_a_clean = {
+            "Authorization": "Bearer tok-a",
+            "X-HotMem-Store-Id": clean_store_id,
+            "X-HotMem-Harness-Id": "codex-cli",
+            "X-HotMem-Session-Id": "sess-restore",
+            "X-HotMem-Namespace": "ops/shared",
+        }
+        with httpx.Client(base_url=clean_url, headers=hdr_a_clean, timeout=10.0) as ha:
+            hyd_1 = ha.post(
+                "/v1/hydrate",
+                json={"path": "inc112_snap_v2", "namespace": "ops/shared"},
+            ).json()
+            assert hyd_1["loaded"] == 2
+            assert hyd_1["skipped_dupes"] == 0
+
+            # Repeat hydration is idempotent
+            hyd_2 = ha.post(
+                "/v1/hydrate",
+                json={"path": "inc112_snap_v2", "namespace": "ops/shared"},
+            ).json()
+            assert hyd_2["loaded"] == 0
+            assert hyd_2["skipped_dupes"] == 2
+
+        with HotMemClient(
+            clean_url,
+            token="tok-b",
+            session_id="sess-claude-clean",
+            harness_id="claude-code",
+            expected_store_id=clean_store_id,
+        ) as claude_clean:
+            restored_dec = claude_clean.get_memory(shared_res["memory_id"])
+            assert restored_dec["fact_text"] == decision_fact
+            assert restored_dec["provenance"]["caller_id"] == "caller-a"
+            assert restored_dec["provenance"]["harness_id"] == "codex-cli"
+            assert restored_dec["provenance"]["session_id"] == "sess-codex-inc112-a"
+            assert restored_dec["tags"] == [
+                "model:gpt-6.1-sol",
+                "project:hotmem-ops",
+                "org:knowguard",
+            ]
+            hyd_runbook = claude_clean.hydrate_memory(runbook_res["memory_id"]).decode("utf-8")
+            assert "Revert checkout-worker to 2026.10.30-rc1" in hyd_runbook
