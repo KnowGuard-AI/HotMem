@@ -322,3 +322,313 @@ def test_mmvt7_dynamic_revocation_unavailable_store_and_route_audit(tmp_path: Pa
         unavail_resp = client.get("/v1/health", headers=hdr_a)
         assert unavail_resp.status_code == 503
         assert unavail_resp.json()["error"] == "store_unavailable"
+
+
+def _start_daemon_on_port(
+    mount: Path, port: int, *, store_id: str = "store-mmvt7"
+) -> subprocess.Popen:
+    proc = subprocess.Popen(
+        _installed_cli(
+            "serve",
+            "--mount",
+            str(mount),
+            "--port",
+            str(port),
+            "--host",
+            "127.0.0.1",
+            "--store-id",
+            store_id,
+        ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    url = f"http://127.0.0.1:{port}"
+    with HotMemClient(url, token="tok-a", expected_store_id=store_id) as probe:
+        deadline = time.monotonic() + 15.0
+        while True:
+            if proc.poll() is not None or time.monotonic() > deadline:
+                raise AssertionError("daemon failed to start")
+            try:
+                if probe.health().get("status") == "ok":
+                    break
+            except Exception:
+                pass
+            time.sleep(0.05)
+    return proc
+
+
+def test_mmvt7_real_detachable_management_interface_close_reopen_and_actions(tmp_path: Path):
+    """Exercise the real CLI/terminal detachable management view (`hotmem playground` and
+    `hotmem status`) as separate processes against a live daemon (#112 Row 8):
+      - Shows service, store, observed client/session, permitted activity, and permission state
+      - Shows truthful poll/event freshness (`poll_and_event_observed`, `recorded_events`)
+      - Executes authorized operations (`hygiene`, `search`, `revoke approval`, `reload`)
+      - Demonstrates disconnect/reconnect across a daemon stop/start with generation change
+      - Closes (`quit`) and reopens while the daemon and other clients continue working
+      - Never exposes private canary content or identifiers
+    """
+    mount = tmp_path / "ui_mount"
+    mount.mkdir()
+    policy = PolicyConfig(
+        store_id="store-mmvt7",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="tok-a",
+                caller_id="caller-a",
+                store_id="store-mmvt7",
+                namespaces=("ops/shared", "ops/private"),
+                operations=("read", "write", "export", "hydrate", "promote"),
+            ),
+            CallerCredential.from_token(
+                token="tok-b",
+                caller_id="caller-b",
+                store_id="store-mmvt7",
+                namespaces=("ops/b-local",),
+                operations=("read", "write"),
+                share_approvals=(
+                    ShareApproval(
+                        approval_id="share-demo-17",
+                        namespace="ops/shared",
+                        identifiers=("ops/demo-17",),
+                        audience=("caller-b",),
+                        operations=("read",),
+                    ),
+                ),
+            ),
+            CallerCredential.from_token(
+                token="tok-lsd-mgmt",
+                caller_id="caller-lsd-mgmt",
+                store_id="store-mmvt7",
+                namespaces=("ops/shared",),
+                operations=("read",),
+                is_management=True,
+            ),
+        ],
+    )
+    policy.save(mount / "policy.json")
+    port = _reserve_port()
+    url = f"http://127.0.0.1:{port}"
+    canary = "PRIVATE-UI-CANARY-9911: secret token trace"
+    decision = "INC-112 approved rollback: revert payment-worker to v2.14.3."
+
+    proc = _start_daemon_on_port(mount, port, store_id="store-mmvt7")
+    try:
+        with HotMemClient(url, token="tok-a", expected_store_id="store-mmvt7") as probe:
+            gen1 = probe.health()["runtime_generation"]
+
+        with (
+            HotMemClient(
+                url,
+                token="tok-a",
+                session_id="sess-codex-inc",
+                harness_id="codex-cli",
+                source="agent://a",
+                namespace="ops/shared",
+                expected_store_id="store-mmvt7",
+            ) as client_a_shared,
+            HotMemClient(
+                url,
+                token="tok-a",
+                session_id="sess-codex-priv",
+                harness_id="codex-cli",
+                source="agent://a",
+                namespace="ops/private",
+                expected_store_id="store-mmvt7",
+            ) as client_a_priv,
+        ):
+            shared_res = client_a_shared.add(
+                "ops/demo-17",
+                decision,
+                importance=0.9,
+                tags=["model:gpt-6.1-sol", "project:hotmem-ops", "org:knowguard"],
+            )
+            priv_res = client_a_priv.add("ops/canary", canary, importance=0.95)
+
+        # 1. Run `hotmem status --url` as a real CLI process with management credentials
+        status_proc = subprocess.run(
+            _installed_cli(
+                "status",
+                "--url",
+                url,
+                "--token",
+                "tok-lsd-mgmt",
+                "--store-id",
+                "store-mmvt7",
+            ),
+            capture_output=True,
+            text=True,
+            timeout=15.0,
+            check=True,
+        )
+        status_out = status_proc.stdout
+        assert "Connection: connected (freshness=poll_and_event_observed" in status_out
+        assert "Store: store-mmvt7 (" in status_out
+        assert f"generation={gen1})" in status_out
+        assert "Total memory count: 2" in status_out
+        assert "Permissions: caller=caller-lsd-mgmt management=True policy_revision=1" in status_out
+        assert "Observed clients (observation_basis=recorded_events):" in status_out
+        assert "caller=caller-a harness=codex-cli session=sess-codex-inc" in status_out
+        assert "Permitted activity (observation_basis=recorded_events" in status_out
+        assert "ops/demo-17" in status_out
+        assert canary not in status_out
+        assert priv_res["memory_id"] not in status_out
+        assert "sess-codex-priv" not in status_out
+
+        # 2. Launch the real detachable `hotmem playground --url` process, inspect status,
+        #    events, run authorized `hygiene` and `search`, then close (`quit`) while daemon
+        #    and Client B continue working.
+        ui_proc_1 = subprocess.run(
+            _installed_cli(
+                "playground",
+                "--url",
+                url,
+                "--token",
+                "tok-lsd-mgmt",
+                "--store-id",
+                "store-mmvt7",
+                "--session",
+                "sess-lsd-ui-1",
+                "--harness",
+                "hotmem-console",
+                "--source",
+                "ui://lsd",
+            ),
+            input="status\nevents 10\nhygiene\nsearch rollback\nquit\n",
+            capture_output=True,
+            text=True,
+            timeout=20.0,
+            check=True,
+        )
+        ui_out_1 = ui_proc_1.stdout
+        assert "Service, Store & Permission State" in ui_out_1
+        assert "Freshness: poll_and_event_observed" in ui_out_1
+        assert "Store ID: store-mmvt7" in ui_out_1
+        assert "Caller: caller-lsd-mgmt | Management: True" in ui_out_1
+        assert "Observed Clients (observation_basis=recorded_events)" in ui_out_1
+        assert "sess-codex-inc" in ui_out_1
+        assert "hygiene: total_memories=1 warnings=0 store_id=store-mmvt7" in ui_out_1
+        assert "ops/demo-17" in ui_out_1
+        assert canary not in ui_out_1
+        assert priv_res["memory_id"] not in ui_out_1
+        assert "bye." in ui_out_1
+
+        # 3. While the detachable view is closed, Client B continues recalling the shared
+        #    decision and writes its own local note, and Client A updates the shared scope.
+        with (
+            HotMemClient(
+                url,
+                token="tok-b",
+                session_id="sess-claude-rec",
+                harness_id="claude-code",
+                source="agent://b",
+                expected_store_id="store-mmvt7",
+            ) as client_b,
+            HotMemClient(
+                url,
+                token="tok-a",
+                session_id="sess-codex-inc-2",
+                harness_id="codex-cli",
+                source="agent://a",
+                namespace="ops/shared",
+                expected_store_id="store-mmvt7",
+            ) as client_a_shared_2,
+        ):
+            hits_b = client_b.search("approved rollback", top_k=5)
+            assert len(hits_b) == 1
+            assert hits_b[0]["memory_id"] == shared_res["memory_id"]
+            assert hits_b[0]["provenance"]["harness_id"] == "codex-cli"
+            assert hits_b[0]["provenance"]["session_id"] == "sess-codex-inc"
+            assert hits_b[0]["tags"] == [
+                "model:gpt-6.1-sol",
+                "project:hotmem-ops",
+                "org:knowguard",
+            ]
+            client_b.add(
+                "ops/b-followup",
+                "Verified rollback on staging",
+                importance=0.7,
+                namespace="ops/b-local",
+            )
+            client_a_shared_2.add(
+                "ops/demo-17",
+                "INC-112 follow-up: queue shard 2 drained cleanly.",
+                importance=0.85,
+                tags=["model:gpt-6.1-sol", "project:hotmem-ops"],
+            )
+
+        # 4. Reopen a second detachable `hotmem playground --url` process while keeping it open
+        #    across a daemon stop + restart to prove live disconnect/reconnect and authorized
+        #    management revocation/reload.
+        def _read_until(stream, marker: str, acc: list[str]) -> None:
+            deadline = time.monotonic() + 15.0
+            while time.monotonic() < deadline:
+                line = stream.readline()
+                if not line:
+                    break
+                acc.append(line)
+                if marker in "".join(acc):
+                    return
+            raise AssertionError(f"timed out waiting for {marker!r} in:\n{''.join(acc)}")
+
+        ui_proc_2 = subprocess.Popen(
+            _installed_cli(
+                "playground",
+                "--url",
+                url,
+                "--token",
+                "tok-lsd-mgmt",
+                "--store-id",
+                "store-mmvt7",
+                "--session",
+                "sess-lsd-ui-2",
+                "--harness",
+                "hotmem-console",
+                "--source",
+                "ui://lsd",
+            ),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        assert ui_proc_2.stdin is not None
+        assert ui_proc_2.stdout is not None
+        collected: list[str] = []
+        # Initial status sees the new activity written while the first view was closed
+        ui_proc_2.stdin.write("status\n")
+        ui_proc_2.stdin.flush()
+        _read_until(ui_proc_2.stdout, "sess-codex-inc-2", collected)
+
+        # Stop the daemon while ui_proc_2 stays open -> poll transitions to DISCONNECTED
+        _stop_proc(proc)
+
+        ui_proc_2.stdin.write("status\n")
+        ui_proc_2.stdin.flush()
+        _read_until(ui_proc_2.stdout, "Connection: DISCONNECTED", collected)
+
+        # Restart the daemon on the same port/store -> poll transitions to reconnected
+        # with generation_changed=True, then execute revoke approval + reload
+        proc = _start_daemon_on_port(mount, port, store_id="store-mmvt7")
+        with HotMemClient(url, token="tok-a", expected_store_id="store-mmvt7") as probe2:
+            gen2 = probe2.health()["runtime_generation"]
+        assert gen2 != gen1
+
+        ui_proc_2.stdin.write(
+            "status\nrevoke approval share-demo-17\nstatus\nreload\nstatus\nquit\n"
+        )
+        ui_proc_2.stdin.flush()
+        rest_out, ui_err_2 = ui_proc_2.communicate(timeout=20.0)
+        ui_out_2 = "".join(collected) + rest_out
+        assert ui_proc_2.returncode == 0, ui_err_2
+        assert "sess-codex-inc-2" in ui_out_2
+        assert "Connection: DISCONNECTED" in ui_out_2
+        assert "Connection: reconnected (generation_changed=True)" in ui_out_2
+        assert "Revoked (approval=share-demo-17): revoked=1 policy_revision=2" in ui_out_2
+        assert "Revoked shares: share-demo-17" in ui_out_2
+        assert "Reloaded policy: policy_revision=3 credential_count=3" in ui_out_2
+        assert canary not in ui_out_2
+        assert priv_res["memory_id"] not in ui_out_2
+    finally:
+        _stop_proc(proc)

@@ -388,6 +388,12 @@ class HotMemClient:
         resp.raise_for_status()
         return resp.json()
 
+    def hygiene(self) -> dict[str, Any]:
+        """Run a scoped store hygiene inspection against the daemon."""
+        resp = self._client.get("/v1/hygiene")
+        resp.raise_for_status()
+        return resp.json()
+
     def close(self) -> None:
         """Close the underlying HTTP client."""
         self._client.close()
@@ -739,6 +745,12 @@ class AsyncHotMemClient:
     async def reload_policy(self) -> dict[str, Any]:
         """Reload the daemon policy file (management only)."""
         resp = await self._client.post("/v1/policy/reload", json={})
+        resp.raise_for_status()
+        return resp.json()
+
+    async def hygiene(self) -> dict[str, Any]:
+        """Run a scoped store hygiene inspection against the daemon."""
+        resp = await self._client.get("/v1/hygiene")
         resp.raise_for_status()
         return resp.json()
 

@@ -1600,11 +1600,13 @@ def verify(path: str):
 @click.option("--port", default=8711, type=int, help="Port to check.")
 @click.option("--host", default="127.0.0.1", help="Host to check.")
 @click.option("--url", default=None, help="Explicit daemon URL (overrides --host/--port).")
+@click.option("--json", "as_json", is_flag=True, help="Output status payload as JSON.")
 @_daemon_client_options
 def status(
     port: int,
     host: str,
     url: str | None,
+    as_json: bool,
     daemon_token: str | None,
     daemon_session_id: str | None,
     daemon_source: str | None,
@@ -1642,7 +1644,10 @@ def status(
                 click.echo(f"HotMem status failed (HTTP {status_code})", err=True)
             raise SystemExit(1)
         data = resp.json()
-        ui.status(data)
+        if as_json:
+            click.echo(json.dumps(data, indent=2, sort_keys=True))
+        else:
+            ui.status(data)
     except httpx.RequestError as err:
         click.echo(f"No HotMem server found at {health_url}: {err}", err=True)
         raise SystemExit(1) from err
@@ -1996,25 +2001,59 @@ def inspect(uri: str, count_rows: bool, sample_size: int, full_validation: bool,
 @main.command()
 @click.option("--db", "db_path", default=None, type=click.Path(), help="Database file path.")
 @click.option("--url", default=None, help="Running server URL (e.g. http://127.0.0.1:8711).")
+@click.option(
+    "--harness",
+    "--harness-id",
+    "daemon_harness_id",
+    default=None,
+    envvar="HOTMEM_HARNESS_ID",
+    help="Harness/adapter identity (or HOTMEM_HARNESS_ID).",
+)
+@_daemon_client_options
 @_embedder_options
 @_reranker_options
 def playground(
     db_path: str | None,
     url: str | None,
+    daemon_harness_id: str | None,
+    daemon_token: str | None,
+    daemon_session_id: str | None,
+    daemon_source: str | None,
+    daemon_namespace: str | None,
+    expected_store_id: str | None,
     embedder_spec: str | None,
     embedder_model_path: str | None,
     reranker_spec: str | None,
     reranker_lambda: float,
     reranker_pool: int,
 ):
-    """Interactive terminal UI for add/search/inspect."""
+    """Interactive terminal UI and detachable management console for add/search/inspect."""
     from hotmem.playground import run_playground
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     reranker = _resolve_reranker_or_fail(reranker_spec, reranker_lambda, reranker_pool)
+    extra_kwargs: dict[str, Any] = {}
+    if daemon_token is not None:
+        extra_kwargs["token"] = daemon_token
+    if daemon_session_id is not None:
+        extra_kwargs["session_id"] = daemon_session_id
+    if daemon_harness_id is not None:
+        extra_kwargs["harness_id"] = daemon_harness_id
+    if daemon_source is not None:
+        extra_kwargs["source"] = daemon_source
+    if daemon_namespace is not None:
+        extra_kwargs["namespace"] = daemon_namespace
+    if expected_store_id is not None:
+        extra_kwargs["expected_store_id"] = expected_store_id
 
     try:
-        run_playground(db_path=db_path, url=url, embedder=embedder, reranker=reranker)
+        run_playground(
+            db_path=db_path,
+            url=url,
+            embedder=embedder,
+            reranker=reranker,
+            **extra_kwargs,
+        )
     except ImportError as err:
         raise click.ClickException(str(err)) from err
     except ValueError as err:
