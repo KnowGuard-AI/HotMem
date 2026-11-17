@@ -121,14 +121,20 @@ opt-in (`--reranker mmr`, default `none`).
 
 ## Operational examples
 
-**Run the semantic sidecar** (model provisioned once, per the
-`bench/retrieval/` runbook):
+**Run the semantic sidecar** (install the optional extra once; fetch is an
+explicit, checksum-verified model download):
 
 ```bash
 uv pip install -e ".[semantic]"
-hotmem serve --db ./hotmem.sqlite --embedder local-semantic \
-  --embedder-model-path .models/potion-base-8M
+hotmem model fetch
+hotmem serve --db ./hotmem.sqlite --embedder local-semantic
 ```
+
+The provisioned model is stored under `~/.hotmem/models/potion-base-8M/`.
+`hotmem model status --db ./hotmem.sqlite` reports its verification state and
+the database's vector counts by embedding space. Convert existing rows with
+`hotmem reembed --db ./hotmem.sqlite --embedder local-semantic` after stopping
+the daemon; `--dry-run` counts candidates without writing.
 
 `/v1/health` reports the sanitized active descriptor
 (`{"embedding": {"model": "local-m2v/potion-base-8M/rev:v1/norm:l2/pp:m2v-static-v1",

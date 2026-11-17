@@ -17,6 +17,9 @@ hotmem import --from okf --db ./company-wiki --target ./brain.sqlite --out ./wik
 hotmem status --url http://127.0.0.1:8711
 hotmem openapi --output openapi.json
 hotmem openapi --output openapi.yaml --format yaml
+hotmem model fetch
+hotmem model status --db ./my.sqlite
+hotmem reembed --db ./my.sqlite --embedder local-semantic --dry-run
 ```
 
 ## 3. Compatibility Rules
@@ -162,3 +165,23 @@ hotmem handoff verify ./handoff
 hotmem handoff inspect ./handoff --json
 hotmem handoff hydrate ./handoff --db ./claude.sqlite
 ```
+
+### 4.8 `model` and `reembed`
+
+Model downloads are explicit. The optional `[semantic]` extra is required for
+fetching or using the local semantic embedder; importing HotMem, starting a
+server, searching, restoring, and testing never download a model.
+
+```bash
+hotmem model fetch
+hotmem model status [--db PATH] [--json]
+hotmem reembed --db PATH --embedder local-semantic [--dry-run] [--batch-size N]
+```
+
+`model fetch` downloads the pinned `potion-base-8M` artifact and verifies its
+file checksums before installing it in `~/.hotmem/models/`. `model status`
+reports whether the artifact is known and verified, and can count vectors in
+each embedding space in a store. `reembed` converts only derived vectors,
+leaves memory identity and provenance untouched, and can resume after an
+interruption; stop the daemon before running it. `--dry-run` counts rows
+without embedding or writing.

@@ -270,18 +270,18 @@
     "drift": [],
     "note": "local diagnostics on one machine \u2014 not cross-machine guarantees",
     "package": {
-      "export_seconds": 0.0074,
-      "gz_bytes": 68944,
-      "hydrate_records_per_s": 10605.5,
-      "hydrate_seconds": 0.0057,
+      "export_seconds": 0.0111,
+      "gz_bytes": 69002,
+      "hydrate_records_per_s": 4735.2,
+      "hydrate_seconds": 0.0127,
       "records": 60,
-      "verify_records_per_s": 51837.7,
-      "verify_seconds": 0.0012
+      "verify_records_per_s": 17644.9,
+      "verify_seconds": 0.0034
     },
     "queries_compared": 48
   },
   "cold_start": {
-    "cold_start_seconds": 0.404
+    "cold_start_seconds": 0.423
   },
   "counts": {
     "corpus": 60,
@@ -289,8 +289,8 @@
     "queries": 48
   },
   "latency_ms": {
-    "p50_ms": 1.989,
-    "p95_ms": 2.38,
+    "p50_ms": 2.254,
+    "p95_ms": 2.45,
     "samples": 48
   },
   "overall": {
@@ -1592,6 +1592,7 @@
     "embedding_model": "local-m2v/potion-base-8M/rev:v1/norm:l2/pp:m2v-static-v1",
     "fusion": "cosine 0.6 / fts5_bm25 0.2 / importance 0.2",
     "repeat": 1,
+    "reranker": "none",
     "top_k": 5
   },
   "schema_version": 1

@@ -174,11 +174,11 @@ def resolve_embedder_from_config(
 
     ``spec`` selects the embedder: "hash" (the default — the
     zero-configuration ``hotmem-hash-v1``) or "local-semantic" (the optional
-    ``[semantic]`` extra; requires ``model_path`` — or the
-    ``HOTMEM_EMBEDDER_MODEL_PATH`` fallback — pointing at an explicitly
-    provisioned local model artifact). Flags take precedence over the
-    ``HOTMEM_EMBEDDER`` / ``HOTMEM_EMBEDDER_MODEL_PATH`` environment
-    fallbacks; omitted spec means hash, never a download (issue #78).
+    ``[semantic]`` extra; loads ``model_path``, the
+    ``HOTMEM_EMBEDDER_MODEL_PATH`` fallback, or the explicitly fetched default
+    artifact). Flags take precedence over the ``HOTMEM_EMBEDDER`` /
+    ``HOTMEM_EMBEDDER_MODEL_PATH`` environment fallbacks; omitted spec means
+    hash, never a download (issue #78).
 
     Resolution is meant to run BEFORE serving so an invalid selection fails
     fast with an actionable message — never at import, hydration, or test
@@ -198,10 +198,19 @@ def resolve_embedder_from_config(
                 "Install it with: uv pip install 'hotmem[semantic]'"
             ) from err
         if not resolved_path:
+            # Fall back to the artifact an operator provisioned explicitly with
+            # `hotmem model fetch`. Resolution only ever reads local disk.
+            from hotmem.models import resolve_provisioned_model_path
+
+            provisioned = resolve_provisioned_model_path()
+            if provisioned is not None:
+                resolved_path = str(provisioned)
+        if not resolved_path:
             raise ValueError(
-                "embedder 'local-semantic' requires --embedder-model-path (or "
+                "embedder 'local-semantic' requires a provisioned local model: run "
+                "`hotmem model fetch`, or pass --embedder-model-path (or "
                 "HOTMEM_EMBEDDER_MODEL_PATH) pointing at an explicitly provisioned "
-                "local model artifact; HotMem never downloads models"
+                "local model artifact; HotMem never downloads models implicitly"
             )
         return LocalSemanticEmbedder(resolved_path)
     raise ValueError(f"unknown embedder {name!r}; expected one of: {', '.join(_EMBEDDER_CHOICES)}")

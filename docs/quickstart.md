@@ -42,6 +42,25 @@ curl -X POST http://127.0.0.1:8711/v1/search \
   -d '{"query": "what stack does the project use"}'
 ```
 
+### Optional semantic retrieval
+
+The default hash embedder stays lightweight and requires no model download.
+For learned local embeddings, install HotMem with the `[semantic]` extra,
+fetch the pinned model explicitly, then start the sidecar with the semantic
+embedder:
+
+```bash
+pip install 'hotmem[semantic]'
+hotmem model fetch
+hotmem serve --db ./hotmem.sqlite --embedder local-semantic
+```
+
+`hotmem model fetch` verifies and installs the model under
+`~/.hotmem/models/`. Search and server startup never download models. Use
+`hotmem model status` to inspect the artifact and the embedding spaces stored
+in a database; use `hotmem reembed --db ./hotmem.sqlite --embedder local-semantic`
+to convert an existing store after stopping its server.
+
 ## 5. Portable Memory
 
 ```bash

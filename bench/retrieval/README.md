@@ -67,23 +67,15 @@ download, never at test/startup/hydration time):
 
 ```sh
 uv pip install -e ".[semantic]"
-mkdir -p .models/potion-base-8M
-uv run python -c "
-from model2vec import StaticModel
-from pathlib import Path
-import json
-model = StaticModel.from_pretrained('minishlab/potion-base-8M')
-model.save_pretrained('.models/potion-base-8M')
-Path('.models/potion-base-8M/hotmem-model.json').write_text(json.dumps(
-    {'model': 'potion-base-8M', 'revision': 'v1', 'preprocessing': 'm2v-static-v1'}))
-"
+hotmem model fetch
 uv run python scripts/retrieval_eval.py \
-  --embedder local-semantic --embedder-model-path .models/potion-base-8M \
+  --embedder local-semantic \
   --output bench/retrieval/semantic-local-m2v.json
 ```
 
-`.models/` is gitignored: the artifact is provisioned per environment and
-pinned via its `hotmem-model.json` — the recorded identity travels in the
+`hotmem model fetch` stores the checksum-verified artifact under
+`~/.hotmem/models/potion-base-8M/`. The model remains local and is never fetched
+by the evaluator or runtime implicitly; the recorded identity travels in the
 report's `runtime` block, making the evidence reproducible and auditable.
 Latency and cold-start numbers are one-machine diagnostics, not
 cross-machine guarantees.
