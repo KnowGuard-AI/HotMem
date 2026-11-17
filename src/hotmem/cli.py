@@ -2168,15 +2168,15 @@ def playground(
     "--from",
     "source",
     required=True,
-    type=click.Choice(["mem0", "okf"], case_sensitive=False),
-    help="Source memory system to import from (mem0) or an OKF v0.2 bundle (okf).",
+    type=click.Choice(["cognee", "mem0", "okf"], case_sensitive=False),
+    help="Source export format: Cognee COGX, mem0 SQLite history, or OKF v0.2.",
 )
 @click.option(
     "--db",
     "source_db",
     required=True,
     type=click.Path(exists=True),
-    help="Path to the source memory database (mem0) or OKF bundle directory (okf).",
+    help="Path to the source export: COGX directory/archive, mem0 SQLite DB, or OKF bundle.",
 )
 @click.option(
     "--target",

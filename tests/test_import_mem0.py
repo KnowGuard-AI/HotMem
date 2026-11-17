@@ -19,6 +19,8 @@ from hotmem.cli import main
 from hotmem.importers import IMPORTERS
 from hotmem.importers.mem0 import read_mem0_sqlite
 
+# Current mem0 SQLiteManager._create_history_table schema (checked against
+# mem0ai/mem0 main's storage.py and tests/memory/test_storage.py on 2026-11-17).
 _CREATE_HISTORY = """
 CREATE TABLE history (
     id           TEXT PRIMARY KEY,

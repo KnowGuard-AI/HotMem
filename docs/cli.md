@@ -85,13 +85,26 @@ Import memories from a foreign memory system or knowledge bundle into HotMem.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--from` | required | Source type: `mem0` (SQLite history DB) or `okf` (OKF v0.2 bundle directory) |
-| `--db` | required | Source database path (mem0) or bundle directory (okf) |
+| `--from` | required | Source type: `mem0` (SQLite history DB), `cognee` (COGX directory or `.cogx.tar.gz`), or `okf` (OKF v0.2 bundle) |
+| `--db` | required | Source database or export path for the selected importer |
 | `--target` | temp DB | HotMem database to hydrate into |
 | `--out` | temp file, deleted | Keep the intermediate JSONL for review |
 
 The command always emits the intermediate JSONL before hydration — pass
 `--out` to keep a reviewable artifact of exactly what will be loaded.
+
+#### Cognee COGX exports (`--from cognee`)
+
+Reads a Cognee COGX 0.x export directory or `.cogx.tar.gz` archive. Typed
+documents, episodes, entities, facts, memories, and memory blocks become
+textual HotMem memories; text-bearing raw nodes are also imported. Source
+identifiers, scope, tags, and supported provenance fields are retained in
+HotMem metadata. Graph links are not rebuilt as a graph. Record checksums are
+verified when present; `permissions.json` is ignored.
+
+```bash
+hotmem import --from cognee --db ./cognee-export --target ./hotmem.sqlite
+```
 
 #### OKF bundles (`--from okf`)
 
