@@ -19,6 +19,8 @@ below runs locally against the bundled fixture.
   elided.
 - `claude_desktop_config.json` — the Claude Desktop MCP wiring for the
   target session (reuses `examples/mcp_claude_desktop`).
+- `run_claude_continuation.sh`, `check_claude_continuation.py` — the
+  optional scripted Claude Code continuation and its transcript check.
 
 ## Run it
 
@@ -55,6 +57,60 @@ Register the hydrated database with the MCP server (see
 
 Claude retrieves `handoff/hotmem-showcase-planning/resume-brief` through
 `search_memories` — no handoff-specific retrieval tools needed.
+
+## Scripted Claude Code continuation
+
+To check everything up to the model call, without invoking Claude or using
+any quota:
+
+```bash
+./run_claude_continuation.sh --local-only
+```
+
+This prepares, verifies, and hydrates the local package, writes the MCP config
+Claude would receive, then starts that exact MCP server over stdio and calls
+`search_memories` to confirm the resume brief comes back. It proves the local
+half only; it says so and does not claim a continuation.
+
+To run the same fixture through an actual Claude continuation:
+
+```bash
+./run_claude_continuation.sh
+```
+
+This repeats the local steps, then starts one non-persistent Claude Code CLI
+session against the hydrated database. The HotMem server exposes its full tool
+list; the session is restricted to `search_memories` by the CLI allow-list
+(no built-in tools, anything else denied without prompting). Claude must
+recover the resume brief, quote its next action, cite the source entry, and
+identify a durable memory.
+
+The run is recorded as `claude-continuation.stream.jsonl` (the CLI's
+`stream-json` transcript) under the printed work directory, and
+`check_claude_continuation.py` passes only if that transcript contains:
+
+- a recorded `mcp__hotmem__search_memories` tool call whose tool result
+  carries `handoff/hotmem-showcase-planning/resume-brief`, and no call to any
+  other tool — tool use is read from the transcript events, not from the
+  model's description of what it did;
+- a successful CLI result (errors such as an exhausted budget are reported
+  with their subtype);
+- a final JSON answer whose next action, source id, and memory identifier all
+  exist in the prepared package.
+
+The fixture is a **historical capture** of a 2026-09-16 planning session. Its
+next action ("Wire the hotmem handoff CLI group…") has long since shipped; the
+demo shows that Claude recovers the captured state faithfully with provenance,
+not that the action is still open. The prompt tells Claude the same.
+
+Prerequisites are `uv`, Claude Code CLI, and the project's `mcp` extra. The
+script uses the Claude CLI's configured authentication and default model. For
+API-key billing, its default call cap is `$0.25`; set
+`CLAUDE_MAX_BUDGET_USD` to change that cap. This is a model call and may use
+account quota. The local package is prepared before Claude is invoked, and the
+Claude session receives only the hydrated brief and memories through HotMem.
+This demonstrates a portable handoff and continuation, not native transcript
+migration.
 
 ## What this proves
 
