@@ -1,0 +1,98 @@
+{
+  "benchmark": "HotMem SQLite scale / default exact-search path",
+  "created_utc": "2026-11-17T21:16:51Z",
+  "environment": {
+    "cpu_count": 8,
+    "machine": "arm64",
+    "platform": "macOS-27.2.1-arm64-arm-64bit",
+    "python": "3.11.9",
+    "sqlite": "3.54.1"
+  },
+  "method": {
+    "data": "synthetic unique text, deterministic repeated 64-d hash vectors",
+    "latency_samples": "mixed exact single-token FTS hits and no-match searches",
+    "search": "search_memories default hash embedder; full-scan fallback; top_k=5",
+    "targets": "not specified in the source work plan; measurements are diagnostic"
+  },
+  "results": [
+    {
+      "batch_size": 2000,
+      "database_and_sidecars_bytes": 60809216,
+      "ingest_seconds": 4.919,
+      "memories": 100000,
+      "peak_rss_bytes": 192905216,
+      "row_count": 100000,
+      "search_latency_ms": {
+        "p50": 1113.293,
+        "p95": 1124.355,
+        "samples": [
+          1119.295,
+          1114.773,
+          1110.848,
+          1124.355,
+          1116.908,
+          1118.346,
+          1107.589,
+          1115.312,
+          1112.827,
+          1113.759,
+          1105.638,
+          1117.253,
+          1126.855,
+          1122.821,
+          1109.366,
+          1111.15,
+          1104.539,
+          1112.57,
+          1096.473,
+          1098.264
+        ]
+      },
+      "search_repeats": 20,
+      "workload_checks": {
+        "exact_match": true,
+        "no_match": true
+      }
+    },
+    {
+      "batch_size": 2000,
+      "database_and_sidecars_bytes": 608251904,
+      "ingest_seconds": 52.788,
+      "memories": 1000000,
+      "peak_rss_bytes": 1656864768,
+      "row_count": 1000000,
+      "search_latency_ms": {
+        "p50": 11488.974,
+        "p95": 11702.829,
+        "samples": [
+          11327.565,
+          11269.156,
+          11294.557,
+          11513.173,
+          11477.789,
+          11702.829,
+          11725.402,
+          11675.677,
+          11557.016,
+          11441.97,
+          11517.38,
+          11409.453,
+          11444.746,
+          11539.875,
+          11500.705,
+          11468.324,
+          11508.304,
+          11337.648,
+          11449.487,
+          11500.159
+        ]
+      },
+      "search_repeats": 20,
+      "workload_checks": {
+        "exact_match": true,
+        "no_match": true
+      }
+    }
+  ],
+  "schema_version": 1
+}

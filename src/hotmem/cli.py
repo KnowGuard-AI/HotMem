@@ -1273,6 +1273,11 @@ def task_sync(
     envvar="HOTMEM_HARNESS_ID",
     help="Explicit harness ID for MCP operation (#111).",
 )
+@click.option(
+    "--read-only",
+    is_flag=True,
+    help="Hide and reject MCP tools that write to the store or create export packages.",
+)
 @_daemon_client_options
 @_embedder_options
 @_reranker_options
@@ -1281,6 +1286,7 @@ def mcp(
     mount: str | None,
     db_path: str | None,
     daemon_harness_id: str | None,
+    read_only: bool,
     daemon_token: str | None,
     daemon_session_id: str | None,
     daemon_source: str | None,
@@ -1330,6 +1336,7 @@ def mcp(
                 source=daemon_source,
                 namespace=daemon_namespace,
                 expected_store_id=expected_store_id,
+                read_only=read_only,
             )
         )
         return
@@ -1343,11 +1350,29 @@ def mcp(
     swap_path = None
 
     if mount:
-        config = bootstrap_mount(mount)
-        db_path = str(config.db_path)
-        swap_path = str(config.swap_path)
+        if read_only:
+            mount_path = _Path(mount).expanduser().resolve()
+            db_file = mount_path / "hotmem.sqlite"
+            if not (mount_path.is_dir() and (mount_path / "manifest.json").is_file()):
+                raise click.ClickException(
+                    "read-only MCP mount mode requires an initialized mount directory"
+                )
+            if not db_file.is_file():
+                raise click.ClickException(
+                    f"read-only MCP mount mode requires an existing database: {db_file}"
+                )
+            db_path = str(db_file)
+            swap_path = str(mount_path / "swap.jsonl")
+        else:
+            config = bootstrap_mount(mount)
+            db_path = str(config.db_path)
+            swap_path = str(config.swap_path)
 
     assert db_path is not None
+    if read_only and not _Path(db_path).expanduser().is_file():
+        raise click.ClickException(
+            f"read-only MCP requires an existing database file: {_Path(db_path).expanduser()}"
+        )
 
     _trace.info(
         "mcp",
@@ -1357,7 +1382,11 @@ def mcp(
     try:
         asyncio.run(
             run_mcp_server(
-                db_path=db_path, swap_path=swap_path, embedder=embedder, reranker=reranker
+                db_path=db_path,
+                swap_path=swap_path,
+                embedder=embedder,
+                reranker=reranker,
+                read_only=read_only,
             )
         )
     except (StoreOwnershipError, StoreIdentityError) as err:

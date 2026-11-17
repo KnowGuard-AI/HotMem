@@ -61,6 +61,95 @@ def test_add_memory_with_ttl_and_importance(state: _ServerState):
     assert state.db.count() == 1
 
 
+def test_read_only_mode_hides_and_rejects_write_tools(state: _ServerState, tmp_path: Path):
+    from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest
+
+    writable_db = state.db
+    state.db = MemoryDB(state.db_path, read_only=True)
+    server = create_server(state.db_path, state=state, read_only=True)
+    try:
+        listed = asyncio.run(
+            server.request_handlers[ListToolsRequest](ListToolsRequest(method="tools/list"))
+        )
+        names = {tool.name for tool in listed.root.tools}
+        blocked = {"add_memory", "snapshot", "hydrate", "handoff_prepare", "handoff_hydrate"}
+        assert blocked.isdisjoint(names)
+        assert {"search_memories", "list_memories", "memory_health", "handoff_verify"} <= names
+
+        calls = {
+            "add_memory": {"identifier": "blocked", "fact": "must not be stored"},
+            "snapshot": {"file": str(tmp_path / "snapshot.jsonl")},
+            "hydrate": {"file": str(tmp_path / "incoming.jsonl")},
+            "handoff_prepare": {
+                "source": str(tmp_path / "source"),
+                "output": str(tmp_path / "handoff"),
+                "consent": "explicit test consent",
+            },
+            "handoff_hydrate": {"package": str(tmp_path / "handoff")},
+        }
+        for name, arguments in calls.items():
+            result = asyncio.run(
+                server.request_handlers[CallToolRequest](
+                    CallToolRequest(
+                        method="tools/call",
+                        params=CallToolRequestParams(name=name, arguments=arguments),
+                    )
+                )
+            )
+            assert result.root.isError
+            assert "read-only" in result.root.content[0].text
+        health = asyncio.run(
+            server.request_handlers[CallToolRequest](
+                CallToolRequest(
+                    method="tools/call",
+                    params=CallToolRequestParams(name="memory_health", arguments={}),
+                )
+            )
+        )
+        assert not health.root.isError
+        assert _text(health.root)["memory_count"] == 0
+        assert state.db.count() == 0
+        assert not (tmp_path / "snapshot.jsonl").exists()
+        assert not (tmp_path / "handoff").exists()
+    finally:
+        state.db.close()
+        state.db = writable_db
+
+
+def test_read_only_relay_rejects_writes_before_daemon_call():
+    from mcp.types import CallToolRequest, CallToolRequestParams, ListToolsRequest
+
+    from hotmem.mcp_server import create_relay_server
+
+    class _SpyClient:
+        add_called = False
+
+        async def add(self, *args, **kwargs):
+            self.add_called = True
+            raise AssertionError("read-only relay must block before dispatch")
+
+    spy = _SpyClient()
+    server, returned_client = create_relay_server(client=spy, read_only=True)
+    listed = asyncio.run(
+        server.request_handlers[ListToolsRequest](ListToolsRequest(method="tools/list"))
+    )
+    assert "add_memory" not in {tool.name for tool in listed.root.tools}
+    result = asyncio.run(
+        server.request_handlers[CallToolRequest](
+            CallToolRequest(
+                method="tools/call",
+                params=CallToolRequestParams(
+                    name="add_memory", arguments={"identifier": "blocked", "fact": "x"}
+                ),
+            )
+        )
+    )
+    assert result.root.isError
+    assert "read-only" in result.root.content[0].text
+    assert not spy.add_called
+    assert returned_client is spy
+
+
 def test_mcp_add_memory_forwards_metadata_tags_and_context(tmp_path: Path):
     """WP3 MVT: MCP add_memory advertises & forwards metadata, tags, harness_id, session_id."""
     import httpx

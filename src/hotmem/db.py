@@ -336,7 +336,14 @@ class MemoryDB:
     def __init__(self, db_path: str | Path, *, read_only: bool = False) -> None:
         self.db_path = str(db_path)
         self._read_only = read_only
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        if read_only:
+            # `query_only` prevents SQL writes through this connection, while
+            # SQLite's URI mode also prevents accidentally creating or
+            # modifying the database file itself.
+            readonly_uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+            self._conn = sqlite3.connect(readonly_uri, uri=True, check_same_thread=False)
+        else:
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.create_function("cosine_sim", 2, _cosine_similarity)
         if read_only:
@@ -347,7 +354,24 @@ class MemoryDB:
         self._conn.execute("PRAGMA recursive_triggers=ON")
         self._conn.executescript(_SCHEMA)
         self._migrate()
-        self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+        fts_initialized = self._conn.execute(
+            "SELECT value FROM store_meta WHERE key = 'fts_index_initialized'"
+        ).fetchone()
+        if fts_initialized is None:
+            # Repair/create the external-content index once. Rebuilding on
+            # every open needlessly takes a write lock and prevents
+            # concurrent readers/writers from opening the same store. The
+            # marker is committed with the rebuild so a crash retries it.
+            self._conn.execute("BEGIN IMMEDIATE")
+            fts_initialized = self._conn.execute(
+                "SELECT value FROM store_meta WHERE key = 'fts_index_initialized'"
+            ).fetchone()
+            if fts_initialized is None:
+                self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+                self._conn.execute(
+                    "INSERT INTO store_meta (key, value) VALUES ('fts_index_initialized', '1')"
+                )
+            self._conn.commit()
         _trace.info("init", "database opened", detail={"path": self.db_path})
 
     def _migrate(self) -> None:

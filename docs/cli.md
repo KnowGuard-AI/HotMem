@@ -192,3 +192,21 @@ that exact namespace. `--min-score N` abstains from results below the inclusive
 final hybrid score cutoff. Both are opt-in. Scoped or thresholded searches use
 an exact candidate scan, which can cost more than the vector-index path on
 large stores.
+
+### 4.9 `mcp`
+
+Start MCP over stdio with an embedded database or a running daemon:
+
+```bash
+hotmem mcp --db ./hotmem.sqlite
+hotmem mcp --db ./hotmem.sqlite --read-only
+hotmem mcp --url http://127.0.0.1:8711 --read-only
+```
+
+`--read-only` omits the add, snapshot, hydrate, and handoff preparation tools
+from MCP discovery and rejects direct calls to them at the MCP server. In
+embedded mode it requires an existing database, opens it with SQLite query-only
+mode, and skips startup hydration. A mounted store must already have its
+manifest and database. The flag applies to tools served by this MCP process;
+it does not change the access policy of the daemon's HTTP API. Without the
+flag, the existing writable MCP tool set is unchanged.

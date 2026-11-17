@@ -62,6 +62,22 @@ def test_status_down_exits_nonzero():
     assert "No HotMem server" in result.output
 
 
+def test_mcp_read_only_requires_existing_db_without_creating_it(tmp_path: Path):
+    db_path = tmp_path / "missing.sqlite"
+    result = CliRunner().invoke(main, ["mcp", "--db", str(db_path), "--read-only"])
+    assert result.exit_code == 1
+    assert "read-only MCP requires an existing database file" in result.output
+    assert not db_path.exists()
+
+
+def test_mcp_read_only_mount_does_not_bootstrap_missing_mount(tmp_path: Path):
+    mount_path = tmp_path / "missing-mount"
+    result = CliRunner().invoke(main, ["mcp", "--mount", str(mount_path), "--read-only"])
+    assert result.exit_code == 1
+    assert "requires an initialized mount directory" in result.output
+    assert not mount_path.exists()
+
+
 def test_ingestion_commands_share_the_embedder_config(tmp_path: Path):
     """#78 review: hydrate / delta apply / import accept the shared embedder
     configuration and fail fast before touching data."""
