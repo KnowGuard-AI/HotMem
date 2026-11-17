@@ -20,6 +20,7 @@ hotmem openapi --output openapi.yaml --format yaml
 hotmem model fetch
 hotmem model status --db ./my.sqlite
 hotmem reembed --db ./my.sqlite --embedder local-semantic --dry-run
+hotmem search "invoice approval" --db ./my.sqlite --namespace finance --min-score 0.4
 ```
 
 ## 3. Compatibility Rules
@@ -185,3 +186,9 @@ each embedding space in a store. `reembed` converts only derived vectors,
 leaves memory identity and provenance untouched, and can resume after an
 interruption; stop the daemon before running it. `--dry-run` counts rows
 without embedding or writing.
+
+`hotmem search --namespace NAME` restricts local and daemon-backed results to
+that exact namespace. `--min-score N` abstains from results below the inclusive
+final hybrid score cutoff. Both are opt-in. Scoped or thresholded searches use
+an exact candidate scan, which can cost more than the vector-index path on
+large stores.

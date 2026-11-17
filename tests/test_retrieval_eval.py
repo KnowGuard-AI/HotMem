@@ -324,6 +324,28 @@ def test_run_eval_full_fixtures_clone_equivalence_perfect(tmp_path: Path):
     assert "not cross-machine" in clone["note"]
 
 
+def test_opt_in_scope_and_score_threshold_report(tmp_path: Path):
+    """WP2 measures scoped leakage and abstention without changing default runs."""
+    doc = retrieval_eval.run_eval(
+        FIXTURE_DIR / "corpus.jsonl",
+        FIXTURE_DIR / "queries.jsonl",
+        work_dir=tmp_path,
+        min_score=0.4,
+        use_query_namespace=True,
+    )
+
+    scope = doc["namespace_scope_metrics"]
+    assert scope["queries"] == 6
+    assert scope["wrong_namespace_slots"] == 0
+    assert scope["wrong_namespace_rate"] in (0.0, None)
+    assert doc["runtime"]["min_score"] == 0.4
+    assert doc["runtime"]["namespace_scope"] == "per-query fixture namespace"
+    assert doc["categories"]["negative_or_no_answer"]["false_positive_rate"]["n_applicable"] == 0
+    assert doc["abstention"]["queries_returned"] == 15
+    assert doc["abstention"]["no_answer_abstained"] == 6
+    assert doc["clone_equivalence"]["clone_equivalence_rate"] == 1.0
+
+
 def test_render_report_contains_required_sections(tmp_path: Path):
     doc = retrieval_eval.run_eval(
         FIXTURE_DIR / "corpus.jsonl",

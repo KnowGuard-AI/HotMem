@@ -10,8 +10,8 @@ Purpose:
 
      Design notes:
        - Two entity-name collisions across projects (Meridian, Northwind)
-         power the cross_project_isolation category; search has no
-         namespace filter, so leakage is measured as observed behavior.
+         power the cross_project_isolation category; scoped benchmark runs
+         carry the intended namespace while default runs remain unfiltered.
        - Three duplicate groups (original + 2 near-duplicates each) power
          the near_duplicate_diversity category.
        - Three revision pairs with explicit created_at power the
@@ -47,14 +47,25 @@ def _mem(mid: str, identifier: str, ns: str, fact: str, **extra) -> dict:
     return rec
 
 
-def _q(qid: str, category: str, query: str, relevance: dict[str, int], notes: str) -> dict:
-    return {
+def _q(
+    qid: str,
+    category: str,
+    query: str,
+    relevance: dict[str, int],
+    notes: str,
+    *,
+    namespace: str | None = None,
+) -> dict:
+    record = {
         "query_id": qid,
         "category": category,
         "query": query,
         "relevance": relevance,
         "notes": notes,
     }
+    if namespace is not None:
+        record["namespace"] = namespace
+    return record
 
 
 CORPUS = [
@@ -705,6 +716,7 @@ QUERIES = [
         "In the finance project, what are Northwind's payment terms?",
         {"mem-northwind-fin-001": 3, "mem-northwind-log-001": 1},
         "Same entity name lives in two projects with conflicting facts.",
+        namespace="finance",
     ),
     _q(
         "q-iso-002",
@@ -712,6 +724,7 @@ QUERIES = [
         "In the logistics project, what lead time does Northwind freight need?",
         {"mem-northwind-log-001": 3, "mem-northwind-fin-001": 1},
         "Project framing flips the expected winner.",
+        namespace="logistics",
     ),
     _q(
         "q-iso-003",
@@ -719,6 +732,7 @@ QUERIES = [
         "For payments, what is Meridian's fee?",
         {"mem-meridian-fin-001": 3, "mem-meridian-log-001": 1},
         "Leakage from the logistics Meridian counts against attribution.",
+        namespace="finance",
     ),
     _q(
         "q-iso-004",
@@ -726,6 +740,7 @@ QUERIES = [
         "For overseas shipments, which Meridian do we book?",
         {"mem-meridian-log-001": 3, "mem-meridian-fin-001": 1},
         "Project framing flips the expected winner.",
+        namespace="logistics",
     ),
     _q(
         "q-iso-005",
@@ -733,6 +748,7 @@ QUERIES = [
         "Northwind invoice approval limit in the finance project?",
         {"mem-northwind-fin-001": 3, "mem-invoice-001": 2},
         "Acme invoice rule is supporting context, not the answer.",
+        namespace="finance",
     ),
     _q(
         "q-iso-006",
@@ -740,6 +756,7 @@ QUERIES = [
         "In the logistics project, which vendor processes damaged parcel returns?",
         {"mem-orchid-001": 3},
         "Namespace-scoped lookup without a name collision.",
+        namespace="logistics",
     ),
     # ── snapshot_hydration_equivalence ───────────────────────────────────
     _q(

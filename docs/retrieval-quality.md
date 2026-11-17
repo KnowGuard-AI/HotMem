@@ -171,8 +171,9 @@ hotmem serve --db ./hotmem.sqlite --embedder local-semantic \
 
 - Fixtures are synthetic and small; results are local diagnostics on one
   machine, not cross-machine or enterprise-scale guarantees.
-- No tenant authorization or isolation is claimed: cross-project leakage is
-  measured as observed behavior (search has no namespace filter).
+- No tenant authorization claim is made from these synthetic fixtures.
+  Unscoped runs measure observed leakage; a scoped run checks exact namespace
+  filtering without standing in for policy review.
 - A ranker without abstention returns false positives on no-answer queries;
   the false-positive rate reports this honestly instead of hiding it.
 - Small synthetic benchmarks must never be used for marketing claims.
@@ -185,3 +186,38 @@ and include category-level before/after metrics in the PR — the regression
 test makes silent drift impossible. New reranking or embedding work needs
 new evidence gates in the same shape: a committed report, a defined
 denominator, and a documented tradeoff.
+
+## Namespace scoping and abstention (WP2)
+
+Search accepts an exact `namespace` and an inclusive `min_score` cutoff through
+the CLI, HTTP, MCP, and Python clients. For example:
+
+```bash
+hotmem search "Meridian payment fee" --db ./hotmem.sqlite \
+  --namespace finance --min-score 0.4
+```
+
+HTTP and MCP callers send the same `namespace` and `min_score` fields. A
+daemon's caller policy still limits visible rows; a requested namespace can
+narrow that scope but cannot widen it. Scoped and thresholded searches use an
+exact candidate scan so the options apply to all eligible rows. This can cost
+more than the vector-index path on large stores.
+
+The measured semantic run on the existing synthetic fixture is recorded in
+[`wp2-semantic-scope-threshold.json`](../bench/retrieval/wp2-semantic-scope-threshold.json).
+At `min_score=0.4`, overall false-positive rate moves from 0.767 to 0.154 and
+all six no-answer queries return no results. Recall@5 moves from 1.000 to
+0.786; only 34/48 queries return any results. The hash run is also recorded in
+[`wp2-hash-scope-threshold.json`](../bench/retrieval/wp2-hash-scope-threshold.json):
+with the same cutoff, only 15/48 queries return results and Recall@5 falls to
+0.302. The cutoff stays opt-in and must be tuned for the embedder and workload.
+For the six scoped cross-project semantic queries, wrong-namespace results
+move from 8/30 returned slots to 0/9. The benchmark's default run remains
+unscoped.
+
+The current evidence does not isolate a fusion-weight ablation. WP2 retains
+cosine 0.6 / FTS5 BM25 0.2 / importance 0.2: the semantic report shows
+semantic-paraphrase Recall@5 rising from 0.333 to 1.000 with exact-lexical
+Recall@5 held at 1.000, while the cutoff separately addresses no-answer
+queries. Revisit the blend with the larger WP3 fixture instead of changing the
+default ranking without evidence.

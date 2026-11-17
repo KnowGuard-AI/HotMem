@@ -7,10 +7,23 @@ from hotmem.embed import embed_text, pack_embedding
 from hotmem.search import search_memories
 
 
-def _add_fact(db: MemoryDB, id: str, text: str, importance: float = 0.5):
+def _add_fact(
+    db: MemoryDB,
+    id: str,
+    text: str,
+    importance: float = 0.5,
+    namespace: str = "",
+):
     vec = embed_text(text)
     blob = pack_embedding(vec)
-    db.insert(id=id, identifier="test", fact_text=text, embedding=blob, importance=importance)
+    db.insert(
+        id=id,
+        identifier="test",
+        fact_text=text,
+        embedding=blob,
+        importance=importance,
+        namespace=namespace,
+    )
 
 
 def test_search_returns_message_objects(tmp_db: MemoryDB):
@@ -84,3 +97,43 @@ def test_search_includes_created_at(tmp_db: MemoryDB):
     results = search_memories(tmp_db, "invoice", top_k=5)
     assert "created_at" in results[0]
     assert results[0]["created_at"] is not None
+
+
+def test_search_namespace_scope_and_score_abstention(tmp_db: MemoryDB):
+    _add_fact(tmp_db, "finance", "Meridian payment fee is two percent", namespace="finance")
+    _add_fact(tmp_db, "logistics", "Meridian payment fee is two percent", namespace="logistics")
+
+    unscoped = search_memories(tmp_db, "Meridian payment fee")
+    scoped = search_memories(tmp_db, "Meridian payment fee", namespace="finance")
+
+    assert {row["memory_id"] for row in scoped} == {"finance"}
+    assert {row["memory_id"] for row in unscoped} == {"finance", "logistics"}
+    assert search_memories(tmp_db, "Meridian payment fee", min_score=0.0) == unscoped
+    assert search_memories(tmp_db, "Meridian payment fee", min_score=1.0) == []
+
+    class UnexpectedIndex:
+        def is_stale(self, *_args, **_kwargs):
+            raise AssertionError("scoped search should use the exact candidate scan")
+
+    indexed_scope = search_memories(
+        tmp_db,
+        "Meridian payment fee",
+        namespace="finance",
+        vector_index=UnexpectedIndex(),
+    )
+    assert indexed_scope == scoped
+
+
+def test_search_namespace_combines_with_existing_row_policy(tmp_db: MemoryDB):
+    _add_fact(tmp_db, "finance-a", "invoice policy", namespace="finance")
+    _add_fact(tmp_db, "finance-b", "invoice procedure", namespace="finance")
+    _add_fact(tmp_db, "logistics", "invoice freight", namespace="logistics")
+
+    results = search_memories(
+        tmp_db,
+        "invoice",
+        namespace="finance",
+        row_filter=lambda row: row["id"] == "finance-b",
+    )
+
+    assert [row["memory_id"] for row in results] == ["finance-b"]

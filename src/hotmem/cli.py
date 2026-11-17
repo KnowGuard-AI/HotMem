@@ -156,7 +156,7 @@ def _daemon_client_options(cmd):
         "daemon_namespace",
         default=None,
         envvar="HOTMEM_NAMESPACE",
-        help="Target namespace scope for daemon operation.",
+        help="Target namespace scope for this operation.",
     )(cmd)
     cmd = click.option(
         "--source",
@@ -1818,6 +1818,12 @@ def add(
 @click.option("--url", default=None, help="Running server URL (e.g. http://127.0.0.1:8711).")
 @click.option("--top-k", "top_k", default=5, type=int, help="Maximum results.")
 @click.option(
+    "--min-score",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help="Abstain from results below this inclusive final-score threshold.",
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
@@ -1830,6 +1836,7 @@ def search(
     db_path: str | None,
     url: str | None,
     top_k: int,
+    min_score: float | None,
     as_json: bool,
     daemon_token: str | None,
     daemon_session_id: str | None,
@@ -1842,13 +1849,15 @@ def search(
     """Search memories and print formatted results with scores.
 
     With --db the query is embedded locally under --embedder (default: hash);
-    with --url the running daemon's embedder applies.
+    with --url the running daemon's embedder applies. --namespace scopes the
+    results; --min-score lets the search abstain below a final-score cutoff.
     """
     rows = _run_search(
         query,
         db_path=db_path,
         url=url,
         top_k=top_k,
+        min_score=min_score,
         embedder_spec=embedder_spec,
         embedder_model_path=embedder_model_path,
         token=daemon_token,
@@ -1875,6 +1884,7 @@ def _run_search(
     session_id: str | None = None,
     source: str | None = None,
     namespace: str | None = None,
+    min_score: float | None = None,
     expected_store_id: str | None = None,
     embedder_spec: str | None = None,
     embedder_model_path: str | None = None,
@@ -1897,7 +1907,7 @@ def _run_search(
                 namespace=namespace,
                 expected_store_id=expected_store_id,
             )
-            return client.search(query, top_k=top_k)
+            return client.search(query, top_k=top_k, namespace=namespace, min_score=min_score)
         except Exception as err:
             _raise_cli_http_error(err)
 
@@ -1910,7 +1920,14 @@ def _run_search(
     db = MemoryDB(db_path)
     try:
         _warn_embedding_space_mismatch(db.embedding_model_counts(), embedder.descriptor.key)
-        return search_memories(db, query=query, top_k=top_k, embedder=embedder)
+        return search_memories(
+            db,
+            query=query,
+            top_k=top_k,
+            embedder=embedder,
+            namespace=namespace,
+            min_score=min_score,
+        )
     finally:
         db.close()
 

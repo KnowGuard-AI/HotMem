@@ -11,7 +11,9 @@ and safe to publish: no keys, no personal data, no copied text.
 - `queries.jsonl` — 48 graded queries, >= 6 per required category (issue
   #77): exact_lexical, semantic_paraphrase, identifier_or_entity_name,
   temporal_or_revision, near_duplicate_diversity, negative_or_no_answer,
-  cross_project_isolation, snapshot_hydration_equivalence.
+  cross_project_isolation, snapshot_hydration_equivalence. The six
+  cross-project queries record their intended namespace; ordinary runs ignore
+  that field and remain unscoped.
 - `baseline.json` — committed metrics from the UNCHANGED production stack
   (hash vectors + FTS5 BM25 + importance, 0.6/0.2/0.2); guarded by
   `tests/test_retrieval_eval.py` (see the baseline regression test).
@@ -23,6 +25,10 @@ and safe to publish: no keys, no personal data, no copied text.
 - `rerank-mmr.json` — the #80 evidence report: the semantic runtime plus
   the opt-in MMR reranker (lambda 0.5, pool 50). Same rule: separate
   artifact, never an overwrite of default-behavior evidence.
+- `wp2-semantic-scope-threshold.json` / `.md` — the #141 WP2 semantic run:
+  per-query namespace scope and an opt-in 0.4 score cutoff.
+- `wp2-hash-scope-threshold.json` / `.md` — the same WP2 settings under the
+  hash fallback, showing why the threshold must be tuned per embedder.
 
 ## Reranking run (#80)
 
@@ -54,9 +60,10 @@ generator is deterministic and the committed bytes must not change (a
 byte-diff test locks this). Intentional fixture changes require
 category-level before/after evidence in the PR (issue #77 regen policy).
 
-Cross-project honesty: search has no namespace filter, so
-`cross_project_isolation` queries measure attribution/leakage as observed
-behavior — the evaluator never hides wrong-project results behind a filter.
+Cross-project honesty: default runs are unscoped, so
+`cross_project_isolation` measures observed leakage. A separate WP2 run opts
+into the fixture's intended namespace and reports the remaining wrong-scope
+slots; it does not change default behavior.
 
 ## Semantic run (#78)
 
@@ -87,3 +94,35 @@ nDCG@5 0.586 -> 0.925; clone equivalence 1.000 under the semantic space
 (same-descriptor restore reuses every vector). The near-duplicate
 diversity duplicate-slot rate is 0.400 (hash: 0.300) — above the #80 gate
 under both embedders; see the post-#78 report before any reranking work.
+
+## Namespace and abstention run (WP2)
+
+The optional query namespace scope prevents cross-project results from
+crossing the requested scope; the inclusive score cutoff lets search return
+no results. Reproduce the measured semantic run with:
+
+```sh
+hotmem model fetch
+uv run python scripts/retrieval_eval.py \
+  --embedder local-semantic --use-query-namespace --min-score 0.4 \
+  --output bench/retrieval/wp2-semantic-scope-threshold.json \
+  --report bench/retrieval/wp2-semantic-scope-threshold.md
+uv run python scripts/retrieval_eval.py \
+  --use-query-namespace --min-score 0.4 \
+  --output bench/retrieval/wp2-hash-scope-threshold.json \
+  --report bench/retrieval/wp2-hash-scope-threshold.md
+```
+
+On the 60-memory / 48-query fixture, semantic false-positive rate is 0.767 in
+the default run and 0.154 with scope plus the 0.4 cutoff. Recall@5 is 1.000
+and 0.786 respectively. All six no-answer queries abstain. Across the six
+scoped cross-project queries, wrong-namespace slots fall from 8/30 to 0/9.
+Only 34/48 semantic queries return results. With the same cutoff, the hash
+run returns results for only 15/48 queries and Recall@5 falls to 0.302. These
+synthetic small-fixture measurements show why the cutoff must be tuned per
+embedder; exact scoped/cutoff search can also cost more than the ANN path.
+
+WP2 keeps the 0.6 / 0.2 / 0.2 fusion weights. This run isolates scope and
+cutoff behavior, not alternate blend weights. The semantic adapter already
+improves paraphrase recall, and the larger WP3 fixture is the next evidence
+point for a weight change.

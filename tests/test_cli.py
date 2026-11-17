@@ -216,9 +216,22 @@ def test_search_url_backend(tmp_path: Path):
     fake_client = mock.Mock()
     fake_client.search = mock.Mock(return_value=rows)
     with mock.patch("hotmem.client.HotMemClient", return_value=fake_client):
-        result = runner.invoke(main, ["search", "q", "--url", "http://127.0.0.1:8711"])
+        result = runner.invoke(
+            main,
+            [
+                "search",
+                "q",
+                "--url",
+                "http://127.0.0.1:8711",
+                "--namespace",
+                "finance",
+                "--min-score",
+                "0.4",
+            ],
+        )
     assert result.exit_code == 0, result.output
     assert "hit" in result.output
+    fake_client.search.assert_called_once_with("q", top_k=5, namespace="finance", min_score=0.4)
 
 
 def test_search_rejects_both_db_and_url(tmp_path: Path):
@@ -228,6 +241,44 @@ def test_search_rejects_both_db_and_url(tmp_path: Path):
     )
     assert result.exit_code != 0
     assert "not both" in result.output.lower()
+
+
+def test_search_namespace_and_min_score_options(tmp_path: Path):
+    db_path = tmp_path / "scoped.sqlite"
+    db = MemoryDB(db_path)
+    for memory_id, namespace in (("finance", "finance"), ("logistics", "logistics")):
+        text = "Meridian payment fee is two percent"
+        db.insert(
+            id=memory_id,
+            identifier=memory_id,
+            fact_text=text,
+            embedding=pack_embedding(embed_text(text)),
+            namespace=namespace,
+        )
+    db.close()
+
+    runner = CliRunner()
+    scoped = runner.invoke(
+        main,
+        [
+            "search",
+            "Meridian payment fee",
+            "--db",
+            str(db_path),
+            "--namespace",
+            "finance",
+            "--json",
+        ],
+    )
+    assert scoped.exit_code == 0, scoped.output
+    assert {row["memory_id"] for row in json.loads(scoped.output)} == {"finance"}
+
+    abstained = runner.invoke(
+        main,
+        ["search", "Meridian payment fee", "--db", str(db_path), "--min-score", "1.0", "--json"],
+    )
+    assert abstained.exit_code == 0, abstained.output
+    assert json.loads(abstained.output) == []
 
 
 # ── inspect ────────────────────────────────────────────────────────────

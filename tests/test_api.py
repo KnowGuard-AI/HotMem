@@ -89,6 +89,43 @@ def test_search_max_chars(client: TestClient):
     assert total <= 50
 
 
+def test_search_namespace_and_min_score_http(client: TestClient):
+    client.post(
+        "/v1/add",
+        json={
+            "identifier": "meridian-finance",
+            "fact": "Meridian payment fee is two percent",
+            "namespace": "finance",
+        },
+        headers={"X-HotMem-Namespace": "finance"},
+    )
+    client.post(
+        "/v1/add",
+        json={
+            "identifier": "meridian-logistics",
+            "fact": "Meridian payment fee is two percent",
+            "namespace": "logistics",
+        },
+        headers={"X-HotMem-Namespace": "logistics"},
+    )
+
+    scoped = client.post(
+        "/v1/search",
+        json={"query": "Meridian payment fee", "namespace": "finance"},
+    )
+    assert scoped.status_code == 200
+    assert [row["content"] for row in scoped.json()["memories"]] == [
+        "Meridian payment fee is two percent"
+    ]
+
+    abstained = client.post("/v1/search", json={"query": "Meridian payment fee", "min_score": 1.0})
+    assert abstained.status_code == 200
+    assert abstained.json()["memories"] == []
+
+    invalid = client.post("/v1/search", json={"query": "Meridian", "min_score": 1.1})
+    assert invalid.status_code == 422
+
+
 def test_snapshot_and_hydrate(client: TestClient, tmp_path: Path):
     client.post("/v1/add", json={"identifier": "s", "fact": "snapshot test fact"})
 

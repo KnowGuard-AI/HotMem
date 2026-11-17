@@ -13,6 +13,7 @@ pytest.importorskip("mcp", reason="requires the optional [mcp] extra")
 
 from hotmem.db import MemoryDB  # noqa: E402
 from hotmem.mcp_server import (  # noqa: E402
+    _build_tool_list,
     _handle_add_memory,
     _handle_hydrate,
     _handle_list_memories,
@@ -268,6 +269,32 @@ def test_mcp_add_memory_forwards_metadata_tags_and_context(tmp_path: Path):
                 assert not res.root.isError, res.root.content[0].text
                 mid = _text(res.root)["memory_id"]
 
+                search_req = CallToolRequest(
+                    method="tools/call",
+                    params=CallToolRequestParams(
+                        name="search_memories",
+                        arguments={
+                            "query": "Relay fact",
+                            "namespace": "team/shared",
+                            "min_score": 0.0,
+                        },
+                    ),
+                )
+                search_res = await relay_srv.request_handlers[CallToolRequest](search_req)
+                assert not search_res.root.isError, search_res.root.content[0].text
+                assert [m["memory_id"] for m in _text(search_res.root)["memories"]] == [mid]
+
+                mismatch_req = CallToolRequest(
+                    method="tools/call",
+                    params=CallToolRequestParams(
+                        name="search_memories",
+                        arguments={"query": "Relay fact", "namespace": "other"},
+                    ),
+                )
+                mismatch_res = await relay_srv.request_handlers[CallToolRequest](mismatch_req)
+                assert not mismatch_res.root.isError, mismatch_res.root.content[0].text
+                assert _text(mismatch_res.root)["memories"] == []
+
                 list_req = CallToolRequest(
                     method="tools/call",
                     params=CallToolRequestParams(
@@ -421,6 +448,53 @@ def test_search_max_chars(state: _ServerState):
     payload = _text(result)
     total = sum(len(m["content"]) for m in payload["memories"])
     assert total <= 50
+
+
+def test_search_namespace_and_min_score(state: _ServerState):
+    finance = _text(
+        _handle_add_memory(
+            state,
+            {
+                "identifier": "finance",
+                "fact": "Meridian payment fee is two percent",
+                "namespace": "finance",
+            },
+        )
+    )["memory_id"]
+    _handle_add_memory(
+        state,
+        {
+            "identifier": "logistics",
+            "fact": "Meridian payment fee is two percent",
+            "namespace": "logistics",
+        },
+    )
+
+    props = next(t for t in _build_tool_list() if t.name == "search_memories").inputSchema[
+        "properties"
+    ]
+    assert {"namespace", "min_score"} <= set(props)
+
+    scoped = _text(
+        _handle_search_memories(state, {"query": "Meridian payment fee", "namespace": "finance"})
+    )
+    assert [row["memory_id"] for row in scoped["memories"]] == [finance]
+
+    state.namespace = "finance"
+    fixed_scope = _text(_handle_search_memories(state, {"query": "Meridian payment fee"}))
+    assert [row["memory_id"] for row in fixed_scope["memories"]] == [finance]
+    mismatch = _text(
+        _handle_search_memories(
+            state,
+            {"query": "Meridian payment fee", "namespace": "logistics"},
+        )
+    )
+    assert mismatch["memories"] == []
+
+    abstained = _text(
+        _handle_search_memories(state, {"query": "Meridian payment fee", "min_score": 1.0})
+    )
+    assert abstained["memories"] == []
 
 
 def test_memory_health(state: _ServerState):

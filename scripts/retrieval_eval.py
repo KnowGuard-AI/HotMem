@@ -321,6 +321,8 @@ def evaluate_query(
     duplicate_groups: dict[str, str],
     embedder=None,
     reranker=None,
+    min_score: float | None = None,
+    use_query_namespace: bool = False,
 ) -> QueryResult:
     """Run one query through production search and score it.
 
@@ -331,9 +333,16 @@ def evaluate_query(
     """
     from hotmem.search import search_memories
 
+    namespace = query_rec.get("namespace") if use_query_namespace else None
     started = time.perf_counter()
     rows = search_memories(
-        db, query_rec["query"], top_k=top_k, embedder=embedder, reranker=reranker
+        db,
+        query_rec["query"],
+        top_k=top_k,
+        embedder=embedder,
+        reranker=reranker,
+        namespace=namespace,
+        min_score=min_score,
     )
     display_elapsed = time.perf_counter() - started
 
@@ -343,7 +352,13 @@ def evaluate_query(
     eval_top = max(EVAL_TOP_K, top_k)
     if eval_top != top_k:
         rows = search_memories(
-            db, query_rec["query"], top_k=eval_top, embedder=embedder, reranker=reranker
+            db,
+            query_rec["query"],
+            top_k=eval_top,
+            embedder=embedder,
+            reranker=reranker,
+            namespace=namespace,
+            min_score=min_score,
         )
         ranked_ids = [r["memory_id"] for r in rows]
     _ = display_elapsed  # latency is sampled separately; see measure_latency
@@ -369,7 +384,15 @@ def evaluate_query(
 
 
 def measure_latency(
-    db, queries: list[dict], *, top_k: int, repeat: int, embedder=None, reranker=None
+    db,
+    queries: list[dict],
+    *,
+    top_k: int,
+    repeat: int,
+    embedder=None,
+    reranker=None,
+    min_score: float | None = None,
+    use_query_namespace: bool = False,
 ) -> dict:
     """Latency p50/p95 sampled separately from quality runs (issue #77)."""
     from hotmem.search import search_memories
@@ -378,7 +401,15 @@ def measure_latency(
     for _ in range(max(1, repeat)):
         for rec in queries:
             started = time.perf_counter()
-            search_memories(db, rec["query"], top_k=top_k, embedder=embedder, reranker=reranker)
+            search_memories(
+                db,
+                rec["query"],
+                top_k=top_k,
+                embedder=embedder,
+                reranker=reranker,
+                namespace=rec.get("namespace") if use_query_namespace else None,
+                min_score=min_score,
+            )
             samples_ms.append((time.perf_counter() - started) * 1000.0)
     if not samples_ms:
         return {"p50_ms": None, "p95_ms": None, "samples": 0}
@@ -415,6 +446,8 @@ def run_clone_equivalence(
     *,
     embedder=None,
     reranker=None,
+    min_score: float | None = None,
+    use_query_namespace: bool = False,
 ) -> dict:
     """Clone stage (#77 snapshot_hydration_equivalence): export the ingested
     instance as a verified package, hydrate a CLEAN target, re-run every
@@ -447,14 +480,16 @@ def run_clone_equivalence(
 
     drift: list[dict] = []
     identical = 0
-    for base in per_query:
+    for rec, base in zip(queries, per_query, strict=True):
         rerun = evaluate_query(
             target_db,
-            {"query_id": base.query_id, "category": base.category, "query": base.query},
+            rec,
             top_k=DEFAULT_TOP_K,
             duplicate_groups=duplicate_groups,
             embedder=embedder,
             reranker=reranker,
+            min_score=min_score,
+            use_query_namespace=use_query_namespace,
         )
         ids_match = rerun.ranked_ids == base.ranked_ids
         scores_match = rerun.ranked_scores == base.ranked_scores
@@ -501,6 +536,8 @@ def measure_cold_start(
     top_k: int,
     embedder_spec: str | None = None,
     model_path: str | None = None,
+    min_score: float | None = None,
+    use_query_namespace: bool = False,
 ) -> dict:
     """Fresh-process cold-start-to-first-query time (issue #77).
 
@@ -524,6 +561,10 @@ def measure_cold_start(
         cmd.extend(["--embedder", embedder_spec])
     if model_path:
         cmd.extend(["--embedder-model-path", model_path])
+    if min_score is not None:
+        cmd.extend(["--min-score", str(min_score)])
+    if use_query_namespace:
+        cmd.append("--use-query-namespace")
     started = time.perf_counter()
     proc = subprocess.run(cmd, capture_output=True, text=True)
     elapsed = time.perf_counter() - started
@@ -540,6 +581,8 @@ def run_cold_start_internal(
     embedder=None,
     embedder_spec: str | None = None,
     model_path: str | None = None,
+    min_score: float | None = None,
+    use_query_namespace: bool = False,
 ) -> int:
     """Internal mode for measure_cold_start: ingest + first query + exit."""
     corpus = load_corpus(corpus_path)
@@ -556,7 +599,14 @@ def run_cold_start_internal(
         if queries:
             from hotmem.search import search_memories
 
-            search_memories(db, queries[0]["query"], top_k=top_k, embedder=embedder)
+            search_memories(
+                db,
+                queries[0]["query"],
+                top_k=top_k,
+                embedder=embedder,
+                namespace=queries[0].get("namespace") if use_query_namespace else None,
+                min_score=min_score,
+            )
         db.close()
     return 0
 
@@ -580,6 +630,8 @@ def run_eval(
     embedder_spec: str | None = None,
     embedder_model_path: str | None = None,
     reranker=None,
+    min_score: float | None = None,
+    use_query_namespace: bool = False,
 ) -> dict:
     """Run the full evaluation; return the metrics document (JSON-safe).
 
@@ -622,10 +674,19 @@ def run_eval(
                     duplicate_groups=duplicate_groups,
                     embedder=active,
                     reranker=reranker,
+                    min_score=min_score,
+                    use_query_namespace=use_query_namespace,
                 )
             )
         latency = measure_latency(
-            db, queries, top_k=top_k, repeat=repeat, embedder=active, reranker=reranker
+            db,
+            queries,
+            top_k=top_k,
+            repeat=repeat,
+            embedder=active,
+            reranker=reranker,
+            min_score=min_score,
+            use_query_namespace=use_query_namespace,
         )
 
         clone = run_clone_equivalence(
@@ -636,6 +697,8 @@ def run_eval(
             Path(tmp),
             embedder=active,
             reranker=reranker,
+            min_score=min_score,
+            use_query_namespace=use_query_namespace,
         )
         cold = measure_cold_start(
             corpus_path,
@@ -643,6 +706,8 @@ def run_eval(
             top_k=top_k,
             embedder_spec=embedder_spec,
             model_path=embedder_model_path,
+            min_score=min_score,
+            use_query_namespace=use_query_namespace,
         )
         db.close()
     finally:
@@ -705,6 +770,42 @@ def run_eval(
         "clone_equivalence": clone,
         "cold_start": cold,
     }
+    if use_query_namespace:
+        doc["runtime"]["namespace_scope"] = "per-query fixture namespace"
+        namespace_by_id = {rec["memory_id"]: rec.get("namespace", "") for rec in corpus}
+        scoped_results = [
+            (query, result)
+            for query, result in zip(queries, per_query, strict=True)
+            if query.get("namespace") is not None
+        ]
+        returned_slots = sum(len(result.ranked_ids) for _, result in scoped_results)
+        wrong_namespace_slots = sum(
+            namespace_by_id.get(memory_id, "") != query["namespace"]
+            for query, result in scoped_results
+            for memory_id in result.ranked_ids
+        )
+        doc["namespace_scope_metrics"] = {
+            "queries": len(scoped_results),
+            "returned_slots": returned_slots,
+            "wrong_namespace_slots": wrong_namespace_slots,
+            "wrong_namespace_rate": (
+                wrong_namespace_slots / returned_slots if returned_slots else None
+            ),
+        }
+    if min_score is not None:
+        doc["runtime"]["min_score"] = min_score
+        negative_queries = [
+            result
+            for query, result in zip(queries, per_query, strict=True)
+            if query["category"] == "negative_or_no_answer"
+        ]
+        returned_queries = sum(bool(result.ranked_ids) for result in per_query)
+        doc["abstention"] = {
+            "queries_returned": returned_queries,
+            "queries_abstained": len(per_query) - returned_queries,
+            "no_answer_queries": len(negative_queries),
+            "no_answer_abstained": sum(not result.ranked_ids for result in negative_queries),
+        }
     doc["recommendation"] = build_recommendation(doc)
     return doc
 
@@ -808,6 +909,26 @@ def render_report(doc: dict) -> str:
         f"Stack: {doc['runtime']['fusion']} over {doc['runtime']['embedding_model']} "
         f"({doc['runtime']['embedding_dim']}-dim)."
     )
+    if "namespace_scope" in doc["runtime"] or "min_score" in doc["runtime"]:
+        lines.append(
+            f"Scope: {doc['runtime'].get('namespace_scope', 'unfiltered')}; "
+            f"minimum score: {doc['runtime'].get('min_score', 'none')}."
+        )
+    if "namespace_scope_metrics" in doc:
+        scope = doc["namespace_scope_metrics"]
+        lines.append(
+            f"Scoped namespace results: {scope['wrong_namespace_slots']} wrong-namespace slots "
+            f"out of {scope['returned_slots']} returned across {scope['queries']} queries."
+        )
+        lines.append("")
+    if "abstention" in doc:
+        abstention = doc["abstention"]
+        lines.append(
+            f"Abstention: {abstention['queries_returned']}/{doc['counts']['queries']} queries "
+            f"returned results; {abstention['no_answer_abstained']}/"
+            f"{abstention['no_answer_queries']} no-answer queries abstained."
+        )
+        lines.append("")
     lines.append("")
     lines.append("## Overall metrics")
     lines.append("")
@@ -930,6 +1051,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, default=None, help="Markdown report path")
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     parser.add_argument("--repeat", type=int, default=1, help="Latency sampling only")
+    parser.add_argument(
+        "--min-score",
+        type=float,
+        default=None,
+        help="Optional inclusive final-score cutoff; use a separate report for the opt-in run.",
+    )
+    parser.add_argument(
+        "--use-query-namespace",
+        action="store_true",
+        help="Apply namespace metadata from the query fixtures (default: unscoped).",
+    )
     parser.add_argument("--cold-start-internal", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--embedder",
@@ -964,6 +1096,8 @@ def main(argv: list[str] | None = None) -> int:
         "--reranker-pool", type=int, default=50, help="MMR candidate pool (10..200)."
     )
     args = parser.parse_args(argv)
+    if args.min_score is not None and not 0.0 <= args.min_score <= 1.0:
+        parser.error("--min-score must be between 0 and 1")
 
     if args.cold_start_internal:
         return run_cold_start_internal(
@@ -972,6 +1106,8 @@ def main(argv: list[str] | None = None) -> int:
             top_k=args.top_k,
             embedder_spec=args.embedder_spec,
             model_path=str(args.embedder_model_path) if args.embedder_model_path else None,
+            min_score=args.min_score,
+            use_query_namespace=args.use_query_namespace,
         )
 
     from hotmem.embed import resolve_embedder_from_config
@@ -1001,6 +1137,8 @@ def main(argv: list[str] | None = None) -> int:
                 str(args.embedder_model_path) if args.embedder_model_path else None
             ),
             reranker=reranker,
+            min_score=args.min_score,
+            use_query_namespace=args.use_query_namespace,
         )
     except FixtureError as err:
         print(f"fixture error: {err}", file=sys.stderr)

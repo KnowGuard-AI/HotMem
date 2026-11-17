@@ -79,6 +79,8 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "query": {"type": "string"},
             "top_k": {"type": "integer", "minimum": 1, "maximum": 100},
             "max_chars": {"type": "integer", "minimum": 1},
+            "namespace": {"type": "string"},
+            "min_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         },
         "required": ["query"],
     },
@@ -521,11 +523,20 @@ def create_relay_server(
                 query = str(arguments["query"])
                 top_k = int(arguments.get("top_k", 5))
                 max_chars = arguments.get("max_chars")
+                requested_namespace = arguments.get("namespace")
+                min_score = arguments.get("min_score")
                 if max_chars is not None:
                     max_chars = int(max_chars)
                 payload: dict[str, Any] = {"query": query, "top_k": top_k}
                 if max_chars is not None:
                     payload["max_chars"] = max_chars
+                effective_namespace = (
+                    requested_namespace if requested_namespace is not None else namespace
+                )
+                if effective_namespace is not None:
+                    payload["namespace"] = effective_namespace
+                if min_score is not None:
+                    payload["min_score"] = min_score
                 resp = await owned_client._client.post("/v1/search", json=payload)
                 resp.raise_for_status()
                 return _ok(resp.json())
@@ -857,6 +868,26 @@ def _handle_search_memories(state: _ServerState, arguments: dict[str, Any]) -> C
     max_chars = arguments.get("max_chars")
     if max_chars is not None:
         max_chars = int(max_chars)
+    requested_namespace = arguments.get("namespace")
+    if requested_namespace is not None and not isinstance(requested_namespace, str):
+        raise ValueError("namespace must be a string")
+    configured_namespace = getattr(state, "namespace", "") or None
+    namespace_guard = None
+    if requested_namespace is not None and configured_namespace is not None:
+
+        def _configured_scope(row: dict[str, Any]) -> bool:
+            return (row.get("namespace") or "") == configured_namespace
+
+        namespace_guard = _configured_scope
+    scope_namespace = (
+        requested_namespace if requested_namespace is not None else configured_namespace
+    )
+    min_score = arguments.get("min_score")
+    if min_score is not None:
+        if isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
+            raise ValueError("min_score must be a number between 0 and 1")
+        if not 0.0 <= min_score <= 1.0:
+            raise ValueError("min_score must be between 0 and 1")
 
     with Timer() as t:
         messages = search_memories(
@@ -866,6 +897,9 @@ def _handle_search_memories(state: _ServerState, arguments: dict[str, Any]) -> C
             max_chars=max_chars,
             embedder=state.embedder,
             reranker=state.reranker,
+            namespace=scope_namespace,
+            min_score=min_score,
+            row_filter=namespace_guard,
         )
 
     payload = {

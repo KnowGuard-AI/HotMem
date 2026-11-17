@@ -32,6 +32,80 @@ def _hdr(
     return headers
 
 
+def test_search_request_namespace_cannot_widen_caller_scope(tmp_path: Path):
+    """An explicit search namespace narrows results but cannot bypass caller policy."""
+    policy = PolicyConfig(
+        store_id="store-scope-search",
+        require_auth=True,
+        credentials=[
+            CallerCredential.from_token(
+                token="token-alpha",
+                caller_id="alpha",
+                store_id="store-scope-search",
+                namespaces=("alpha",),
+                operations=("read", "write"),
+                allowed_sessions=("session-alpha",),
+            ),
+            CallerCredential.from_token(
+                token="token-beta",
+                caller_id="beta",
+                store_id="store-scope-search",
+                namespaces=("beta",),
+                operations=("read", "write"),
+                allowed_sessions=("session-beta",),
+            ),
+        ],
+    )
+    app = create_app(
+        db_path=tmp_path / "search-scope.sqlite",
+        base_dir=tmp_path,
+        policy=policy,
+    )
+    with TestClient(app) as client:
+        for token, namespace, session in (
+            ("token-alpha", "alpha", "session-alpha"),
+            ("token-beta", "beta", "session-beta"),
+        ):
+            response = client.post(
+                "/v1/add",
+                headers=_hdr(
+                    token,
+                    store_id="store-scope-search",
+                    ns=namespace,
+                    session=session,
+                ),
+                json={"identifier": namespace, "fact": "shared word for scoped search"},
+            )
+            assert response.status_code == 200, response.text
+
+        own_scope = client.post(
+            "/v1/search",
+            headers=_hdr(
+                "token-alpha",
+                store_id="store-scope-search",
+                ns="alpha",
+                session="session-alpha",
+            ),
+            json={"query": "shared word", "namespace": "alpha"},
+        )
+        assert [row["content"] for row in own_scope.json()["memories"]] == [
+            "shared word for scoped search"
+        ]
+
+        widening_attempt = client.post(
+            "/v1/search",
+            headers=_hdr(
+                "token-alpha",
+                store_id="store-scope-search",
+                ns="alpha",
+                session="session-alpha",
+            ),
+            json={"query": "shared word", "namespace": "beta"},
+        )
+        assert widening_attempt.status_code == 200
+        assert widening_attempt.json()["memories"] == []
+
+
 def test_mvt110_1_search_preranking_scope_and_disclosure_modes(tmp_path: Path):
     """MVT-110.1: Pre-ranking scope under 25-row crowding + allow/redact/omit/fail_closed."""
     db_path = tmp_path / "mvt110_1.sqlite"

@@ -131,6 +131,8 @@ class SearchRequest(BaseModel):
     query: str
     top_k: int = Field(default=5, ge=1, le=100)
     max_chars: int | None = None
+    namespace: str | None = None
+    min_score: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class HydrateRequest(BaseModel):
@@ -406,6 +408,8 @@ def create_app(
             query=req.query,
             top_k=req.top_k,
             max_chars=req.max_chars,
+            namespace=req.namespace,
+            min_score=req.min_score,
         )
 
     @app.get("/v1/memories")

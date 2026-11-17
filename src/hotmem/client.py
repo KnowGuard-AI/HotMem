@@ -202,11 +202,18 @@ class HotMemClient:
         query: str,
         top_k: int = 5,
         max_chars: int | None = None,
+        *,
+        namespace: str | None = None,
+        min_score: float | None = None,
     ) -> list[dict[str, Any]]:
         """Search memories and return LLM-ready message objects."""
         payload: dict[str, Any] = {"query": query, "top_k": top_k}
         if max_chars is not None:
             payload["max_chars"] = max_chars
+        if namespace is not None:
+            payload["namespace"] = namespace
+        if min_score is not None:
+            payload["min_score"] = min_score
         resp = self._client.post("/v1/search", json=payload)
         resp.raise_for_status()
         return resp.json()["memories"]
@@ -562,11 +569,18 @@ class AsyncHotMemClient:
         query: str,
         top_k: int = 5,
         max_chars: int | None = None,
+        *,
+        namespace: str | None = None,
+        min_score: float | None = None,
     ) -> list[dict[str, Any]]:
         """Search memories and return LLM-ready message objects."""
         payload: dict[str, Any] = {"query": query, "top_k": top_k}
         if max_chars is not None:
             payload["max_chars"] = max_chars
+        if namespace is not None:
+            payload["namespace"] = namespace
+        if min_score is not None:
+            payload["min_score"] = min_score
         resp = await self._client.post("/v1/search", json=payload)
         resp.raise_for_status()
         return resp.json()["memories"]
