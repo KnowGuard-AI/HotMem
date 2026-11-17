@@ -891,6 +891,62 @@ def normalize_for_baseline(doc: dict) -> dict:
     return trimmed
 
 
+def report_differences(actual: dict, expected: dict, *, limit: int = 12) -> list[str]:
+    """Return stable quality paths that differ from a committed report.
+
+    The CI gate compares ordered ids and their aggregate quality metrics, not
+    raw floating-point similarity scores, which can vary slightly by CPU.
+    """
+
+    def rounded(value):
+        if isinstance(value, float):
+            return round(value, 12)
+        if isinstance(value, dict):
+            return {key: rounded(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rounded(item) for item in value]
+        return value
+
+    def quality_view(doc: dict) -> dict:
+        normalized = normalize_for_baseline(doc)
+        for result in normalized.get("per_query", []):
+            result.pop("scores", None)
+        return rounded(normalized)
+
+    left = quality_view(actual)
+    right = quality_view(expected)
+    differences: list[str] = []
+
+    def walk(a, b, path: str) -> None:
+        if len(differences) >= limit:
+            return
+        if type(a) is not type(b):
+            differences.append(f"{path}: {a!r} != {b!r}")
+        elif isinstance(a, dict):
+            for key in sorted(a.keys() | b.keys()):
+                if key not in a:
+                    differences.append(f"{path}.{key}: missing from actual")
+                elif key not in b:
+                    differences.append(f"{path}.{key}: unexpected in actual")
+                else:
+                    walk(a[key], b[key], f"{path}.{key}")
+                if len(differences) >= limit:
+                    return
+        elif isinstance(a, list):
+            if len(a) != len(b):
+                differences.append(f"{path}: list length {len(a)} != {len(b)}")
+                return
+            for index, (a_item, b_item) in enumerate(zip(a, b, strict=True)):
+                walk(a_item, b_item, f"{path}[{index}]")
+                if len(differences) >= limit:
+                    return
+        elif a != b:
+            differences.append(f"{path}: {a!r} != {b!r}")
+
+    walk(left, right, "$report")
+    return differences
+
+
 def render_report(doc: dict) -> str:
     """Render the human-readable Markdown report (issue #77 user outcome)."""
     lines: list[str] = []
@@ -1049,6 +1105,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--queries", type=Path, default=Path("bench/retrieval/queries.jsonl"))
     parser.add_argument("--output", type=Path, default=None, help="JSON result path")
     parser.add_argument("--report", type=Path, default=None, help="Markdown report path")
+    parser.add_argument(
+        "--compare-to",
+        type=Path,
+        default=None,
+        help="Fail if stable metrics or ordered results differ from this committed JSON report.",
+    )
     parser.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     parser.add_argument("--repeat", type=int, default=1, help="Latency sampling only")
     parser.add_argument(
@@ -1150,6 +1212,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(render_report(doc), encoding="utf-8")
+    if args.compare_to:
+        try:
+            expected = json.loads(args.compare_to.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as err:
+            print(f"cannot read comparison report {args.compare_to}: {err}", file=sys.stderr)
+            return 2
+        differences = report_differences(doc, expected)
+        if differences:
+            print(f"retrieval report regressed vs {args.compare_to}:", file=sys.stderr)
+            for difference in differences:
+                print(f"  {difference}", file=sys.stderr)
+            return 1
     if not args.output and not args.report:
         print(json.dumps(doc, indent=2, sort_keys=True))
     return 0
