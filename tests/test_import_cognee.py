@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from pydantic import BaseModel
 
 from hotmem.cli import main
 from hotmem.db import MemoryDB
@@ -143,3 +144,24 @@ def test_cognee_import_accepts_archive_and_rejects_path_traversal(tmp_path: Path
     with pytest.raises(ValueError, match="unsafe path"):
         list(read_cognee_export(malicious_path))
     assert not (tmp_path / "outside.txt").exists()
+
+
+def test_cognee_checksum_accepts_pydantic_float_serialization(tmp_path: Path):
+    class Record(BaseModel):
+        external_id: str = "fact-1"
+        checksum: str | None = None
+        kind: str = "fact"
+        fact_text: str = "Small confidence value"
+        metadata: dict = {"confidence": 1e-7}
+
+    record = Record()
+    payload = record.model_dump_json(exclude={"checksum"}, exclude_none=True)
+    record.checksum = "sha256:" + hashlib.sha256(payload.encode()).hexdigest()
+    source = tmp_path / "export"
+    source.mkdir()
+    (source / "manifest.json").write_text(
+        json.dumps({"cogx_version": "0.2", "source_system": "cognee", "counts": {"fact": 1}})
+    )
+    (source / "facts.jsonl").write_text(record.model_dump_json(exclude_none=True) + "\n")
+
+    assert list(read_cognee_export(source))[0]["fact_text"] == "Small confidence value"

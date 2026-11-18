@@ -146,11 +146,27 @@ def _read_manifest(directory: Path) -> dict[str, Any]:
     return manifest
 
 
-def _checksum(record: dict[str, Any]) -> str:
-    # Cognee's COGX writer hashes compact, field-ordered JSON with the checksum
-    # field removed. Python's JSON parser retains that field order.
-    payload = {key: value for key, value in record.items() if key != "checksum"}
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+def _checksum(line: str) -> str:
+    # The upstream writer emits compact JSON and hashes that same serialization
+    # without the checksum field. Preserve the original value bytes: Python's
+    # JSON encoder can render valid floats differently from Pydantic's encoder.
+    decoder = json.JSONDecoder()
+    source = line.strip()
+    position = 1
+    fields = []
+    while position < len(source) - 1:
+        start = position
+        key, position = decoder.raw_decode(source, position)
+        if position >= len(source) or source[position] != ":":
+            raise ValueError("invalid Cognee checksum serialization")
+        _, position = decoder.raw_decode(source, position + 1)
+        if key != "checksum":
+            fields.append(source[start:position])
+        if source[position] == ",":
+            position += 1
+        elif source[position] != "}":
+            raise ValueError("invalid Cognee checksum serialization")
+    encoded = "{" + ",".join(fields) + "}"
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
@@ -310,7 +326,7 @@ def read_cognee_export(
                                 f"expected {kind!r}, got {record_kind!r}"
                             )
                         checksum = record.get("checksum")
-                        if checksum is not None and checksum != _checksum(record):
+                        if checksum is not None and checksum != _checksum(line):
                             raise ValueError(f"checksum mismatch in {file_name}:{line_number}")
                         found += 1
                         text = _record_text(kind, record)
