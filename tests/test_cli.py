@@ -63,6 +63,7 @@ def test_status_down_exits_nonzero():
 
 
 def test_mcp_read_only_requires_existing_db_without_creating_it(tmp_path: Path):
+    pytest.importorskip("mcp")
     db_path = tmp_path / "missing.sqlite"
     result = CliRunner().invoke(main, ["mcp", "--db", str(db_path), "--read-only"])
     assert result.exit_code == 1
@@ -71,6 +72,7 @@ def test_mcp_read_only_requires_existing_db_without_creating_it(tmp_path: Path):
 
 
 def test_mcp_read_only_mount_does_not_bootstrap_missing_mount(tmp_path: Path):
+    pytest.importorskip("mcp")
     mount_path = tmp_path / "missing-mount"
     result = CliRunner().invoke(main, ["mcp", "--mount", str(mount_path), "--read-only"])
     assert result.exit_code == 1
