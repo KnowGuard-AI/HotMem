@@ -85,6 +85,8 @@ def reembed_store(
                 result.reembedded += len(rows)
             else:
                 try:
+                    batch_reembedded = 0
+                    batch_failed = 0
                     for row in rows:
                         text = row.get("fact_text") or row.get("fact_summary") or ""
                         try:
@@ -96,6 +98,7 @@ def reembed_store(
                                 )
                         except Exception as err:
                             result.failed += 1
+                            batch_failed += 1
                             _trace.warn(
                                 "embed",
                                 "row left unchanged; embedding failed",
@@ -110,6 +113,21 @@ def reembed_store(
                             _commit=False,
                         )
                         result.reembedded += 1
+                        batch_reembedded += 1
+                    if batch_reembedded:
+                        # The fingerprint change must commit with the vectors:
+                        # interruption between batches must invalidate an index.
+                        append_event(
+                            db,
+                            event_type=EventType.EMBEDDING_REBUILT,
+                            payload={
+                                "embedding_model": key,
+                                "embedding_dim": descriptor.dimension,
+                                "reembedded": batch_reembedded,
+                                "failed": batch_failed,
+                            },
+                            _commit=False,
+                        )
                     db.commit()
                 except BaseException:
                     db.rollback()
@@ -117,19 +135,6 @@ def reembed_store(
             if on_progress is not None:
                 on_progress(len(rows))
 
-        if not dry_run and result.reembedded:
-            # Observational marker: moves the store fingerprint so a derived
-            # vector index built before the pass reads stale and is rebuilt.
-            append_event(
-                db,
-                event_type=EventType.EMBEDDING_REBUILT,
-                payload={
-                    "embedding_model": key,
-                    "embedding_dim": descriptor.dimension,
-                    "reembedded": result.reembedded,
-                    "failed": result.failed,
-                },
-            )
     result.after = result.before if dry_run else db.embedding_model_counts()
     result.ms = timer.ms
     _trace.info(

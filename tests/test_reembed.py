@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import math
 
+import pytest
+
 from hotmem.db import MemoryDB
 from hotmem.embed import EmbeddingDescriptor
 from hotmem.events import EventType, query_events
@@ -112,5 +114,25 @@ def test_repeat_reembed_is_a_noop(tmp_path):
         assert repeat.failed == 0
         assert embedder.calls == calls
         assert query_events(db, event_type=EventType.EMBEDDING_REBUILT)["count"] == 1
+    finally:
+        db.close()
+
+
+def test_interrupted_batch_invalidates_index_and_resumes(tmp_path):
+    db = MemoryDB(tmp_path / "interrupted.sqlite")
+    try:
+        _add(db, "one", "first memory")
+        _add(db, "two", "second memory")
+        before = db.fingerprint()
+        embedder = FakeEmbedder()
+
+        def interrupt(_count):
+            raise RuntimeError("interrupted after batch commit")
+
+        with pytest.raises(RuntimeError, match="interrupted"):
+            reembed_store(db, embedder, batch_size=1, on_progress=interrupt)
+        assert db.fingerprint() != before
+        assert query_events(db, event_type=EventType.EMBEDDING_REBUILT)["count"] == 1
+        assert reembed_store(db, embedder, batch_size=1).reembedded == 1
     finally:
         db.close()
