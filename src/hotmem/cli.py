@@ -1369,10 +1369,12 @@ def mcp(
             swap_path = str(config.swap_path)
 
     assert db_path is not None
-    if read_only and not _Path(db_path).expanduser().is_file():
-        raise click.ClickException(
-            f"read-only MCP requires an existing database file: {_Path(db_path).expanduser()}"
-        )
+    if read_only:
+        db_path = str(_Path(db_path).expanduser())
+        if not _Path(db_path).is_file():
+            raise click.ClickException(
+                f"read-only MCP requires an existing database file: {db_path}"
+            )
 
     _trace.info(
         "mcp",

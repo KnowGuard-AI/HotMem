@@ -80,6 +80,18 @@ def test_mcp_read_only_mount_does_not_bootstrap_missing_mount(tmp_path: Path):
     assert not mount_path.exists()
 
 
+def test_mcp_read_only_expands_home_in_db_path(tmp_path: Path, monkeypatch):
+    pytest.importorskip("mcp")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    db_path = tmp_path / "hotmem.sqlite"
+    db_path.touch()
+    with mock.patch("hotmem.mcp_server.run", new_callable=mock.AsyncMock) as run:
+        result = CliRunner().invoke(main, ["mcp", "--db", "~/hotmem.sqlite", "--read-only"])
+    assert result.exit_code == 0, result.output
+    assert run.call_args.kwargs["db_path"] == str(db_path)
+
+
 def test_ingestion_commands_share_the_embedder_config(tmp_path: Path):
     """#78 review: hydrate / delta apply / import accept the shared embedder
     configuration and fail fast before touching data."""
