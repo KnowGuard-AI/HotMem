@@ -206,11 +206,11 @@ exact candidate scan so the options apply to all eligible rows. This can cost
 more than the vector-index path on large stores.
 
 The measured semantic run on the historical synthetic fixture is recorded in
-[`wp2-semantic-scope-threshold.json`](../bench/retrieval/wp2-semantic-scope-threshold.json).
+[`wp2-semantic-scope-threshold.json`](https://github.com/KnowGuard-AI/HotMem/blob/6a746f5/bench/retrieval/wp2-semantic-scope-threshold.json).
 At `min_score=0.4`, overall false-positive rate moves from 0.767 to 0.154 and
 all six no-answer queries return no results. Recall@5 moves from 1.000 to
 0.786; only 34/48 queries return any results. The hash run is also recorded in
-[`wp2-hash-scope-threshold.json`](../bench/retrieval/wp2-hash-scope-threshold.json):
+[`wp2-hash-scope-threshold.json`](https://github.com/KnowGuard-AI/HotMem/blob/6a746f5/bench/retrieval/wp2-hash-scope-threshold.json):
 with the same cutoff, only 15/48 queries return results and Recall@5 falls to
 0.302. The cutoff stays opt-in and must be tuned for the embedder and workload.
 For the six scoped cross-project semantic queries, wrong-namespace results
@@ -230,8 +230,8 @@ The deterministic generator now emits 1,000 memories and 368 graded queries
 across the same eight categories. The original 60/48 inputs remain frozen for
 `baseline.json`; the WP2 scope and cutoff reports also remain tied to that
 smaller fixture. New default-stack and semantic reports are committed as
-[`wp3-hash.json`](../bench/retrieval/wp3-hash.json) and
-[`wp3-semantic.json`](../bench/retrieval/wp3-semantic.json).
+[`wp3-hash.json`](https://github.com/KnowGuard-AI/HotMem/blob/735d78c/bench/retrieval/wp3-hash.json) and
+[`wp3-semantic.json`](https://github.com/KnowGuard-AI/HotMem/blob/735d78c/bench/retrieval/wp3-semantic.json).
 
 The CI job evaluates both embedders against these reports on Python 3.13. It
 compares ordered result IDs and quality metrics, while ignoring run timings

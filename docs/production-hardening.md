@@ -139,6 +139,6 @@ Measured on macOS 27.2.1 arm64, Python 3.11.9, SQLite 3.54.1; each row uses
 | 1,000,000 | 52.788 s | 11,488.974 ms | 11,702.829 ms | 1,580 MiB | 580 MiB |
 
 The exact samples, environment, and workload checks are in
-[`bench/store-scale/results.json`](../bench/store-scale/results.json). Peak RSS
+[`bench/store-scale/results.json`](https://github.com/KnowGuard-AI/HotMem/blob/4179683/bench/store-scale/results.json). Peak RSS
 and latency reflect this machine and this synthetic default-path workload;
 they are not production capacity guarantees.

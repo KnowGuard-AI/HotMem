@@ -88,6 +88,7 @@ curl -X POST http://127.0.0.1:8711/v1/search \
 - [CLI](cli.md)
 - [Production Hardening](production-hardening.md)
 - [Extraction Boundary Decision](decisions/extraction-boundary.md)
+- [Competitive Evidence](competitiveness.md)
 - [Move from mem0](migrate-from-mem0.md)
 - [Move from Cognee](migrate-from-cognee.md)
 - [Snapshot v2 Format](snapshot-v2.md)
