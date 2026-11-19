@@ -22,12 +22,14 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+from hotmem.importers.cognee import read_cognee_export
 from hotmem.importers.mem0 import read_mem0_sqlite
 from hotmem.importers.okf import read_okf
 
 ImporterFn = Callable[[Path], Iterator[dict]]
 
 IMPORTERS: dict[str, ImporterFn] = {
+    "cognee": read_cognee_export,
     "mem0": read_mem0_sqlite,
     "okf": read_okf,
 }

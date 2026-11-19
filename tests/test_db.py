@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import sqlite3
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -15,6 +20,99 @@ def test_insert_and_count(tmp_db: MemoryDB):
     blob = pack_embedding(vec)
     tmp_db.insert(id="abc123", identifier="test", fact_text="test fact", embedding=blob)
     assert tmp_db.count() == 1
+
+
+def test_read_only_connection_cannot_write_or_create_database(tmp_path: Path):
+    db_path = tmp_path / "existing.sqlite"
+    db = MemoryDB(db_path)
+    db.insert(id="kept", identifier="test", fact_text="kept", embedding=b"")
+    db.close()
+
+    readonly = MemoryDB(db_path, read_only=True)
+    try:
+        assert readonly.count() == 1
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            readonly._conn.execute("DELETE FROM memories WHERE id = 'kept'")
+        assert readonly.count() == 1
+    finally:
+        readonly.close()
+
+    missing_path = tmp_path / "missing.sqlite"
+    with pytest.raises(sqlite3.OperationalError):
+        MemoryDB(missing_path, read_only=True)
+    assert not missing_path.exists()
+
+
+def test_concurrent_sqlite_writers_commit_all_rows(tmp_path: Path):
+    db_path = tmp_path / "concurrent.sqlite"
+    setup = MemoryDB(db_path)
+    setup.close()
+
+    writers = [MemoryDB(db_path), MemoryDB(db_path)]
+    barrier = Barrier(len(writers))
+
+    def write_batch(index: int) -> int:
+        writer = writers[index]
+        records = [
+            MemoryRecord(
+                id=f"writer-{index}-{row}",
+                identifier=f"writer-{index}",
+                fact_text=f"concurrent fact {index}-{row}",
+                embedding=b"",
+            )
+            for row in range(100)
+        ]
+        barrier.wait(timeout=5)
+        return writer.insert_many_ignore(records)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            inserted = list(pool.map(write_batch, range(2)))
+        assert inserted == [100, 100]
+        assert writers[0].count() == 200
+    finally:
+        for writer in writers:
+            writer.close()
+
+
+def test_reopen_recovers_after_process_exits_mid_transaction(tmp_path: Path):
+    db_path = tmp_path / "interrupted.sqlite"
+    setup = MemoryDB(db_path)
+    setup.insert(id="committed", identifier="test", fact_text="committed", embedding=b"")
+    setup.close()
+
+    crash_script = """
+import os
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("PRAGMA recursive_triggers=ON")
+conn.execute("BEGIN IMMEDIATE")
+conn.execute(
+    "INSERT INTO memories (id, identifier, fact_text) VALUES (?, ?, ?)",
+    ("uncommitted", "test", "uncommitted"),
+)
+os._exit(23)
+"""
+    crashed = subprocess.run(
+        [sys.executable, "-c", crash_script, str(db_path)],
+        check=False,
+        timeout=15,
+    )
+    assert crashed.returncode == 23
+
+    recovered = MemoryDB(db_path)
+    try:
+        assert recovered.count() == 1
+        assert recovered.get_memory("committed") is not None
+        assert recovered.get_memory("uncommitted") is None
+        recovered.insert(
+            id="after-recovery", identifier="test", fact_text="recovered", embedding=b""
+        )
+        assert recovered.count() == 2
+    finally:
+        recovered.close()
 
 
 def test_insert_replace(tmp_db: MemoryDB):

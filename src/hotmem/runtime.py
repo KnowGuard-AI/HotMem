@@ -1003,6 +1003,8 @@ class HotMemRuntime:
         query: str,
         top_k: int = 5,
         max_chars: int | None = None,
+        namespace: str | None = None,
+        min_score: float | None = None,
     ) -> dict[str, Any]:
         ctx.require_operation("read")
         row_filter = (
@@ -1024,6 +1026,8 @@ class HotMemRuntime:
                     query=query,
                     top_k=top_k,
                     max_chars=max_chars,
+                    namespace=namespace,
+                    min_score=min_score,
                     vector_index=vector_index,
                     embedder=self.embedder,
                     reranker=self.reranker,
@@ -1035,6 +1039,8 @@ class HotMemRuntime:
         messages, report, t = _run_search(self.vector_index)
         if (
             ctx.policy_enforced
+            and namespace is None
+            and min_score is None
             and len(messages) < top_k
             and self.vector_index is not None
             and not isinstance(self.vector_index, NullVectorIndex)

@@ -2,26 +2,24 @@
 """Generate the deterministic retrieval-eval fixtures (#77).
 
 Purpose:
-     Emits bench/retrieval/corpus.jsonl (60 synthetic memories) and
-     bench/retrieval/queries.jsonl (48 graded queries, >=6 per required
+     Emits bench/retrieval/corpus.jsonl (1,000 synthetic memories) and
+     bench/retrieval/queries.jsonl (368 graded queries, >=40 per required
      category) with stable ids and frozen temporal fields. Content is
      synthetic and safe to publish: no keys, no personal data, no copied
      text.
 
      Design notes:
-       - Two entity-name collisions across projects (Meridian, Northwind)
-         power the cross_project_isolation category; search has no
-         namespace filter, so leakage is measured as observed behavior.
-       - Three duplicate groups (original + 2 near-duplicates each) power
-         the near_duplicate_diversity category.
-       - Three revision pairs with explicit created_at power the
-         temporal_or_revision category (frozen clock).
-       - Distractors use distinct vocabulary; two negative queries
-         deliberately collide with entity names (Orchid, guitar) to expose
-         honest false positives.
+       - The original 60-memory / 48-query fixtures are frozen separately
+         for the historical baseline. This generator appends 40 examples in
+         each category, including 40 project collisions, 40 duplicate groups,
+         40 frozen revision pairs, and 40 no-answer queries.
+       - Five hundred deterministic operational distractors exercise ranking
+         against a larger store without referencing graded answer ids.
+       - Cross-project queries carry their intended namespace; ordinary runs
+         remain unscoped unless the evaluator option is supplied.
 
 Interface:
-      uv run python bench/retrieval/gen_fixtures.py   # rewrites both files
+      uv run python bench/retrieval/gen_fixtures.py   # rewrites both scale files
 
 Deps: stdlib only. Output is byte-identical across runs.
 """
@@ -47,14 +45,303 @@ def _mem(mid: str, identifier: str, ns: str, fact: str, **extra) -> dict:
     return rec
 
 
-def _q(qid: str, category: str, query: str, relevance: dict[str, int], notes: str) -> dict:
-    return {
+def _q(
+    qid: str,
+    category: str,
+    query: str,
+    relevance: dict[str, int],
+    notes: str,
+    *,
+    namespace: str | None = None,
+) -> dict:
+    record = {
         "query_id": qid,
         "category": category,
         "query": query,
         "relevance": relevance,
         "notes": notes,
     }
+    if namespace is not None:
+        record["namespace"] = namespace
+    return record
+
+
+def _scale_fixtures() -> tuple[list[dict], list[dict]]:
+    """Build deterministic, category-balanced scale coverage (#141 WP3)."""
+    corpus: list[dict] = []
+    queries: list[dict] = []
+    namespaces = ("finance", "logistics", "infra", "hr")
+
+    # Exact lexical lookup over unique operational records.
+    for i in range(40):
+        code = f"ARC-{i:03d}"
+        memory_id = f"scale-exact-{i:03d}"
+        days = 14 + (i * 7) % 73
+        corpus.append(
+            _mem(
+                memory_id,
+                f"records.archive-{code.lower()}",
+                namespaces[i % len(namespaces)],
+                f"Archive {code} retains signed delivery receipts for {days} days.",
+            )
+        )
+        queries.append(
+            _q(
+                f"q-scale-exact-{i:03d}",
+                "exact_lexical",
+                f"How many days does archive {code} retain signed delivery receipts?",
+                {memory_id: 3},
+                "Generated exact entity and fact lookup at scale.",
+            )
+        )
+
+    # Meaning-preserving paraphrases use varied but ordinary operational language.
+    resources = (
+        ("sealed claim packets", "locked storage"),
+        ("returned access badges", "secure bins"),
+        ("damaged parcel labels", "a restricted cabinet"),
+        ("retired signing keys", "offline storage"),
+    )
+    for i in range(40):
+        code = f"SITE-{i:03d}"
+        memory_id = f"scale-semantic-{i:03d}"
+        item, place = resources[i % len(resources)]
+        days = 3 + (i * 5) % 41
+        corpus.append(
+            _mem(
+                memory_id,
+                f"operations.retention-{code.lower()}",
+                namespaces[(i + 1) % len(namespaces)],
+                f"At {code}, {item} remain in {place} for {days} days before disposal.",
+            )
+        )
+        queries.append(
+            _q(
+                f"q-scale-semantic-{i:03d}",
+                "semantic_paraphrase",
+                f"How long must {code} keep those {item} before they can be discarded?",
+                {memory_id: 3},
+                "Generated paraphrase lookup at scale.",
+            )
+        )
+
+    # Identifier lookups exercise distinctive IDs amid a larger corpus.
+    for i in range(40):
+        code = f"MTR-{i:03d}-Q"
+        memory_id = f"scale-identifier-{i:03d}"
+        limit = 48 + (i * 11) % 97
+        corpus.append(
+            _mem(
+                memory_id,
+                f"infra.telemetry.{code.lower()}",
+                namespaces[(i + 2) % len(namespaces)],
+                f"Metric {code} raises a pressure warning above {limit} kilopascals.",
+            )
+        )
+        queries.append(
+            _q(
+                f"q-scale-identifier-{i:03d}",
+                "identifier_or_entity_name",
+                f"What pressure reading triggers the warning for metric {code}?",
+                {memory_id: 3},
+                "Generated identifier lookup at scale.",
+            )
+        )
+
+    # Forty version pairs each have a frozen timestamp and an explicitly graded
+    # older answer, so the suite checks current-vs-obsolete retrieval at scale.
+    for i in range(40):
+        code = f"ROUTE-{i:03d}"
+        old_id = f"scale-revision-{i:03d}-old"
+        new_id = f"scale-revision-{i:03d}-current"
+        old_limit = 20 + (i * 3) % 30
+        new_limit = old_limit + 7 + (i % 9)
+        namespace = namespaces[(i + 3) % len(namespaces)]
+        corpus.extend(
+            (
+                _mem(
+                    old_id,
+                    f"service.breaker.{code.lower()}",
+                    namespace,
+                    f"The {code} circuit breaker timeout was {old_limit} seconds.",
+                    created_at="2025-02-01T09:00:00Z",
+                ),
+                _mem(
+                    new_id,
+                    f"service.breaker.{code.lower()}",
+                    namespace,
+                    f"The current {code} circuit breaker timeout is {new_limit} seconds.",
+                    created_at="2026-08-01T09:00:00Z",
+                ),
+            )
+        )
+        queries.append(
+            _q(
+                f"q-scale-temporal-{i:03d}",
+                "temporal_or_revision",
+                f"What is the current timeout for the {code} circuit breaker?",
+                {new_id: 3, old_id: 1},
+                "Generated current-revision lookup over a frozen revision pair.",
+            )
+        )
+
+    # Forty duplicate groups provide 120 related records with a known grouping.
+    inspection_items = (
+        "badge printer",
+        "audit queue",
+        "packing station",
+        "archive index",
+    )
+    for i in range(40):
+        code = f"UNIT-{i:03d}"
+        representative = f"scale-duplicate-{i:03d}-a"
+        interval = 2 + (i % 11)
+        item = inspection_items[i % len(inspection_items)]
+        group = (
+            (
+                f"The {item} at {code} is inspected every {interval} weeks.",
+                f"scale-duplicate-{i:03d}-b",
+            ),
+            (
+                f"Teams inspect the {code} {item} once per {interval}-week cycle.",
+                f"scale-duplicate-{i:03d}-c",
+            ),
+        )
+        namespace = namespaces[i % len(namespaces)]
+        corpus.append(
+            _mem(
+                representative,
+                f"operations.inspection.{code.lower()}",
+                namespace,
+                f"Inspection of the {item} at {code} happens every {interval} weeks.",
+            )
+        )
+        for fact, memory_id in group:
+            corpus.append(
+                _mem(
+                    memory_id,
+                    f"operations.inspection.{code.lower()}",
+                    namespace,
+                    fact,
+                    duplicate_of=representative,
+                )
+            )
+        queries.append(
+            _q(
+                f"q-scale-duplicate-{i:03d}",
+                "near_duplicate_diversity",
+                f"How often is the {item} at {code} inspected?",
+                {
+                    representative: 3,
+                    f"scale-duplicate-{i:03d}-b": 3,
+                    f"scale-duplicate-{i:03d}-c": 3,
+                },
+                "All members of the generated duplicate group answer the query.",
+            )
+        )
+
+    # No-answer cases deliberately share ordinary domain terms with corpus rows.
+    for i in range(40):
+        code = f"UNLISTED-{i:03d}"
+        queries.append(
+            _q(
+                f"q-scale-negative-{i:03d}",
+                "negative_or_no_answer",
+                f"Which encryption key is assigned to storage locker {code}?",
+                {},
+                "Generated no-answer query; this locker has no stored key record.",
+            )
+        )
+
+    # Same entity names in finance and logistics create controlled collisions.
+    for i in range(40):
+        entity = f"Beacon {i:03d}"
+        finance_id = f"scale-cross-{i:03d}-finance"
+        logistics_id = f"scale-cross-{i:03d}-logistics"
+        credit = 1200 + (i * 137) % 9800
+        transit = 2 + (i * 3) % 19
+        corpus.extend(
+            (
+                _mem(
+                    finance_id,
+                    f"finance.beacon-{i:03d}",
+                    "finance",
+                    f"{entity} supplier invoices require review above EUR {credit}.",
+                ),
+                _mem(
+                    logistics_id,
+                    f"logistics.beacon-{i:03d}",
+                    "logistics",
+                    f"{entity} freight reaches the regional hub in {transit} days.",
+                ),
+            )
+        )
+        if i % 2:
+            namespace = "finance"
+            query = f"In finance, at what EUR amount does {entity} need invoice review?"
+            relevance = {finance_id: 3, logistics_id: 1}
+        else:
+            namespace = "logistics"
+            query = f"In logistics, how many days does {entity} freight take to reach the hub?"
+            relevance = {logistics_id: 3, finance_id: 1}
+        queries.append(
+            _q(
+                f"q-scale-cross-{i:03d}",
+                "cross_project_isolation",
+                query,
+                relevance,
+                "Generated cross-project entity collision.",
+                namespace=namespace,
+            )
+        )
+
+    # Stable facts run through the evaluator's clone-and-hydrate comparison.
+    for i in range(40):
+        code = f"NODE-{i:03d}"
+        memory_id = f"scale-snapshot-{i:03d}"
+        window = 6 + (i * 3) % 12
+        corpus.append(
+            _mem(
+                memory_id,
+                f"operations.maintenance.{code.lower()}",
+                namespaces[(i + 1) % len(namespaces)],
+                f"Maintenance window for {code} begins at {window:02d}:00 UTC each Sunday.",
+            )
+        )
+        queries.append(
+            _q(
+                f"q-scale-snapshot-{i:03d}",
+                "snapshot_hydration_equivalence",
+                f"When does the weekly maintenance window for {code} begin?",
+                {memory_id: 3},
+                "Generated stable lookup checked before and after clone plus hydrate.",
+            )
+        )
+
+    # Fill the remainder with varied, plausible non-answer operational facts.
+    # These make every query compete with 1,000 stored memories rather than a
+    # hand-picked set of 60, without duplicating any query targets.
+    for i in range(500):
+        code = f"ASSET-{i:04d}"
+        namespace = namespaces[i % len(namespaces)]
+        region = ("north", "central", "coastal", "western")[i % 4]
+        facts = (
+            f"Asset {code} in the {region} region reports inventory every {2 + i % 13} hours.",
+            f"The {code} service ticket is routed to the {region} support desk.",
+            f"Operations checks {code} during the {region} shift handover.",
+            f"The {code} record is retained in the {region} audit ledger.",
+            f"Weekly status for {code} is reviewed by the {region} team lead.",
+        )
+        corpus.append(
+            _mem(
+                f"scale-decoy-{i:04d}",
+                f"operations.asset.{code.lower()}",
+                namespace,
+                facts[i % len(facts)],
+            )
+        )
+
+    return corpus, queries
 
 
 CORPUS = [
@@ -705,6 +992,7 @@ QUERIES = [
         "In the finance project, what are Northwind's payment terms?",
         {"mem-northwind-fin-001": 3, "mem-northwind-log-001": 1},
         "Same entity name lives in two projects with conflicting facts.",
+        namespace="finance",
     ),
     _q(
         "q-iso-002",
@@ -712,6 +1000,7 @@ QUERIES = [
         "In the logistics project, what lead time does Northwind freight need?",
         {"mem-northwind-log-001": 3, "mem-northwind-fin-001": 1},
         "Project framing flips the expected winner.",
+        namespace="logistics",
     ),
     _q(
         "q-iso-003",
@@ -719,6 +1008,7 @@ QUERIES = [
         "For payments, what is Meridian's fee?",
         {"mem-meridian-fin-001": 3, "mem-meridian-log-001": 1},
         "Leakage from the logistics Meridian counts against attribution.",
+        namespace="finance",
     ),
     _q(
         "q-iso-004",
@@ -726,6 +1016,7 @@ QUERIES = [
         "For overseas shipments, which Meridian do we book?",
         {"mem-meridian-log-001": 3, "mem-meridian-fin-001": 1},
         "Project framing flips the expected winner.",
+        namespace="logistics",
     ),
     _q(
         "q-iso-005",
@@ -733,6 +1024,7 @@ QUERIES = [
         "Northwind invoice approval limit in the finance project?",
         {"mem-northwind-fin-001": 3, "mem-invoice-001": 2},
         "Acme invoice rule is supporting context, not the answer.",
+        namespace="finance",
     ),
     _q(
         "q-iso-006",
@@ -740,6 +1032,7 @@ QUERIES = [
         "In the logistics project, which vendor processes damaged parcel returns?",
         {"mem-orchid-001": 3},
         "Namespace-scoped lookup without a name collision.",
+        namespace="logistics",
     ),
     # ── snapshot_hydration_equivalence ───────────────────────────────────
     _q(
@@ -788,8 +1081,11 @@ QUERIES = [
 
 
 def main() -> None:
-    assert len(CORPUS) >= 50, f"corpus too small: {len(CORPUS)}"
-    assert len(QUERIES) >= 40, f"queries too small: {len(QUERIES)}"
+    scale_corpus, scale_queries = _scale_fixtures()
+    corpus = CORPUS + scale_corpus
+    queries = QUERIES + scale_queries
+    assert len(corpus) == 1000, f"expected 1,000 memories, got {len(corpus)}"
+    assert len(queries) == 368, f"expected 368 queries, got {len(queries)}"
     for cat in (
         "exact_lexical",
         "semantic_paraphrase",
@@ -800,14 +1096,18 @@ def main() -> None:
         "cross_project_isolation",
         "snapshot_hydration_equivalence",
     ):
-        n = sum(1 for q in QUERIES if q["category"] == cat)
-        assert n >= 5, f"{cat} has {n} queries"
-    ids = [m["memory_id"] for m in CORPUS]
+        n = sum(1 for q in queries if q["category"] == cat)
+        assert n >= 40, f"{cat} has only {n} queries"
+    ids = [m["memory_id"] for m in corpus]
     assert len(ids) == len(set(ids)), "duplicate memory ids"
-    qids = [q["query_id"] for q in QUERIES]
+    known_ids = set(ids)
+    for query in queries:
+        unknown = set(query["relevance"]) - known_ids
+        assert not unknown, f"{query['query_id']} refers to unknown memories: {sorted(unknown)}"
+    qids = [q["query_id"] for q in queries]
     assert len(qids) == len(set(qids)), "duplicate query ids"
 
-    for path, rows in ((HERE / "corpus.jsonl", CORPUS), (HERE / "queries.jsonl", QUERIES)):
+    for path, rows in ((HERE / "corpus.jsonl", corpus), (HERE / "queries.jsonl", queries)):
         with open(path, "w", encoding="utf-8", newline="\n") as f:
             for row in rows:
                 f.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")

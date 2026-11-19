@@ -266,22 +266,24 @@ def test_run_eval_rejects_malformed_fixtures(tmp_path: Path):
 # ── committed fixtures (#77): counts, coverage, determinism ─────────────────
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "bench" / "retrieval"
+BASELINE_CORPUS_PATH = FIXTURE_DIR / "baseline-corpus.jsonl"
+BASELINE_QUERIES_PATH = FIXTURE_DIR / "baseline-queries.jsonl"
 
 
 def test_committed_fixtures_meet_minimum_counts():
     corpus = retrieval_eval.load_corpus(FIXTURE_DIR / "corpus.jsonl")
-    queries = retrieval_eval.load_queries(
-        FIXTURE_DIR / "queries.jsonl"
-    )  # all 8 categories enforced
-    assert len(corpus) >= 50
-    assert len(queries) >= 40
+    queries = retrieval_eval.load_queries(FIXTURE_DIR / "queries.jsonl")
+    assert len(corpus) == 1000
+    assert len(queries) == 368
     from collections import Counter
 
     counts = Counter(q["category"] for q in queries)
     for category in retrieval_eval.REQUIRED_CATEGORIES:
-        assert counts[category] >= 5, category
+        assert counts[category] >= 40, category
     # Duplicate groups exist for the near_duplicate_diversity metric.
     assert any("duplicate_of" in rec for rec in corpus)
+    memory_ids = {record["memory_id"] for record in corpus}
+    assert all(set(query["relevance"]) <= memory_ids for query in queries)
 
 
 def test_committed_fixture_files_are_byte_stable(tmp_path: Path):
@@ -307,12 +309,9 @@ def test_committed_fixture_files_are_byte_stable(tmp_path: Path):
 # ── clone-equivalence stage + report (#77) ──────────────────────────────────
 
 
-def test_run_eval_full_fixtures_clone_equivalence_perfect(tmp_path: Path):
-    """The #77/#69 gate: every query's ordered ids and scores survive a
-    verified package export and clean hydration, byte for byte."""
-    doc = retrieval_eval.run_eval(
-        FIXTURE_DIR / "corpus.jsonl", FIXTURE_DIR / "queries.jsonl", work_dir=tmp_path
-    )
+def test_run_eval_baseline_fixture_clone_equivalence_perfect(tmp_path: Path):
+    """The focused #77/#69 test keeps the historical 60/48 fixture fast."""
+    doc = retrieval_eval.run_eval(BASELINE_CORPUS_PATH, BASELINE_QUERIES_PATH, work_dir=tmp_path)
     clone = doc["clone_equivalence"]
     assert clone["queries_compared"] == len(doc["per_query"])
     assert clone["clone_equivalence_rate"] == 1.0
@@ -324,10 +323,32 @@ def test_run_eval_full_fixtures_clone_equivalence_perfect(tmp_path: Path):
     assert "not cross-machine" in clone["note"]
 
 
+def test_opt_in_scope_and_score_threshold_report(tmp_path: Path):
+    """WP2 measures scoped leakage and abstention without changing default runs."""
+    doc = retrieval_eval.run_eval(
+        BASELINE_CORPUS_PATH,
+        BASELINE_QUERIES_PATH,
+        work_dir=tmp_path,
+        min_score=0.4,
+        use_query_namespace=True,
+    )
+
+    scope = doc["namespace_scope_metrics"]
+    assert scope["queries"] == 6
+    assert scope["wrong_namespace_slots"] == 0
+    assert scope["wrong_namespace_rate"] in (0.0, None)
+    assert doc["runtime"]["min_score"] == 0.4
+    assert doc["runtime"]["namespace_scope"] == "per-query fixture namespace"
+    assert doc["categories"]["negative_or_no_answer"]["false_positive_rate"]["n_applicable"] == 0
+    assert doc["abstention"]["queries_returned"] == 15
+    assert doc["abstention"]["no_answer_abstained"] == 6
+    assert doc["clone_equivalence"]["clone_equivalence_rate"] == 1.0
+
+
 def test_render_report_contains_required_sections(tmp_path: Path):
     doc = retrieval_eval.run_eval(
-        FIXTURE_DIR / "corpus.jsonl",
-        FIXTURE_DIR / "queries.jsonl",
+        BASELINE_CORPUS_PATH,
+        BASELINE_QUERIES_PATH,
         work_dir=tmp_path,
     )
     report = retrieval_eval.render_report(doc)
@@ -359,9 +380,9 @@ def test_main_writes_output_and_report_files(tmp_path: Path):
     code = retrieval_eval.main(
         [
             "--corpus",
-            str(FIXTURE_DIR / "corpus.jsonl"),
+            str(BASELINE_CORPUS_PATH),
             "--queries",
-            str(FIXTURE_DIR / "queries.jsonl"),
+            str(BASELINE_QUERIES_PATH),
             "--output",
             str(out),
             "--report",
@@ -398,6 +419,33 @@ def test_baseline_comparison_preserves_meaningful_regressions():
         assert _baseline_precision(baseline) != _baseline_precision({**baseline, **changed})
 
 
+def test_report_comparison_ignores_timings_but_catches_quality_changes():
+    expected = {
+        "overall": {"recall_at_5": {"mean": 0.875}},
+        "latency_ms": {"p50_ms": 2.0},
+        "cold_start": {"seconds": 1.0},
+        "clone_equivalence": {"clone_equivalence_rate": 1.0, "package": {"bytes": 10}},
+        "per_query": [{"query_id": "q1", "ranked_ids": ["m1"], "scores": [0.9]}],
+    }
+    actual = {
+        "overall": {"recall_at_5": {"mean": 0.87500000000001}},
+        "latency_ms": {"p50_ms": 3.0},
+        "cold_start": {"seconds": 2.0},
+        "clone_equivalence": {"clone_equivalence_rate": 1.0, "package": {"bytes": 11}},
+        "per_query": [{"query_id": "q1", "ranked_ids": ["m1"], "scores": [0.8]}],
+    }
+    assert retrieval_eval.report_differences(actual, expected) == []
+    actual["overall"]["recall_at_5"]["mean"] = 0.85
+    assert retrieval_eval.report_differences(actual, expected) == [
+        "$report.overall.recall_at_5.mean: 0.85 != 0.875"
+    ]
+    actual["overall"]["recall_at_5"]["mean"] = 0.875
+    actual["per_query"][0]["ranked_ids"] = ["m2"]
+    assert retrieval_eval.report_differences(actual, expected) == [
+        "$report.per_query[0].ranked_ids[0]: 'm2' != 'm1'"
+    ]
+
+
 def test_baseline_regression_guard(tmp_path: Path):
     """CI guard: unacknowledged changes to ordered ids or metrics fail.
 
@@ -408,9 +456,7 @@ def test_baseline_regression_guard(tmp_path: Path):
     """
     baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
     fresh = retrieval_eval.normalize_for_baseline(
-        retrieval_eval.run_eval(
-            FIXTURE_DIR / "corpus.jsonl", FIXTURE_DIR / "queries.jsonl", work_dir=tmp_path
-        )
+        retrieval_eval.run_eval(BASELINE_CORPUS_PATH, BASELINE_QUERIES_PATH, work_dir=tmp_path)
     )
     assert _baseline_precision(fresh) == _baseline_precision(baseline), (
         "retrieval behavior changed vs the committed baseline. If intentional, "
@@ -421,9 +467,7 @@ def test_baseline_regression_guard(tmp_path: Path):
 
 def test_recommendation_decision_rule(tmp_path: Path):
     """The deterministic rule fires in the documented order, from measured values."""
-    doc = retrieval_eval.run_eval(
-        FIXTURE_DIR / "corpus.jsonl", FIXTURE_DIR / "queries.jsonl", work_dir=tmp_path
-    )
+    doc = retrieval_eval.run_eval(BASELINE_CORPUS_PATH, BASELINE_QUERIES_PATH, work_dir=tmp_path)
     rec = doc["recommendation"]
     # Measured on the committed fixtures: clone equivalence is 1.0 and the
     # semantic gap is 66.7pp (>= 15pp), so the rule must point at #78.
@@ -461,9 +505,7 @@ def test_duplicate_slot_denominators_pinned():
 
 
 def test_recommendation_reports_both_duplicate_denominators(tmp_path: Path):
-    doc = retrieval_eval.run_eval(
-        FIXTURE_DIR / "corpus.jsonl", FIXTURE_DIR / "queries.jsonl", work_dir=tmp_path
-    )
+    doc = retrieval_eval.run_eval(BASELINE_CORPUS_PATH, BASELINE_QUERIES_PATH, work_dir=tmp_path)
     measured = doc["recommendation"]["measured"]
     assert measured["duplicate_slot_rate"] == pytest.approx(0.075)
     assert measured["near_duplicate_diversity_duplicate_slot_rate"] == pytest.approx(0.300)
@@ -533,8 +575,8 @@ def test_run_eval_threads_injected_embedder(tmp_path: Path):
         return embed_mod
 
     doc = retrieval_eval.run_eval(
-        FIXTURE_DIR / "corpus.jsonl",
-        FIXTURE_DIR / "queries.jsonl",
+        BASELINE_CORPUS_PATH,
+        BASELINE_QUERIES_PATH,
         work_dir=tmp_path,
         embedder=FakeEmbedder(),
     )

@@ -17,6 +17,10 @@ hotmem import --from okf --db ./company-wiki --target ./brain.sqlite --out ./wik
 hotmem status --url http://127.0.0.1:8711
 hotmem openapi --output openapi.json
 hotmem openapi --output openapi.yaml --format yaml
+hotmem model fetch
+hotmem model status --db ./my.sqlite
+hotmem reembed --db ./my.sqlite --embedder local-semantic --dry-run
+hotmem search "invoice approval" --db ./my.sqlite --namespace finance --min-score 0.4
 ```
 
 ## 3. Compatibility Rules
@@ -81,13 +85,26 @@ Import memories from a foreign memory system or knowledge bundle into HotMem.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--from` | required | Source type: `mem0` (SQLite history DB) or `okf` (OKF v0.2 bundle directory) |
-| `--db` | required | Source database path (mem0) or bundle directory (okf) |
+| `--from` | required | Source type: `mem0` (SQLite history DB), `cognee` (COGX directory or `.cogx.tar.gz`), or `okf` (OKF v0.2 bundle) |
+| `--db` | required | Source database or export path for the selected importer |
 | `--target` | temp DB | HotMem database to hydrate into |
 | `--out` | temp file, deleted | Keep the intermediate JSONL for review |
 
 The command always emits the intermediate JSONL before hydration — pass
 `--out` to keep a reviewable artifact of exactly what will be loaded.
+
+#### Cognee COGX exports (`--from cognee`)
+
+Reads a Cognee COGX 0.x export directory or `.cogx.tar.gz` archive. Typed
+documents, episodes, entities, facts, memories, and memory blocks become
+textual HotMem memories; text-bearing raw nodes are also imported. Source
+identifiers, scope, tags, and supported provenance fields are retained in
+HotMem metadata. Graph links are not rebuilt as a graph. Record checksums are
+verified when present; `permissions.json` is ignored.
+
+```bash
+hotmem import --from cognee --db ./cognee-export --target ./hotmem.sqlite
+```
 
 #### OKF bundles (`--from okf`)
 
@@ -162,3 +179,47 @@ hotmem handoff verify ./handoff
 hotmem handoff inspect ./handoff --json
 hotmem handoff hydrate ./handoff --db ./claude.sqlite
 ```
+
+### 4.8 `model` and `reembed`
+
+Model downloads are explicit. The optional `[semantic]` extra is required for
+fetching or using the local semantic embedder; importing HotMem, starting a
+server, searching, restoring, and testing never download a model.
+
+```bash
+hotmem model fetch
+hotmem model status [--db PATH] [--json]
+hotmem reembed --db PATH --embedder local-semantic [--dry-run] [--batch-size N]
+```
+
+`model fetch` downloads the pinned `potion-base-8M` artifact and verifies its
+file checksums before installing it in `~/.hotmem/models/`. `model status`
+reports whether the artifact is known and verified, and can count vectors in
+each embedding space in a store. `reembed` converts only derived vectors,
+leaves memory identity and provenance untouched, and can resume after an
+interruption; stop the daemon before running it. `--dry-run` counts rows
+without embedding or writing.
+
+`hotmem search --namespace NAME` restricts local and daemon-backed results to
+that exact namespace. `--min-score N` abstains from results below the inclusive
+final hybrid score cutoff. Both are opt-in. Scoped or thresholded searches use
+an exact candidate scan, which can cost more than the vector-index path on
+large stores.
+
+### 4.9 `mcp`
+
+Start MCP over stdio with an embedded database or a running daemon:
+
+```bash
+hotmem mcp --db ./hotmem.sqlite
+hotmem mcp --db ./hotmem.sqlite --read-only
+hotmem mcp --url http://127.0.0.1:8711 --read-only
+```
+
+`--read-only` omits the add, snapshot, hydrate, and handoff preparation tools
+from MCP discovery and rejects direct calls to them at the MCP server. In
+embedded mode it requires an existing database, opens it with SQLite query-only
+mode, and skips startup hydration. A mounted store must already have its
+manifest and database. The flag applies to tools served by this MCP process;
+it does not change the access policy of the daemon's HTTP API. Without the
+flag, the existing writable MCP tool set is unchanged.

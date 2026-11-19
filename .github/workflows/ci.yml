@@ -80,6 +80,35 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+  retrieval-quality:
+    name: Retrieval quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v4
+      - run: uv venv
+      - name: Install the optional local semantic embedder
+        run: uv pip install -e ".[dev,semantic]"
+      - name: Fetch the pinned 30 MB local model
+        run: uv run --extra dev --extra semantic hotmem model fetch
+      - name: Gate the hash embedder against the expanded report
+        run: >-
+          uv run --extra dev --extra semantic python scripts/retrieval_eval.py
+          --output "$RUNNER_TEMP/wp3-hash.json"
+          --compare-to bench/retrieval/wp3-hash.json
+      - name: Gate the semantic embedder against the expanded report
+        run: >-
+          uv run --extra dev --extra semantic python scripts/retrieval_eval.py
+          --embedder local-semantic
+          --output "$RUNNER_TEMP/wp3-semantic.json"
+          --compare-to bench/retrieval/wp3-semantic.json
+
   vector:
     runs-on: ubuntu-latest
     strategy:

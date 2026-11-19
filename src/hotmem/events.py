@@ -663,6 +663,7 @@ class EventType:
     HYGIENE_CHECKED = "hygiene.checked"
     HYGIENE_WARNING = "hygiene.warning"
     INDEX_REBUILT = "index.rebuilt"
+    EMBEDDING_REBUILT = "embedding.rebuilt"
     SYNC_APPLIED = "sync.applied"
     HANDOFF_APPLIED = "handoff.applied"
 
@@ -678,6 +679,7 @@ OBSERVATIONAL_EVENT_TYPES: frozenset[str] = frozenset(
         EventType.HYGIENE_CHECKED,
         EventType.HYGIENE_WARNING,
         EventType.INDEX_REBUILT,
+        EventType.EMBEDDING_REBUILT,
         EventType.SYNC_APPLIED,
         EventType.HANDOFF_APPLIED,
     }

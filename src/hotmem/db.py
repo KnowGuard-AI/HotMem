@@ -336,7 +336,14 @@ class MemoryDB:
     def __init__(self, db_path: str | Path, *, read_only: bool = False) -> None:
         self.db_path = str(db_path)
         self._read_only = read_only
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        if read_only:
+            # `query_only` prevents SQL writes through this connection, while
+            # SQLite's URI mode also prevents accidentally creating or
+            # modifying the database file itself.
+            readonly_uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+            self._conn = sqlite3.connect(readonly_uri, uri=True, check_same_thread=False)
+        else:
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.create_function("cosine_sim", 2, _cosine_similarity)
         if read_only:
@@ -347,7 +354,24 @@ class MemoryDB:
         self._conn.execute("PRAGMA recursive_triggers=ON")
         self._conn.executescript(_SCHEMA)
         self._migrate()
-        self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+        fts_initialized = self._conn.execute(
+            "SELECT value FROM store_meta WHERE key = 'fts_index_initialized'"
+        ).fetchone()
+        if fts_initialized is None:
+            # Repair/create the external-content index once. Rebuilding on
+            # every open needlessly takes a write lock and prevents
+            # concurrent readers/writers from opening the same store. The
+            # marker is committed with the rebuild so a crash retries it.
+            self._conn.execute("BEGIN IMMEDIATE")
+            fts_initialized = self._conn.execute(
+                "SELECT value FROM store_meta WHERE key = 'fts_index_initialized'"
+            ).fetchone()
+            if fts_initialized is None:
+                self._conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
+                self._conn.execute(
+                    "INSERT INTO store_meta (key, value) VALUES ('fts_index_initialized', '1')"
+                )
+            self._conn.commit()
         _trace.info("init", "database opened", detail={"path": self.db_path})
 
     def _migrate(self) -> None:
@@ -2342,6 +2366,70 @@ class MemoryDB:
                   AND (COALESCE(fact_text, '') != '' OR COALESCE(fact_summary, '') != ''))"""
         ).fetchone()
         return bool(row[0])
+
+    def embedding_model_counts(self) -> dict[str, int]:
+        """Count rows that carry a vector, keyed by stored ``embedding_model``.
+
+        The legacy empty model is reported under the hash default's key, the
+        same mapping the cosine guard applies (interchange-v1 §5).
+        """
+        rows = self._conn.execute(
+            """SELECT COALESCE(embedding_model, '') AS model, COUNT(*) AS n
+               FROM memories
+               WHERE embedding IS NOT NULL AND length(embedding) > 0
+               GROUP BY model"""
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for row in rows:
+            key = str(row["model"]) or EMBEDDING_MODEL
+            counts[key] = counts.get(key, 0) + int(row["n"])
+        return counts
+
+    def reembed_candidates(
+        self, embedding_model: str, *, after_rowid: int = 0, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """Page rows with searchable text that are not stored under ``embedding_model``.
+
+        Ordered by rowid with a cursor so a re-embed pass is O(batch) in memory
+        and resumable. Rows without text (file-backed without a summary) have
+        nothing to embed and are never candidates.
+        """
+        current = (
+            "(COALESCE(embedding_model, '') = ? OR COALESCE(embedding_model, '') = '')"
+            if embedding_model == EMBEDDING_MODEL
+            else "COALESCE(embedding_model, '') = ?"
+        )
+        rows = self._conn.execute(
+            f"""SELECT rowid AS _rowid, id, fact_text, fact_summary, embedding_model
+                FROM memories
+                WHERE rowid > ?
+                  AND (COALESCE(fact_text, '') != '' OR COALESCE(fact_summary, '') != '')
+                  AND NOT ({current} AND embedding IS NOT NULL AND length(embedding) > 0)
+                ORDER BY rowid
+                LIMIT ?""",
+            (after_rowid, embedding_model, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_embedding(
+        self,
+        memory_id: str,
+        embedding: bytes,
+        *,
+        embedding_dim: int,
+        embedding_model: str,
+        _commit: bool = True,
+    ) -> bool:
+        """Replace one row's stored vector and its descriptor fields together."""
+        cursor = self._conn.execute(
+            """UPDATE memories
+               SET embedding = ?, embedding_dim = ?, embedding_model = ?
+               WHERE id = ?""",
+            (embedding, embedding_dim, embedding_model, memory_id),
+        )
+        if _commit:
+            self._conn.commit()
+        return cursor.rowcount > 0
 
     def search_by_ids(
         self,

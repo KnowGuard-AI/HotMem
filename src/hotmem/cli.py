@@ -73,6 +73,25 @@ def _resolve_embedder_or_fail(embedder_spec: str | None, embedder_model_path: st
         raise click.ClickException(str(err)) from err
 
 
+def _note_hash_default(embedder, embedder_spec: str | None) -> None:
+    """Trace one hint when a long-running server falls back to the hash default.
+
+    Only for the implicit default: an operator who chose ``hash`` explicitly
+    (flag or HOTMEM_EMBEDDER) has decided and is not nagged.
+    """
+    from hotmem.embed import EMBEDDING_MODEL
+
+    if embedder_spec or os.environ.get("HOTMEM_EMBEDDER"):
+        return
+    if embedder.descriptor.key != EMBEDDING_MODEL:
+        return
+    _trace.info(
+        "embedder",
+        "using the hash default (matches character patterns, not meaning); for semantic "
+        "retrieval run `hotmem model fetch` and start with --embedder local-semantic",
+    )
+
+
 def _reranker_options(cmd):
     """Shared --reranker flags (issue #80): bounded second-stage selection.
 
@@ -137,7 +156,7 @@ def _daemon_client_options(cmd):
         "daemon_namespace",
         default=None,
         envvar="HOTMEM_NAMESPACE",
-        help="Target namespace scope for daemon operation.",
+        help="Target namespace scope for this operation.",
     )(cmd)
     cmd = click.option(
         "--source",
@@ -1083,6 +1102,7 @@ def serve(
         )
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    _note_hash_default(embedder, embedder_spec)
     reranker = _resolve_reranker_or_fail(reranker_spec, reranker_lambda, reranker_pool)
 
     swap_path = None
@@ -1253,6 +1273,11 @@ def task_sync(
     envvar="HOTMEM_HARNESS_ID",
     help="Explicit harness ID for MCP operation (#111).",
 )
+@click.option(
+    "--read-only",
+    is_flag=True,
+    help="Hide and reject MCP tools that write to the store or create export packages.",
+)
 @_daemon_client_options
 @_embedder_options
 @_reranker_options
@@ -1261,6 +1286,7 @@ def mcp(
     mount: str | None,
     db_path: str | None,
     daemon_harness_id: str | None,
+    read_only: bool,
     daemon_token: str | None,
     daemon_session_id: str | None,
     daemon_source: str | None,
@@ -1310,6 +1336,7 @@ def mcp(
                 source=daemon_source,
                 namespace=daemon_namespace,
                 expected_store_id=expected_store_id,
+                read_only=read_only,
             )
         )
         return
@@ -1317,16 +1344,37 @@ def mcp(
     from hotmem.mount import StoreIdentityError, StoreOwnershipError, bootstrap_mount
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    _note_hash_default(embedder, embedder_spec)
     reranker = _resolve_reranker_or_fail(reranker_spec, reranker_lambda, reranker_pool)
 
     swap_path = None
 
     if mount:
-        config = bootstrap_mount(mount)
-        db_path = str(config.db_path)
-        swap_path = str(config.swap_path)
+        if read_only:
+            mount_path = _Path(mount).expanduser().resolve()
+            db_file = mount_path / "hotmem.sqlite"
+            if not (mount_path.is_dir() and (mount_path / "manifest.json").is_file()):
+                raise click.ClickException(
+                    "read-only MCP mount mode requires an initialized mount directory"
+                )
+            if not db_file.is_file():
+                raise click.ClickException(
+                    f"read-only MCP mount mode requires an existing database: {db_file}"
+                )
+            db_path = str(db_file)
+            swap_path = str(mount_path / "swap.jsonl")
+        else:
+            config = bootstrap_mount(mount)
+            db_path = str(config.db_path)
+            swap_path = str(config.swap_path)
 
     assert db_path is not None
+    if read_only:
+        db_path = str(_Path(db_path).expanduser())
+        if not _Path(db_path).is_file():
+            raise click.ClickException(
+                f"read-only MCP requires an existing database file: {db_path}"
+            )
 
     _trace.info(
         "mcp",
@@ -1336,7 +1384,11 @@ def mcp(
     try:
         asyncio.run(
             run_mcp_server(
-                db_path=db_path, swap_path=swap_path, embedder=embedder, reranker=reranker
+                db_path=db_path,
+                swap_path=swap_path,
+                embedder=embedder,
+                reranker=reranker,
+                read_only=read_only,
             )
         )
     except (StoreOwnershipError, StoreIdentityError) as err:
@@ -1797,30 +1849,48 @@ def add(
 @click.option("--url", default=None, help="Running server URL (e.g. http://127.0.0.1:8711).")
 @click.option("--top-k", "top_k", default=5, type=int, help="Maximum results.")
 @click.option(
+    "--min-score",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help="Abstain from results below this inclusive final-score threshold.",
+)
+@click.option(
     "--json",
     "as_json",
     is_flag=True,
     help="Emit raw JSON (bypasses the renderer, for scripting).",
 )
 @_daemon_client_options
+@_embedder_options
 def search(
     query: str,
     db_path: str | None,
     url: str | None,
     top_k: int,
+    min_score: float | None,
     as_json: bool,
     daemon_token: str | None,
     daemon_session_id: str | None,
     daemon_source: str | None,
     daemon_namespace: str | None,
     expected_store_id: str | None,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
 ):
-    """Search memories and print formatted results with scores."""
+    """Search memories and print formatted results with scores.
+
+    With --db the query is embedded locally under --embedder (default: hash);
+    with --url the running daemon's embedder applies. --namespace scopes the
+    results; --min-score lets the search abstain below a final-score cutoff.
+    """
     rows = _run_search(
         query,
         db_path=db_path,
         url=url,
         top_k=top_k,
+        min_score=min_score,
+        embedder_spec=embedder_spec,
+        embedder_model_path=embedder_model_path,
         token=daemon_token,
         session_id=daemon_session_id,
         source=daemon_source,
@@ -1845,11 +1915,18 @@ def _run_search(
     session_id: str | None = None,
     source: str | None = None,
     namespace: str | None = None,
+    min_score: float | None = None,
     expected_store_id: str | None = None,
+    embedder_spec: str | None = None,
+    embedder_model_path: str | None = None,
 ) -> list[dict]:
     """Resolve backend (HTTP server or local DB) and return search rows."""
     if url is not None and db_path is not None:
         raise click.ClickException("pass either --db or --url, not both")
+    if url is not None and (embedder_spec or embedder_model_path):
+        raise click.ClickException(
+            "--embedder applies to --db searches; with --url the daemon's embedder is used"
+        )
 
     if url is not None:
         try:
@@ -1861,7 +1938,7 @@ def _run_search(
                 namespace=namespace,
                 expected_store_id=expected_store_id,
             )
-            return client.search(query, top_k=top_k)
+            return client.search(query, top_k=top_k, namespace=namespace, min_score=min_score)
         except Exception as err:
             _raise_cli_http_error(err)
 
@@ -1870,11 +1947,38 @@ def _run_search(
 
     if not db_path:
         raise click.ClickException("search requires --db PATH or --url URL")
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
     db = MemoryDB(db_path)
     try:
-        return search_memories(db, query=query, top_k=top_k)
+        _warn_embedding_space_mismatch(db.embedding_model_counts(), embedder.descriptor.key)
+        return search_memories(
+            db,
+            query=query,
+            top_k=top_k,
+            embedder=embedder,
+            namespace=namespace,
+            min_score=min_score,
+        )
     finally:
         db.close()
+
+
+def _warn_embedding_space_mismatch(counts: dict[str, int], active_key: str) -> None:
+    """Say so on stderr when no stored vector is in the query's embedding space.
+
+    Such a search still returns lexical/importance matches, but cosine
+    contributes nothing; without the notice that looks like poor retrieval
+    rather than a configuration mismatch.
+    """
+    if not counts or counts.get(active_key):
+        return
+    stored = ", ".join(f"{model} ({n})" for model, n in sorted(counts.items()))
+    click.echo(
+        f"warning: no stored vector uses the active embedder {active_key!r}; "
+        f"store holds {stored}. Results are lexical-only. Pass the matching "
+        "--embedder, or convert the store with `hotmem reembed`.",
+        err=True,
+    )
 
 
 @main.command()
@@ -2031,6 +2135,7 @@ def playground(
     from hotmem.playground import run_playground
 
     embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    _note_hash_default(embedder, embedder_spec)
     reranker = _resolve_reranker_or_fail(reranker_spec, reranker_lambda, reranker_pool)
     extra_kwargs: dict[str, Any] = {}
     if daemon_token is not None:
@@ -2065,15 +2170,15 @@ def playground(
     "--from",
     "source",
     required=True,
-    type=click.Choice(["mem0", "okf"], case_sensitive=False),
-    help="Source memory system to import from (mem0) or an OKF v0.2 bundle (okf).",
+    type=click.Choice(["cognee", "mem0", "okf"], case_sensitive=False),
+    help="Source export format: Cognee COGX, mem0 SQLite history, or OKF v0.2.",
 )
 @click.option(
     "--db",
     "source_db",
     required=True,
     type=click.Path(exists=True),
-    help="Path to the source memory database (mem0) or OKF bundle directory (okf).",
+    help="Path to the source export: COGX directory/archive, mem0 SQLite DB, or OKF bundle.",
 )
 @click.option(
     "--target",
@@ -2816,3 +2921,171 @@ def handoff_hydrate(
         brief=result.brief_identifier,
         **result.disposition(),
     )
+
+
+# ── model provisioning and re-embedding ──────────────────────────────────────
+
+
+@main.group()
+def model():
+    """Provision and inspect local embedding models.
+
+    `hotmem model fetch` is the only command that downloads a model. Nothing
+    else in HotMem ever does: not import, startup, search, or hydration.
+    """
+
+
+@model.command("fetch")
+@click.argument("name", required=False)
+@click.option(
+    "--dest",
+    default=None,
+    type=click.Path(file_okay=False),
+    help="Target directory (default: $HOTMEM_MODELS_DIR/NAME or ~/.hotmem/models/NAME).",
+)
+@click.option("--force", is_flag=True, help="Replace an existing directory at the target.")
+def model_fetch(name: str | None, dest: str | None, force: bool):
+    """Download a pinned model, verify its checksums, and install it locally."""
+    from hotmem.models import DEFAULT_MODEL, KNOWN_MODELS, ModelError, fetch_model
+
+    chosen = name or DEFAULT_MODEL
+    spec = KNOWN_MODELS.get(chosen)
+    if spec is not None:
+        click.echo(
+            f"fetching {spec.name} (~{spec.size_mb} MB) from {spec.repo}@{spec.commit[:12]}",
+            err=True,
+        )
+    try:
+        result = fetch_model(chosen, dest, force=force)
+    except ModelError as err:
+        raise click.ClickException(str(err)) from err
+    get_renderer().summary(
+        "model-fetch",
+        model=result.name,
+        path=str(result.path),
+        already_present=result.already_present,
+        files=result.files,
+        bytes=result.bytes,
+        verified=True,
+    )
+    click.echo(
+        "next: pass --embedder local-semantic (or set HOTMEM_EMBEDDER=local-semantic); "
+        "convert an existing store with `hotmem reembed --db PATH --embedder local-semantic`",
+        err=True,
+    )
+
+
+@model.command("status")
+@click.option("--db", "db_path", default=None, type=click.Path(exists=True), help="Store to check.")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
+def model_status(db_path: str | None, as_json: bool):
+    """Show provisioned models and, with --db, which embedding spaces a store holds."""
+    import importlib.util
+
+    from hotmem.embed import EMBEDDING_MODEL
+    from hotmem.models import DEFAULT_MODEL, default_model_path, models_dir, verify_model
+
+    status = verify_model(default_model_path())
+    report: dict[str, Any] = {
+        "models_dir": str(models_dir()),
+        "default_model": DEFAULT_MODEL,
+        "semantic_extra_installed": importlib.util.find_spec("model2vec") is not None,
+        "default_artifact": status.to_dict(),
+    }
+    if db_path is not None:
+        from hotmem.db import MemoryDB
+
+        db = MemoryDB(db_path, read_only=True)
+        try:
+            report["store"] = {"path": db_path, "vectors_by_model": db.embedding_model_counts()}
+        finally:
+            db.close()
+
+    if as_json:
+        click.echo(json.dumps(report, indent=2, sort_keys=True))
+        return
+
+    click.echo(f"models dir:       {report['models_dir']}")
+    click.echo(
+        f"[semantic] extra: {'installed' if report['semantic_extra_installed'] else 'missing'}"
+    )
+    if not status.provisioned:
+        click.echo(f"{DEFAULT_MODEL}: not provisioned — run `hotmem model fetch`")
+    elif status.verified:
+        click.echo(f"{DEFAULT_MODEL}: provisioned, checksums verified")
+    elif status.known:
+        click.echo(
+            f"{DEFAULT_MODEL}: provisioned, VERIFICATION FAILED: {'; '.join(status.problems)}"
+        )
+    else:
+        click.echo(f"{DEFAULT_MODEL}: provisioned by hand (pin {status.pin}); bytes not verified")
+    if db_path is not None:
+        counts = report["store"]["vectors_by_model"]
+        if not counts:
+            click.echo("store: no stored vectors")
+        for key, n in sorted(counts.items()):
+            click.echo(f"store: {n} vector(s) under {key}")
+        if set(counts) == {EMBEDDING_MODEL}:
+            click.echo(
+                "store uses only the hash default (character patterns, not meaning); "
+                "`hotmem reembed --db PATH --embedder local-semantic` converts it"
+            )
+        elif len(counts) > 1:
+            click.echo(
+                "store mixes embedding spaces; rows outside the active one are lexical-only "
+                "until `hotmem reembed` converts them"
+            )
+
+
+@main.command()
+@click.option("--db", "db_path", required=True, type=click.Path(exists=True), help="Store path.")
+@click.option("--batch-size", default=500, type=click.IntRange(min=1), help="Rows per commit.")
+@click.option("--dry-run", is_flag=True, help="Count the rows that would change; write nothing.")
+@_embedder_options
+def reembed(
+    db_path: str,
+    batch_size: int,
+    dry_run: bool,
+    embedder_spec: str | None,
+    embedder_model_path: str | None,
+):
+    """Rebuild a store's vectors under the selected embedder.
+
+    Needed after switching embedders: vectors from another embedding space
+    score zero cosine. Only the derived vector changes; memory text, ids,
+    provenance, and timestamps are untouched. The pass is resumable and
+    safe to repeat. Requires exclusive ownership, so stop the daemon first.
+    """
+    from hotmem.db import MemoryDB
+    from hotmem.mount import StoreOwnershipError, store_ownership
+    from hotmem.reembed import reembed_store
+
+    embedder = _resolve_embedder_or_fail(embedder_spec, embedder_model_path)
+    ui = get_renderer()
+    try:
+        with store_ownership(db_path):
+            db = MemoryDB(db_path)
+            try:
+                with ui.progress(None, desc="re-embedding") as tick:
+                    result = reembed_store(
+                        db, embedder, batch_size=batch_size, dry_run=dry_run, on_progress=tick
+                    )
+            finally:
+                db.close()
+    except StoreOwnershipError as err:
+        raise click.ClickException(str(err)) from err
+
+    ui.summary(
+        "reembed",
+        embedding_model=result.embedding_model,
+        dry_run=result.dry_run,
+        reembedded=result.reembedded,
+        failed=result.failed,
+        before=json.dumps(result.before, sort_keys=True),
+        after=json.dumps(result.after, sort_keys=True),
+    )
+    if result.failed:
+        raise click.ClickException(
+            f"{result.failed} row(s) could not be embedded and were left unchanged; "
+            "rerun to retry them"
+        )

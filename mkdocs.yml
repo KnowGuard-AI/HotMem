@@ -62,6 +62,11 @@ nav:
   - Architecture Overview: architecture.md
   - API Reference: api.md
   - CLI: cli.md
+  - Production Hardening: production-hardening.md
+  - Extraction Boundary Decision: decisions/extraction-boundary.md
+  - Competitive Evidence: competitiveness.md
+  - Move from mem0: migrate-from-mem0.md
+  - Move from Cognee: migrate-from-cognee.md
   - Snapshot v2 Format: snapshot-v2.md
   - Session Handoff: handoff.md
   - Retrieval Quality: retrieval-quality.md

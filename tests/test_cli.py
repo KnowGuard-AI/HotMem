@@ -62,6 +62,36 @@ def test_status_down_exits_nonzero():
     assert "No HotMem server" in result.output
 
 
+def test_mcp_read_only_requires_existing_db_without_creating_it(tmp_path: Path):
+    pytest.importorskip("mcp")
+    db_path = tmp_path / "missing.sqlite"
+    result = CliRunner().invoke(main, ["mcp", "--db", str(db_path), "--read-only"])
+    assert result.exit_code == 1
+    assert "read-only MCP requires an existing database file" in result.output
+    assert not db_path.exists()
+
+
+def test_mcp_read_only_mount_does_not_bootstrap_missing_mount(tmp_path: Path):
+    pytest.importorskip("mcp")
+    mount_path = tmp_path / "missing-mount"
+    result = CliRunner().invoke(main, ["mcp", "--mount", str(mount_path), "--read-only"])
+    assert result.exit_code == 1
+    assert "requires an initialized mount directory" in result.output
+    assert not mount_path.exists()
+
+
+def test_mcp_read_only_expands_home_in_db_path(tmp_path: Path, monkeypatch):
+    pytest.importorskip("mcp")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    db_path = tmp_path / "hotmem.sqlite"
+    db_path.touch()
+    with mock.patch("hotmem.mcp_server.run", new_callable=mock.AsyncMock) as run:
+        result = CliRunner().invoke(main, ["mcp", "--db", "~/hotmem.sqlite", "--read-only"])
+    assert result.exit_code == 0, result.output
+    assert run.call_args.kwargs["db_path"] == str(db_path)
+
+
 def test_ingestion_commands_share_the_embedder_config(tmp_path: Path):
     """#78 review: hydrate / delta apply / import accept the shared embedder
     configuration and fail fast before touching data."""
@@ -216,9 +246,22 @@ def test_search_url_backend(tmp_path: Path):
     fake_client = mock.Mock()
     fake_client.search = mock.Mock(return_value=rows)
     with mock.patch("hotmem.client.HotMemClient", return_value=fake_client):
-        result = runner.invoke(main, ["search", "q", "--url", "http://127.0.0.1:8711"])
+        result = runner.invoke(
+            main,
+            [
+                "search",
+                "q",
+                "--url",
+                "http://127.0.0.1:8711",
+                "--namespace",
+                "finance",
+                "--min-score",
+                "0.4",
+            ],
+        )
     assert result.exit_code == 0, result.output
     assert "hit" in result.output
+    fake_client.search.assert_called_once_with("q", top_k=5, namespace="finance", min_score=0.4)
 
 
 def test_search_rejects_both_db_and_url(tmp_path: Path):
@@ -228,6 +271,44 @@ def test_search_rejects_both_db_and_url(tmp_path: Path):
     )
     assert result.exit_code != 0
     assert "not both" in result.output.lower()
+
+
+def test_search_namespace_and_min_score_options(tmp_path: Path):
+    db_path = tmp_path / "scoped.sqlite"
+    db = MemoryDB(db_path)
+    for memory_id, namespace in (("finance", "finance"), ("logistics", "logistics")):
+        text = "Meridian payment fee is two percent"
+        db.insert(
+            id=memory_id,
+            identifier=memory_id,
+            fact_text=text,
+            embedding=pack_embedding(embed_text(text)),
+            namespace=namespace,
+        )
+    db.close()
+
+    runner = CliRunner()
+    scoped = runner.invoke(
+        main,
+        [
+            "search",
+            "Meridian payment fee",
+            "--db",
+            str(db_path),
+            "--namespace",
+            "finance",
+            "--json",
+        ],
+    )
+    assert scoped.exit_code == 0, scoped.output
+    assert {row["memory_id"] for row in json.loads(scoped.output)} == {"finance"}
+
+    abstained = runner.invoke(
+        main,
+        ["search", "Meridian payment fee", "--db", str(db_path), "--min-score", "1.0", "--json"],
+    )
+    assert abstained.exit_code == 0, abstained.output
+    assert json.loads(abstained.output) == []
 
 
 # ── inspect ────────────────────────────────────────────────────────────

@@ -16,7 +16,8 @@ Purpose:
      never canonical.
 
 Interface:
-      search_memories(db, query, top_k, max_chars?, include_archived?, vector_index?, embedder?)
+      search_memories(db, query, top_k, max_chars?, include_archived?, vector_index?,
+                      embedder?, namespace?, min_score?)
 
 Deps: hotmem.db, hotmem.embed, hotmem.trace
 Extension: add reranking, decay weighting, or MMR diversity here.
@@ -202,6 +203,8 @@ def search_memories(
     vector_index: VectorIndex | None = None,
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
+    namespace: str | None = None,
+    min_score: float | None = None,
     row_filter: Callable[[dict[str, Any]], bool] | None = None,
     row_transform: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
 ) -> list[dict[str, Any]]:
@@ -225,9 +228,30 @@ def search_memories(
     and response shape with zero extra work. A reranker violating its output
     contract falls back to the first-stage top-k with a trace diagnostic.
 
+    ``namespace`` restricts results to one exact namespace. ``min_score``
+    abstains from returning candidates below the inclusive final-score cutoff;
+    both are opt-in and leave the historical default ranking unchanged.
+
     Returns:
         List of dicts with keys: role, content, memory_id, identifier, score
     """
+    if namespace is not None and not isinstance(namespace, str):
+        raise ValueError("namespace must be a string")
+    if min_score is not None:
+        if isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
+            raise ValueError("min_score must be a number between 0 and 1")
+        if not 0.0 <= min_score <= 1.0:
+            raise ValueError("min_score must be between 0 and 1")
+
+    active_row_filter = row_filter
+    if namespace is not None:
+
+        def _in_scope(row: dict[str, Any]) -> bool:
+            matches_namespace = str(row.get("namespace") or "") == namespace
+            return matches_namespace and (row_filter is None or row_filter(row))
+
+        active_row_filter = _in_scope
+
     active = embedder if embedder is not None else DEFAULT_EMBEDDER
     with Timer() as t:
         # Embed the query under the active runtime embedder
@@ -236,18 +260,22 @@ def search_memories(
 
         # One FTS pass serves both candidate unioning and BM25 scoring (#92).
         fts_rows = db.fts_search(query, include_archived=include_archived)
-        if row_filter is not None:
-            fts_rows = [r for r in fts_rows if row_filter(r)]
+        if active_row_filter is not None:
+            fts_rows = [r for r in fts_rows if active_row_filter(r)]
+        # Scoped/abstaining searches need an exact eligible candidate set. A
+        # vector index only supplies an oversample window, which can hide
+        # in-scope rows or high-score hybrid matches outside that window.
+        candidate_index = None if namespace is not None or min_score is not None else vector_index
         candidates = _fetch_candidates(
             db,
             query_vec,
             query_blob,
             fts_rows,
             include_archived,
-            vector_index,
+            candidate_index,
             embedding_model=active.descriptor.key,
             embedding_dim=active.descriptor.dimension,
-            row_filter=row_filter,
+            row_filter=active_row_filter,
             top_k=top_k,
         )
         if row_transform is not None:
@@ -280,6 +308,8 @@ def search_memories(
 
         # Sort by final score descending, take top_k
         scored.sort(key=lambda x: x["final_score"], reverse=True)
+        if min_score is not None:
+            scored = [row for row in scored if row["final_score"] >= min_score]
 
         # Optional bounded second-stage selection (#80): disabled/identity is
         # the zero-work fast path — the pre-#80 order and response shape are

@@ -1,0 +1,1237 @@
+{
+  "abstention": {
+    "no_answer_abstained": 6,
+    "no_answer_queries": 6,
+    "queries_abstained": 14,
+    "queries_returned": 34
+  },
+  "categories": {
+    "cross_project_isolation": {
+      "duplicate_slot_rate": {
+        "mean": 0.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": 0.3333333333333333,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": 0.8333333333333334,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": 0.7464506618976133,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": 0.75,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": 0.8333333333333334,
+        "n_applicable": 6,
+        "n_queries": 6
+      }
+    },
+    "exact_lexical": {
+      "duplicate_slot_rate": {
+        "mean": 0.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": 0.08333333333333333,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      }
+    },
+    "identifier_or_entity_name": {
+      "duplicate_slot_rate": {
+        "mean": 0.0,
+        "n_applicable": 4,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": 0.0,
+        "n_applicable": 4,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": 0.6666666666666666,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": 0.60874488570952,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": 0.6666666666666666,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": 0.6666666666666666,
+        "n_applicable": 6,
+        "n_queries": 6
+      }
+    },
+    "near_duplicate_diversity": {
+      "duplicate_slot_rate": {
+        "mean": 0.6388888888888888,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": 0.041666666666666664,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": 0.3333333333333333,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      }
+    },
+    "negative_or_no_answer": {
+      "duplicate_slot_rate": {
+        "mean": null,
+        "n_applicable": 0,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": null,
+        "n_applicable": 0,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": null,
+        "n_applicable": 0,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": null,
+        "n_applicable": 0,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": null,
+        "n_applicable": 0,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": null,
+        "n_applicable": 0,
+        "n_queries": 6
+      }
+    },
+    "semantic_paraphrase": {
+      "duplicate_slot_rate": {
+        "mean": 0.0,
+        "n_applicable": 2,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": 0.0,
+        "n_applicable": 2,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": 0.3333333333333333,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": 0.3333333333333333,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": 0.3333333333333333,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": 0.3333333333333333,
+        "n_applicable": 6,
+        "n_queries": 6
+      }
+    },
+    "snapshot_hydration_equivalence": {
+      "duplicate_slot_rate": {
+        "mean": 0.0,
+        "n_applicable": 4,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": 0.0,
+        "n_applicable": 4,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": 0.6666666666666666,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": 0.6666666666666666,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": 0.6666666666666666,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": 0.6666666666666666,
+        "n_applicable": 6,
+        "n_queries": 6
+      }
+    },
+    "temporal_or_revision": {
+      "duplicate_slot_rate": {
+        "mean": 0.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "false_positive_rate": {
+        "mean": 0.4166666666666667,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "mrr_at_5": {
+        "mean": 0.6666666666666666,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "ndcg_at_5": {
+        "mean": 0.8749735738039529,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "queries": 6,
+      "recall_at_1": {
+        "mean": 0.25,
+        "n_applicable": 6,
+        "n_queries": 6
+      },
+      "recall_at_5": {
+        "mean": 1.0,
+        "n_applicable": 6,
+        "n_queries": 6
+      }
+    }
+  },
+  "clone_equivalence": {
+    "clone_equivalence_rate": 1.0,
+    "drift": [],
+    "note": "local diagnostics on one machine \u2014 not cross-machine guarantees",
+    "package": {
+      "export_seconds": 0.0109,
+      "gz_bytes": 68998,
+      "hydrate_records_per_s": 4477.3,
+      "hydrate_seconds": 0.0134,
+      "records": 60,
+      "verify_records_per_s": 16276.0,
+      "verify_seconds": 0.0037
+    },
+    "queries_compared": 48
+  },
+  "cold_start": {
+    "cold_start_seconds": 0.405
+  },
+  "counts": {
+    "corpus": 60,
+    "ingested": 60,
+    "queries": 48
+  },
+  "latency_ms": {
+    "p50_ms": 2.261,
+    "p95_ms": 2.67,
+    "samples": 48
+  },
+  "namespace_scope_metrics": {
+    "queries": 6,
+    "returned_slots": 9,
+    "wrong_namespace_rate": 0.0,
+    "wrong_namespace_slots": 0
+  },
+  "overall": {
+    "duplicate_slot_rate": {
+      "mean": 0.11274509803921567,
+      "n_applicable": 34,
+      "n_queries": 48
+    },
+    "false_positive_rate": {
+      "mean": 0.15441176470588236,
+      "n_applicable": 34,
+      "n_queries": 48
+    },
+    "mrr_at_5": {
+      "mean": 0.7380952380952381,
+      "n_applicable": 42,
+      "n_queries": 48
+    },
+    "ndcg_at_5": {
+      "mean": 0.7471670173444407,
+      "n_applicable": 42,
+      "n_queries": 48
+    },
+    "queries": 48,
+    "recall_at_1": {
+      "mean": 0.5714285714285715,
+      "n_applicable": 42,
+      "n_queries": 48
+    },
+    "recall_at_5": {
+      "mean": 0.7857142857142857,
+      "n_applicable": 42,
+      "n_queries": 48
+    }
+  },
+  "per_query": [
+    {
+      "category": "exact_lexical",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.5,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What approval does an Acme invoice above EUR 5,000 need?",
+      "query_id": "q-exact-001",
+      "ranked_ids": [
+        "mem-invoice-001",
+        "mem-northwind-fin-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5954,
+        0.5117
+      ]
+    },
+    {
+      "category": "exact_lexical",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "How often is password rotation for production servers?",
+      "query_id": "q-exact-002",
+      "ranked_ids": [
+        "mem-password-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5687
+      ]
+    },
+    {
+      "category": "exact_lexical",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "When do database backups run?",
+      "query_id": "q-exact-003",
+      "ranked_ids": [
+        "mem-backup-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4819
+      ]
+    },
+    {
+      "category": "exact_lexical",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "Do expense reports need receipts?",
+      "query_id": "q-exact-004",
+      "ranked_ids": [
+        "mem-expense-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5631
+      ]
+    },
+    {
+      "category": "exact_lexical",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "Which days can we deploy to production?",
+      "query_id": "q-exact-005",
+      "ranked_ids": [
+        "mem-deploy-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4356
+      ]
+    },
+    {
+      "category": "exact_lexical",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What is the public API rate limit per key?",
+      "query_id": "q-exact-006",
+      "ranked_ids": [
+        "mem-ratelimit-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5838
+      ]
+    },
+    {
+      "category": "semantic_paraphrase",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [
+        "mem-badge-001"
+      ],
+      "mrr_at_5": 0.0,
+      "ndcg_at_5": 0.0,
+      "query": "When do building cards stop working after someone exits?",
+      "query_id": "q-para-001",
+      "ranked_ids": [],
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "scores": []
+    },
+    {
+      "category": "semantic_paraphrase",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What time is the daily short meeting?",
+      "query_id": "q-para-002",
+      "ranked_ids": [
+        "mem-standup-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4044
+      ]
+    },
+    {
+      "category": "semantic_paraphrase",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "How do staff working from home reach internal systems?",
+      "query_id": "q-para-003",
+      "ranked_ids": [
+        "mem-vpn-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4081
+      ]
+    },
+    {
+      "category": "semantic_paraphrase",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [
+        "mem-expensetool-001"
+      ],
+      "mrr_at_5": 0.0,
+      "ndcg_at_5": 0.0,
+      "query": "Where do I file my trip receipts and how long do I have?",
+      "query_id": "q-para-004",
+      "ranked_ids": [],
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "scores": []
+    },
+    {
+      "category": "semantic_paraphrase",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [
+        "mem-mentor-001"
+      ],
+      "mrr_at_5": 0.0,
+      "ndcg_at_5": 0.0,
+      "query": "Who helps newcomers learn the codebase at the start?",
+      "query_id": "q-para-005",
+      "ranked_ids": [],
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "scores": []
+    },
+    {
+      "category": "semantic_paraphrase",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [
+        "mem-outage-001"
+      ],
+      "mrr_at_5": 0.0,
+      "ndcg_at_5": 0.0,
+      "query": "What happens if the website stops responding for customers?",
+      "query_id": "q-para-006",
+      "ranked_ids": [],
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "scores": []
+    },
+    {
+      "category": "identifier_or_entity_name",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.8262346571285599,
+      "query": "What does Meridian charge per transaction?",
+      "query_id": "q-ent-001",
+      "ranked_ids": [
+        "mem-meridian-fin-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5763
+      ]
+    },
+    {
+      "category": "identifier_or_entity_name",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.8262346571285599,
+      "query": "Which Meridian service handles overseas shipments?",
+      "query_id": "q-ent-002",
+      "ranked_ids": [
+        "mem-meridian-log-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.55
+      ]
+    },
+    {
+      "category": "identifier_or_entity_name",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What is Falcon?",
+      "query_id": "q-ent-003",
+      "ranked_ids": [
+        "mem-falcon-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4127
+      ]
+    },
+    {
+      "category": "identifier_or_entity_name",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [
+        "mem-quill-001"
+      ],
+      "mrr_at_5": 0.0,
+      "ndcg_at_5": 0.0,
+      "query": "What is Quill?",
+      "query_id": "q-ent-004",
+      "ranked_ids": [],
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "scores": []
+    },
+    {
+      "category": "identifier_or_entity_name",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [
+        "mem-aurora-001"
+      ],
+      "mrr_at_5": 0.0,
+      "ndcg_at_5": 0.0,
+      "query": "What is Aurora?",
+      "query_id": "q-ent-005",
+      "ranked_ids": [],
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "scores": []
+    },
+    {
+      "category": "identifier_or_entity_name",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What is the returns vendor called Orchid responsible for?",
+      "query_id": "q-ent-006",
+      "ranked_ids": [
+        "mem-orchid-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4953
+      ]
+    },
+    {
+      "category": "temporal_or_revision",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.5,
+      "missed_relevant": [],
+      "mrr_at_5": 0.5,
+      "ndcg_at_5": 0.7967075809905066,
+      "query": "What is the current quarterly report deadline?",
+      "query_id": "q-temp-001",
+      "ranked_ids": [
+        "mem-deadline-old-001",
+        "mem-deadline-new-001"
+      ],
+      "recall_at_1": 0.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5707,
+        0.5638
+      ]
+    },
+    {
+      "category": "temporal_or_revision",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.5,
+      "missed_relevant": [],
+      "mrr_at_5": 0.5,
+      "ndcg_at_5": 0.7967075809905066,
+      "query": "Where is the vendor portal login now?",
+      "query_id": "q-temp-002",
+      "ranked_ids": [
+        "mem-portal-old-001",
+        "mem-portal-new-001"
+      ],
+      "recall_at_1": 0.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.6257,
+        0.5329
+      ]
+    },
+    {
+      "category": "temporal_or_revision",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.5,
+      "missed_relevant": [],
+      "mrr_at_5": 0.5,
+      "ndcg_at_5": 0.7967075809905066,
+      "query": "What is the standard delivery lead time today?",
+      "query_id": "q-temp-003",
+      "ranked_ids": [
+        "mem-leadtime-old-001",
+        "mem-leadtime-new-001"
+      ],
+      "recall_at_1": 0.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5268,
+        0.5016
+      ]
+    },
+    {
+      "category": "temporal_or_revision",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.5,
+      "missed_relevant": [],
+      "mrr_at_5": 0.5,
+      "ndcg_at_5": 0.8597186998521972,
+      "query": "What was the quarterly report deadline before the change?",
+      "query_id": "q-temp-004",
+      "ranked_ids": [
+        "mem-deadline-new-001",
+        "mem-deadline-old-001"
+      ],
+      "recall_at_1": 0.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.558,
+        0.5522
+      ]
+    },
+    {
+      "category": "temporal_or_revision",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "Did the vendor portal address ever change?",
+      "query_id": "q-temp-005",
+      "ranked_ids": [
+        "mem-portal-new-001",
+        "mem-portal-old-001"
+      ],
+      "recall_at_1": 0.5,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5152,
+        0.4876
+      ]
+    },
+    {
+      "category": "temporal_or_revision",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.5,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "How long was standard delivery lead time in early 2026?",
+      "query_id": "q-temp-006",
+      "ranked_ids": [
+        "mem-leadtime-old-001",
+        "mem-leadtime-new-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.52,
+        0.4771
+      ]
+    },
+    {
+      "category": "near_duplicate_diversity",
+      "duplicate_slot_rate": 0.6666666666666666,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "How often is the employee handbook reviewed?",
+      "query_id": "q-dup-001",
+      "ranked_ids": [
+        "mem-handbook-001",
+        "mem-handbook-002",
+        "mem-handbook-003"
+      ],
+      "recall_at_1": 0.3333333333333333,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5567,
+        0.5365,
+        0.4721
+      ]
+    },
+    {
+      "category": "near_duplicate_diversity",
+      "duplicate_slot_rate": 0.6666666666666666,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "Who reviews the staff handbook and how often?",
+      "query_id": "q-dup-002",
+      "ranked_ids": [
+        "mem-handbook-001",
+        "mem-handbook-003",
+        "mem-handbook-002"
+      ],
+      "recall_at_1": 0.3333333333333333,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4816,
+        0.4809,
+        0.4697
+      ]
+    },
+    {
+      "category": "near_duplicate_diversity",
+      "duplicate_slot_rate": 0.6666666666666666,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "How often does the search cache refresh?",
+      "query_id": "q-dup-003",
+      "ranked_ids": [
+        "mem-cache-002",
+        "mem-cache-001",
+        "mem-cache-003"
+      ],
+      "recall_at_1": 0.3333333333333333,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5803,
+        0.5673,
+        0.5537
+      ]
+    },
+    {
+      "category": "near_duplicate_diversity",
+      "duplicate_slot_rate": 0.6666666666666666,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "When is the search cache refreshed during business hours?",
+      "query_id": "q-dup-004",
+      "ranked_ids": [
+        "mem-cache-002",
+        "mem-cache-001",
+        "mem-cache-003"
+      ],
+      "recall_at_1": 0.3333333333333333,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.6486,
+        0.6253,
+        0.5732
+      ]
+    },
+    {
+      "category": "near_duplicate_diversity",
+      "duplicate_slot_rate": 0.5,
+      "false_positive_rate": 0.25,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "Do international travel bookings need approval?",
+      "query_id": "q-dup-005",
+      "ranked_ids": [
+        "mem-travel-001",
+        "mem-travel-002",
+        "mem-travel-003",
+        "mem-northwind-log-001"
+      ],
+      "recall_at_1": 0.3333333333333333,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.6152,
+        0.5742,
+        0.5607,
+        0.4124
+      ]
+    },
+    {
+      "category": "near_duplicate_diversity",
+      "duplicate_slot_rate": 0.6666666666666666,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "Who approves international trips before ticketing?",
+      "query_id": "q-dup-006",
+      "ranked_ids": [
+        "mem-travel-003",
+        "mem-travel-002",
+        "mem-travel-001"
+      ],
+      "recall_at_1": 0.3333333333333333,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5975,
+        0.5608,
+        0.5584
+      ]
+    },
+    {
+      "category": "negative_or_no_answer",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [],
+      "mrr_at_5": null,
+      "ndcg_at_5": null,
+      "query": "How do I fix a flat tire on my car?",
+      "query_id": "q-neg-001",
+      "ranked_ids": [],
+      "recall_at_1": null,
+      "recall_at_5": null,
+      "scores": []
+    },
+    {
+      "category": "negative_or_no_answer",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [],
+      "mrr_at_5": null,
+      "ndcg_at_5": null,
+      "query": "What wine pairs well with salmon?",
+      "query_id": "q-neg-002",
+      "ranked_ids": [],
+      "recall_at_1": null,
+      "recall_at_5": null,
+      "scores": []
+    },
+    {
+      "category": "negative_or_no_answer",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [],
+      "mrr_at_5": null,
+      "ndcg_at_5": null,
+      "query": "Who won the last football world cup?",
+      "query_id": "q-neg-003",
+      "ranked_ids": [],
+      "recall_at_1": null,
+      "recall_at_5": null,
+      "scores": []
+    },
+    {
+      "category": "negative_or_no_answer",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [],
+      "mrr_at_5": null,
+      "ndcg_at_5": null,
+      "query": "What is the freezing point of liquid nitrogen?",
+      "query_id": "q-neg-004",
+      "ranked_ids": [],
+      "recall_at_1": null,
+      "recall_at_5": null,
+      "scores": []
+    },
+    {
+      "category": "negative_or_no_answer",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [],
+      "mrr_at_5": null,
+      "ndcg_at_5": null,
+      "query": "How do I care for an orchid houseplant?",
+      "query_id": "q-neg-005",
+      "ranked_ids": [],
+      "recall_at_1": null,
+      "recall_at_5": null,
+      "scores": []
+    },
+    {
+      "category": "negative_or_no_answer",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [],
+      "mrr_at_5": null,
+      "ndcg_at_5": null,
+      "query": "Which guitar chords should a beginner learn first?",
+      "query_id": "q-neg-006",
+      "ranked_ids": [],
+      "recall_at_1": null,
+      "recall_at_5": null,
+      "scores": []
+    },
+    {
+      "category": "cross_project_isolation",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 1.0,
+      "missed_relevant": [
+        "mem-northwind-fin-001"
+      ],
+      "mrr_at_5": 0.0,
+      "ndcg_at_5": 0.0,
+      "query": "In the finance project, what are Northwind's payment terms?",
+      "query_id": "q-iso-001",
+      "ranked_ids": [
+        "mem-meridian-fin-001"
+      ],
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "scores": [
+        0.4019
+      ]
+    },
+    {
+      "category": "cross_project_isolation",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.5,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.8262346571285599,
+      "query": "In the logistics project, what lead time does Northwind freight need?",
+      "query_id": "q-iso-002",
+      "ranked_ids": [
+        "mem-northwind-log-001",
+        "mem-meridian-log-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.4927,
+        0.4162
+      ]
+    },
+    {
+      "category": "cross_project_isolation",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.8262346571285599,
+      "query": "For payments, what is Meridian's fee?",
+      "query_id": "q-iso-003",
+      "ranked_ids": [
+        "mem-meridian-fin-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5116
+      ]
+    },
+    {
+      "category": "cross_project_isolation",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 0.8262346571285599,
+      "query": "For overseas shipments, which Meridian do we book?",
+      "query_id": "q-iso-004",
+      "ranked_ids": [
+        "mem-meridian-log-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5966
+      ]
+    },
+    {
+      "category": "cross_project_isolation",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "Northwind invoice approval limit in the finance project?",
+      "query_id": "q-iso-005",
+      "ranked_ids": [
+        "mem-northwind-fin-001",
+        "mem-invoice-001"
+      ],
+      "recall_at_1": 0.5,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5156,
+        0.4247
+      ]
+    },
+    {
+      "category": "cross_project_isolation",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.5,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "In the logistics project, which vendor processes damaged parcel returns?",
+      "query_id": "q-iso-006",
+      "ranked_ids": [
+        "mem-orchid-001",
+        "mem-meridian-log-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.581,
+        0.4047
+      ]
+    },
+    {
+      "category": "snapshot_hydration_equivalence",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What is the badge deactivation policy after an employee leaves?",
+      "query_id": "q-snap-001",
+      "ranked_ids": [
+        "mem-badge-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5418
+      ]
+    },
+    {
+      "category": "snapshot_hydration_equivalence",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "What is the nightly backup retention?",
+      "query_id": "q-snap-002",
+      "ranked_ids": [
+        "mem-backup-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5148
+      ]
+    },
+    {
+      "category": "snapshot_hydration_equivalence",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [
+        "mem-mentor-001"
+      ],
+      "mrr_at_5": 0.0,
+      "ndcg_at_5": 0.0,
+      "query": "How do new engineers get a mentor?",
+      "query_id": "q-snap-003",
+      "ranked_ids": [],
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "scores": []
+    },
+    {
+      "category": "snapshot_hydration_equivalence",
+      "duplicate_slot_rate": null,
+      "false_positive_rate": null,
+      "missed_relevant": [
+        "mem-outage-001"
+      ],
+      "mrr_at_5": 0.0,
+      "ndcg_at_5": 0.0,
+      "query": "What happens during a service outage?",
+      "query_id": "q-snap-004",
+      "ranked_ids": [],
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "scores": []
+    },
+    {
+      "category": "snapshot_hydration_equivalence",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "Where do employees submit travel costs?",
+      "query_id": "q-snap-005",
+      "ranked_ids": [
+        "mem-expensetool-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5289
+      ]
+    },
+    {
+      "category": "snapshot_hydration_equivalence",
+      "duplicate_slot_rate": 0.0,
+      "false_positive_rate": 0.0,
+      "missed_relevant": [],
+      "mrr_at_5": 1.0,
+      "ndcg_at_5": 1.0,
+      "query": "When is the morning team sync?",
+      "query_id": "q-snap-006",
+      "ranked_ids": [
+        "mem-standup-001"
+      ],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "scores": [
+        0.5321
+      ]
+    }
+  ],
+  "recommendation": {
+    "action": "pursue_semantic_embedding_boundary_78",
+    "measured": {
+      "clone_equivalence_rate": 1.0,
+      "duplicate_slot_rate": 0.11274509803921567,
+      "exact_lexical_recall_at_5": 1.0,
+      "near_duplicate_diversity_duplicate_slot_rate": 0.6388888888888888,
+      "semantic_recall_at_5": 0.3333333333333333
+    },
+    "rationale": "semantic Recall@5 (0.333) trails exact-lexical Recall@5 (1.000) by 66.7 percentage points (threshold: 15pp) \u2014 the deterministic hash embedder cannot bridge wording differences; pursue #78."
+  },
+  "runtime": {
+    "embedding_dim": 256,
+    "embedding_model": "local-m2v/potion-base-8M/rev:v1/norm:l2/pp:m2v-static-v1",
+    "fusion": "cosine 0.6 / fts5_bm25 0.2 / importance 0.2",
+    "min_score": 0.4,
+    "namespace_scope": "per-query fixture namespace",
+    "repeat": 1,
+    "reranker": "none",
+    "top_k": 5
+  },
+  "schema_version": 1
+}

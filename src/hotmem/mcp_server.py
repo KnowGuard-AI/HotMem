@@ -55,6 +55,10 @@ from hotmem.trace import Timer, get_tracer
 
 _trace = get_tracer("mcp_server")
 
+_READ_ONLY_BLOCKED_TOOLS = frozenset(
+    {"add_memory", "snapshot", "hydrate", "handoff_prepare", "handoff_hydrate"}
+)
+
 _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "add_memory": {
         "type": "object",
@@ -79,6 +83,8 @@ _TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "query": {"type": "string"},
             "top_k": {"type": "integer", "minimum": 1, "maximum": 100},
             "max_chars": {"type": "integer", "minimum": 1},
+            "namespace": {"type": "string"},
+            "min_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         },
         "required": ["query"],
     },
@@ -175,6 +181,7 @@ def create_server(
     harness_id: str | None = None,
     source: str | None = None,
     namespace: str | None = None,
+    read_only: bool = False,
 ) -> Server:
     """Create and configure the HotMem MCP server.
 
@@ -206,12 +213,15 @@ def create_server(
     @server.list_tools()
     async def list_tools() -> list[Tool]:
         """Declare the same additive tool contract in embedded and relay modes."""
-        return _build_tool_list()
+        return _build_tool_list(read_only=read_only)
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
         """Dispatch an MCP tool call to the appropriate HotMem operation."""
         arguments = arguments or {}
+
+        if read_only and name in _READ_ONLY_BLOCKED_TOOLS:
+            return _error(f"MCP server is read-only; {name} is disabled")
 
         try:
             if name == "add_memory":
@@ -255,32 +265,42 @@ async def run(
     *,
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
+    read_only: bool = False,
 ) -> None:
     """Start the HotMem MCP server on stdio transport (embedded compatibility mode)."""
     db_path = str(db_path)
     swap_path = str(swap_path) if swap_path else None
 
-    # Embedded mode still owns exactly one runtime: this acquires the
-    # exclusive store lock, runs the same startup hydration, and is the only
-    # writer for the life of the stdio session (#109).
-    runtime = HotMemRuntime(
-        db_path=db_path,
-        swap_path=swap_path,
-        embedder=embedder,
-        reranker=reranker,
-    ).open()
     state = _ServerState()
-    state.db = runtime.db  # type: ignore[assignment]
     state.db_path = db_path
     state.swap_path = swap_path
-    state.start_time = runtime.start_time
-    state.embedder = runtime.embedder
-    state.reranker = runtime.reranker
+    if read_only:
+        if not Path(db_path).is_file():
+            raise ValueError(f"read-only MCP requires an existing database file: {db_path}")
+        state.db = MemoryDB(db_path, read_only=True)
+        state.start_time = time.time()
+        state.embedder = embedder if embedder is not None else DEFAULT_EMBEDDER
+        state.reranker = reranker
+        close_store = state.db.close
+    else:
+        # Normal embedded mode owns one runtime, takes the exclusive store
+        # lock, and performs configured startup hydration (#109).
+        runtime = HotMemRuntime(
+            db_path=db_path,
+            swap_path=swap_path,
+            embedder=embedder,
+            reranker=reranker,
+        ).open()
+        state.db = runtime.db  # type: ignore[assignment]
+        state.start_time = runtime.start_time
+        state.embedder = runtime.embedder
+        state.reranker = runtime.reranker
+        close_store = runtime.close
 
     _trace.info(
         "startup",
         "mcp server ready",
-        detail={"db_path": db_path, "swap_path": swap_path},
+        detail={"db_path": db_path, "swap_path": swap_path, "read_only": read_only},
     )
 
     server = create_server(
@@ -289,6 +309,7 @@ async def run(
         embedder=embedder,
         reranker=reranker,
         state=state,
+        read_only=read_only,
     )
 
     try:
@@ -299,13 +320,13 @@ async def run(
                 server.create_initialization_options(),
             )
     finally:
-        runtime.close()
+        close_store()
         _trace.info("shutdown", "mcp server closed", detail={"db_path": db_path})
 
 
-def _build_tool_list() -> list[Tool]:
+def _build_tool_list(*, read_only: bool = False) -> list[Tool]:
     """Return the canonical MCP tool list shared by embedded and daemon relay servers."""
-    return [
+    tools = [
         Tool(
             name="add_memory",
             description="Store a fact in HotMem memory.",
@@ -368,6 +389,9 @@ def _build_tool_list() -> list[Tool]:
             inputSchema=_TOOL_SCHEMAS["handoff_hydrate"],
         ),
     ]
+    if read_only:
+        return [tool for tool in tools if tool.name not in _READ_ONLY_BLOCKED_TOOLS]
+    return tools
 
 
 def _format_http_error(err: Exception) -> str:
@@ -405,6 +429,7 @@ def create_relay_server(
     namespace: str | None = None,
     expected_store_id: str | None = None,
     client: Any | None = None,
+    read_only: bool = False,
 ) -> tuple[Server, Any]:
     """Create a thin MCP stdio-to-daemon relay server (#109, #111).
 
@@ -431,11 +456,13 @@ def create_relay_server(
 
     @server.list_tools()
     async def list_tools() -> list[Tool]:
-        return _build_tool_list()
+        return _build_tool_list(read_only=read_only)
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
         arguments = arguments or {}
+        if read_only and name in _READ_ONLY_BLOCKED_TOOLS:
+            return _error(f"MCP server is read-only; {name} is disabled")
         try:
             if name == "add_memory":
                 identifier = str(arguments["identifier"])
@@ -521,11 +548,20 @@ def create_relay_server(
                 query = str(arguments["query"])
                 top_k = int(arguments.get("top_k", 5))
                 max_chars = arguments.get("max_chars")
+                requested_namespace = arguments.get("namespace")
+                min_score = arguments.get("min_score")
                 if max_chars is not None:
                     max_chars = int(max_chars)
                 payload: dict[str, Any] = {"query": query, "top_k": top_k}
                 if max_chars is not None:
                     payload["max_chars"] = max_chars
+                effective_namespace = (
+                    requested_namespace if requested_namespace is not None else namespace
+                )
+                if effective_namespace is not None:
+                    payload["namespace"] = effective_namespace
+                if min_score is not None:
+                    payload["min_score"] = min_score
                 resp = await owned_client._client.post("/v1/search", json=payload)
                 resp.raise_for_status()
                 return _ok(resp.json())
@@ -619,6 +655,7 @@ async def run_relay(
     source: str | None = None,
     namespace: str | None = None,
     expected_store_id: str | None = None,
+    read_only: bool = False,
 ) -> None:
     """Start the thin MCP stdio relay connected to a running HotMem daemon."""
     server, client = create_relay_server(
@@ -629,11 +666,12 @@ async def run_relay(
         source=source,
         namespace=namespace,
         expected_store_id=expected_store_id,
+        read_only=read_only,
     )
     _trace.info(
         "startup",
         "mcp relay ready",
-        detail={"url": base_url, "expected_store_id": expected_store_id},
+        detail={"url": base_url, "expected_store_id": expected_store_id, "read_only": read_only},
     )
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -857,6 +895,26 @@ def _handle_search_memories(state: _ServerState, arguments: dict[str, Any]) -> C
     max_chars = arguments.get("max_chars")
     if max_chars is not None:
         max_chars = int(max_chars)
+    requested_namespace = arguments.get("namespace")
+    if requested_namespace is not None and not isinstance(requested_namespace, str):
+        raise ValueError("namespace must be a string")
+    configured_namespace = getattr(state, "namespace", "") or None
+    namespace_guard = None
+    if requested_namespace is not None and configured_namespace is not None:
+
+        def _configured_scope(row: dict[str, Any]) -> bool:
+            return (row.get("namespace") or "") == configured_namespace
+
+        namespace_guard = _configured_scope
+    scope_namespace = (
+        requested_namespace if requested_namespace is not None else configured_namespace
+    )
+    min_score = arguments.get("min_score")
+    if min_score is not None:
+        if isinstance(min_score, bool) or not isinstance(min_score, (int, float)):
+            raise ValueError("min_score must be a number between 0 and 1")
+        if not 0.0 <= min_score <= 1.0:
+            raise ValueError("min_score must be between 0 and 1")
 
     with Timer() as t:
         messages = search_memories(
@@ -866,6 +924,9 @@ def _handle_search_memories(state: _ServerState, arguments: dict[str, Any]) -> C
             max_chars=max_chars,
             embedder=state.embedder,
             reranker=state.reranker,
+            namespace=scope_namespace,
+            min_score=min_score,
+            row_filter=namespace_guard,
         )
 
     payload = {

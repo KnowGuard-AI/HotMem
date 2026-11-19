@@ -123,10 +123,13 @@ def test_mcp_add_memory_argument_shape_locked(tmp_path):
 def test_mcp_search_memory_argument_shape_locked(tmp_path):
     tools = _tools(tmp_path / "m.sqlite")
     props = tools["search_memories"]["inputSchema"]["properties"]
-    assert set(props) == {"query", "top_k", "max_chars"}
+    assert set(props) == {"query", "top_k", "max_chars", "namespace", "min_score"}
     assert props["query"] == {"type": "string"}
     assert props["top_k"] == {"type": "integer", "minimum": 1, "maximum": 100}
     assert props["max_chars"] == {"type": "integer", "minimum": 1}
+    assert props["namespace"] == {"type": "string"}
+    assert props["min_score"] == {"type": "number", "minimum": 0.0, "maximum": 1.0}
+    assert tools["search_memories"]["inputSchema"]["required"] == ["query"]
 
 
 def test_mcp_list_memory_argument_shape_locked(tmp_path):

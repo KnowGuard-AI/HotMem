@@ -438,8 +438,13 @@ def test_config_resolution_rejects_unknown_with_choices():
         resolve_embedder_from_config("openai-ada")
 
 
-def test_config_resolution_semantic_requires_extra_or_model_path():
+def test_config_resolution_semantic_requires_extra_or_model_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
     from hotmem.embed import resolve_embedder_from_config
+
+    # Keep this contract test independent of any model provisioned by the user.
+    monkeypatch.setenv("HOTMEM_MODELS_DIR", str(tmp_path / "empty-models"))
 
     # Without the extra: actionable install hint. With it installed but no
     # provisioned model path: an equally actionable no-download refusal.
@@ -492,6 +497,32 @@ def test_server_default_embedder_is_hash(tmp_path: Path):
         assert rows[0]["embedding_model"] == "hotmem-hash-v1"
 
 
+def test_hash_default_notice_only_for_implicit_selection(monkeypatch: pytest.MonkeyPatch):
+    """The startup hint explains the default without repeating an explicit choice."""
+    import hotmem.cli as cli
+    from hotmem.embed import HashEmbedder
+
+    messages: list[str] = []
+
+    def capture(_op, message, **_kwargs):
+        messages.append(message)
+
+    monkeypatch.setattr(cli._trace, "info", capture)
+    monkeypatch.delenv("HOTMEM_EMBEDDER", raising=False)
+
+    cli._note_hash_default(HashEmbedder(), None)
+    assert len(messages) == 1
+    assert "hotmem model fetch" in messages[0]
+
+    messages.clear()
+    cli._note_hash_default(HashEmbedder(), "hash")
+    assert messages == []
+
+    monkeypatch.setenv("HOTMEM_EMBEDDER", "hash")
+    cli._note_hash_default(HashEmbedder(), None)
+    assert messages == []
+
+
 def test_mcp_embedder_injection(tmp_path: Path):
     """create_server(embedder=...) owns the MCP add/search/health tools."""
     pytest.importorskip("mcp", reason="requires the optional [mcp] extra")
@@ -510,7 +541,7 @@ def test_mcp_embedder_injection(tmp_path: Path):
     state = mcp_server._state
     db = MemoryDB(tmp_path / "mcp.sqlite")
     saved = {
-        field: getattr(state, field)
+        field: getattr(state, field, None)
         for field in ("db", "db_path", "swap_path", "start_time", "embedder")
     }
     try:
@@ -539,12 +570,13 @@ def test_mcp_embedder_injection(tmp_path: Path):
         db.close()
 
 
-def test_cli_embedder_flags_fail_fast(tmp_path: Path):
+def test_cli_embedder_flags_fail_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Invalid embedder selections exit before the server starts."""
     from click.testing import CliRunner
 
     from hotmem.cli import main
 
+    monkeypatch.setenv("HOTMEM_MODELS_DIR", str(tmp_path / "empty-models"))
     runner = CliRunner()
     # Unknown choice is rejected by the CLI itself.
     result = runner.invoke(

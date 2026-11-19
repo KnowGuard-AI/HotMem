@@ -36,6 +36,16 @@ def test_add_and_search(mock_client: HotMemClient):
     assert "score" in memories[0]
 
 
+def test_search_namespace_and_min_score_round_trip(mock_client: HotMemClient):
+    mock_client.add("finance", "Meridian payment fee is two percent", namespace="finance")
+    mock_client.add("logistics", "Meridian payment fee is two percent", namespace="logistics")
+
+    memories = mock_client.search("Meridian payment fee", namespace="finance", min_score=0.0)
+
+    assert len(memories) == 1
+    assert memories[0]["content"] == "Meridian payment fee is two percent"
+
+
 def test_add_with_ttl(mock_client: HotMemClient):
     result = mock_client.add("vendor_a", "temporary client fact", ttl_seconds=3600)
     assert "memory_id" in result
@@ -107,6 +117,7 @@ def test_async_client_methods():
             assert await c.health() == {"status": "ok", "memory_count": 0}
             assert await c.add("vendor", "async fact", ttl_seconds=60) == {"memory_id": "m1"}
             assert (await c.search("fact", top_k=2, max_chars=100))[0]["score"] == 1.0
+            await c.search("fact", namespace="finance", min_score=0.4)
             assert await c.hydrate("swap.jsonl") == {"loaded": 1, "skipped_dupes": 0}
             assert await c.snapshot("swap.jsonl") == {"exported": 1, "path": "swap.jsonl"}
 
@@ -129,6 +140,11 @@ def test_async_client_methods():
             },
         ),
         ("POST", "/v1/search", {"query": "fact", "top_k": 2, "max_chars": 100}),
+        (
+            "POST",
+            "/v1/search",
+            {"query": "fact", "top_k": 5, "namespace": "finance", "min_score": 0.4},
+        ),
         ("POST", "/v1/hydrate", {"file": "swap.jsonl"}),
         ("POST", "/v1/snapshot", {"file": "swap.jsonl"}),
     ]
